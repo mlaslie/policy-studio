@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Policy Studio: API on :${PORT:-8090}, plus the built UI from frontend/dist if present.
+# UI development: cd frontend && npm run dev   (Vite :5174, proxies /api to :8090).
+set -euo pipefail
+cd "$(dirname "$0")"
+if [[ ! -f frontend/dist/index.html ]]; then
+  echo "studio-app: UI not built (cd frontend && npm install && npm run build); serving the API only." >&2
+fi
+exec uv run --project backend uvicorn policy_studio.app:app --app-dir backend \
+  --host "${HOST:-127.0.0.1}" --port "${PORT:-8090}" "$@"

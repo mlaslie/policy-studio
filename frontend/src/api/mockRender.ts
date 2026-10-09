@@ -1,0 +1,381 @@
+// Client-side stand-in for POST /render and POST /diff, used only by the mock layer.
+// It mirrors what the backend generates closely enough to exercise the UI end to end.
+import type { Binding, Ctx, DiffItem, DiffResult, Intent, Outputs, RenderItem, RenderResult } from "./types";
+import type { World } from "./mockData";
+import { MOCK_NUMBER } from "./mockData";
+import { ROLE, conditionFor, intentEnglish, shortName } from "../lib/policy";
+
+const IAP = "https://iap.googleapis.com/v1";
+
+const TF_TYPE = {
+  agent: ["google_iap_agent_registry_agent_iam_member", "agent_id", "agent"],
+  mcp_server: ["google_iap_agent_registry_mcp_server_iam_member", "mcp_server_id", "mcp-server"],
+  endpoint: ["google_iap_agent_registry_endpoint_iam_member", "endpoint_id", "endpoint"],
+} as const;
+const REG_PATH = { agent: "agents", mcp_server: "mcpServers", endpoint: "endpoints" } as const;
+
+const ident = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 60) || "item";
+const hcl = (s: string) => JSON.stringify(s).replace(/\$\{/g, "$${");
+const sq = (s: string) => `'${s.replace(/'/g, `'"'"'`)}'`;
+
+function iapResource(ctx: Ctx, i: Intent) {
+  const d = i.destination!;
+  return `projects/${MOCK_NUMBER}/locations/${ctx.region}/iap_web/agentRegistry/${REG_PATH[d.kind]}/${d.id}`;
+}
+
+function grantOutputs(ctx: Ctx, i: Intent, revoke: boolean): { outputs: Outputs; warnings: string[]; notes: string[] } {
+  const d = i.destination!;
+  const member = i.source!.principal;
+  const cond = revoke ? null : conditionFor(i.access);
+  const [tfType, tfKey, gFlag] = TF_TYPE[d.kind];
+  const name = ident(`${i.source!.label}_${d.label}`);
+  const res = iapResource(ctx, i);
+  const warnings: string[] = [];
+  const notes: string[] = [];
+  if (cond && i.access?.mode !== "custom") notes.push("The '' in the condition keeps MCP setup calls (initialize, tools/list) working: they carry no tool name.");
+  if (i.access?.mode === "read_only_hint") notes.push("Tools whose server marks them readOnlyHint=true are allowed, including tools added later.");
+  if (i.source?.type === "project_agents") notes.push("principalSet:// covers every Agent Runtime agent in the project, current and future.");
+
+  // ---------- Terraform
+  let terraform: string;
+  if (revoke) {
+    terraform = [
+      `# Revoke: ${intentEnglish(i)}`,
+      `# If Terraform manages this grant, delete its "${tfType}" block and run terraform apply.`,
+      `# If it was created outside Terraform, there is nothing to declare: use the gcloud or REST tab.`,
+      `# To stop Terraform from managing it without deleting it:`,
+      `#   terraform state rm ${tfType}.${name}`,
+    ].join("\n");
+  } else {
+    const body = [
+      `resource "${tfType}" "${name}" {`,
+      ...([["project", "var.project_id"], ["location", "var.region"], [tfKey, hcl(d.id)], ["role", `"${ROLE}"`], ["member", hcl(member)]] as const).map(
+        ([k, v]) => `  ${k.padEnd(tfKey.length)} = ${v}`,
+      ),
+    ];
+    if (cond) body.push(`  condition {`, `    title      = ${hcl(cond.title)}`, `    expression = ${hcl(cond.expression)}`, `  }`);
+    body.push("}");
+    terraform = `# ${intentEnglish(i)}\n` + body.join("\n");
+  }
+
+  // ---------- gcloud
+  const flags = [
+    `  --resource-type=agent-registry \\`,
+    `  --${gFlag}=${d.id} \\`,
+    `  --region=${ctx.region} \\`,
+    `  --project=${ctx.project} \\`,
+    `  --member=${sq(member)} \\`,
+    `  --role=${ROLE}`,
+  ];
+  let gcloud: string;
+  if (revoke) {
+    gcloud = [`# ${intentEnglish(i)}`, `gcloud iap web remove-iam-policy-binding \\`, ...flags.slice(0, -1), `  --role=${ROLE} \\`, `  --all`].join("\n");
+  } else if (cond) {
+    gcloud = [
+      `# ${intentEnglish(i)}`,
+      `# The expression contains commas, so it goes in a file (--condition= would split on them).`,
+      `cat > condition.yaml <<'EOF'`,
+      `title: ${JSON.stringify(cond.title)}`,
+      `expression: ${JSON.stringify(cond.expression)}`,
+      `EOF`,
+      `gcloud iap web add-iam-policy-binding \\`,
+      ...flags.slice(0, -1),
+      `  --role=${ROLE} \\`,
+      `  --condition-from-file=condition.yaml`,
+    ].join("\n");
+  } else {
+    gcloud = [`# ${intentEnglish(i)}`, `gcloud iap web add-iam-policy-binding \\`, ...flags, ``].join("\n").trimEnd() + " \\\n  --condition=None";
+  }
+
+  // ---------- REST
+  const bindingJson = JSON.stringify({ role: ROLE, members: [member], ...(cond ? { condition: cond } : {}) });
+  const rest = [
+    `# ${intentEnglish(i)}`,
+    `# IAM is read-modify-write: read the policy (with its etag), change it, write it back.`,
+    `RES="${res}"`,
+    `TOKEN="$(gcloud auth print-access-token)"`,
+    `curl -sS -X POST "${IAP}/$RES:getIamPolicy" \\`,
+    `  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \\`,
+    `  -d '{"options":{"requestedPolicyVersion":3}}' > policy.json`,
+    revoke
+      ? `jq --arg m ${sq(member)} '.bindings |= map(if .role=="${ROLE}" then .members -= [$m] else . end | select(.members|length>0)) | .version=3' policy.json > new.json`
+      : `jq --argjson b ${sq(bindingJson)} '.bindings += [$b] | .version=3' policy.json > new.json`,
+    `curl -sS -X POST "${IAP}/$RES:setIamPolicy" \\`,
+    `  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \\`,
+    `  -d "{\\"policy\\": $(cat new.json)}"`,
+  ].join("\n");
+
+  // ---------- Python
+  const python = [
+    `# ${intentEnglish(i)}`,
+    `# pip install google-cloud-iap`,
+    `from google.cloud import iap_v1`,
+    `from google.iam.v1 import iam_policy_pb2, options_pb2, policy_pb2`,
+    `from google.type import expr_pb2`,
+    ``,
+    `client = iap_v1.IdentityAwareProxyAdminServiceClient()`,
+    `resource = ${JSON.stringify(res)}`,
+    `policy = client.get_iam_policy(request=iam_policy_pb2.GetIamPolicyRequest(`,
+    `    resource=resource, options=options_pb2.GetPolicyOptions(requested_policy_version=3)))`,
+    `policy.version = 3`,
+    ...(revoke
+      ? [
+          `for b in policy.bindings:`,
+          `    if b.role == ${JSON.stringify(ROLE)} and ${JSON.stringify(member)} in b.members:`,
+          `        b.members.remove(${JSON.stringify(member)})`,
+          `keep = [b for b in policy.bindings if b.members]`,
+          `del policy.bindings[:]`,
+          `policy.bindings.extend(keep)`,
+        ]
+      : [
+          `policy.bindings.append(policy_pb2.Binding(`,
+          `    role=${JSON.stringify(ROLE)},`,
+          `    members=[${JSON.stringify(member)}],`,
+          ...(cond ? [`    condition=expr_pb2.Expr(`, `        title=${JSON.stringify(cond.title)},`, `        expression=${JSON.stringify(cond.expression)}),`] : []),
+          `))`,
+        ]),
+    `client.set_iam_policy(request=iam_policy_pb2.SetIamPolicyRequest(resource=resource, policy=policy))`,
+  ].join("\n");
+
+  return { outputs: { terraform, gcloud, rest, python }, warnings, notes };
+}
+
+function bindOutputs(ctx: Ctx, w: World, i: Intent, unbind: boolean): { outputs: Outputs; warnings: string[]; notes: string[] } {
+  const engine = w.inventory.engines.find((e) => e.name === i.engine);
+  const engName = i.engine ?? "projects/PROJECT_NUMBER/locations/REGION/reasoningEngines/ENGINE_ID";
+  const dir = i.gateway!.direction;
+  const current = { ...(engine?.gateways ?? {}) };
+  if (unbind) delete current[dir];
+  else current[dir] = i.gateway!.name;
+  const cfg: Record<string, { agentGateway: string }> = {};
+  if (current.egress) cfg.agentToAnywhereConfig = { agentGateway: current.egress };
+  if (current.ingress) cfg.clientToAgentConfig = { agentGateway: current.ingress };
+  const body = JSON.stringify({ spec: { deploymentSpec: { agentGatewayConfig: cfg } } });
+  const url = `https://${ctx.region}-aiplatform.googleapis.com/v1/${engName}?updateMask=spec.deploymentSpec.agentGatewayConfig`;
+  const label = engine?.display_name ?? i.engine_label ?? shortName(engName);
+  const warnings: string[] = [];
+  if (engine && !engine.bindable) warnings.push(`${label} was created before 2026-04-29 and can't be bound to a gateway. Redeploy it to get a bindable engine.`);
+  if (dir === "ingress" && !ctx.ge_app) warnings.push("Gemini Enterprise app ID is not set; registering the agent with your app uses GE_APP_ID.");
+  const notes = ["The PATCH replaces the whole agentGatewayConfig, so the other direction is re-sent unchanged.", "The engine redeploys: it takes a few minutes before traffic uses the new path."];
+  const curl = [
+    `curl -sS --fail-with-body -X PATCH \\`,
+    `  "${url}" \\`,
+    `  -H "Authorization: Bearer $(gcloud auth print-access-token)" \\`,
+    `  -H "Content-Type: application/json" \\`,
+    `  -d ${sq(body)}`,
+  ];
+  const ge =
+    dir === "ingress" && !unbind
+      ? [
+          ``,
+          `# Then register the agent with your Gemini Enterprise app (${ctx.ge_location || "global"}):`,
+          `agents-cli publish gemini-enterprise --app=${ctx.ge_app || "GE_APP_ID"} --location=${ctx.ge_location || "global"} \\`,
+          `  --agent-engine=${engName}`,
+        ]
+      : [];
+  const terraform = [
+    `# ${intentEnglish(i)}`,
+    `# No Terraform resource binds an existing Agent Runtime engine to a gateway, so this runs the PATCH.`,
+    `resource "terraform_data" "${ident(`${unbind ? "unbind" : "bind"}_${label}_${dir}`)}" {`,
+    `  input = {`,
+    `    url  = "https://\${var.region}-aiplatform.googleapis.com/v1/${engName}?updateMask=spec.deploymentSpec.agentGatewayConfig"`,
+    `    body = ${hcl(body)}`,
+    `  }`,
+    `  provisioner "local-exec" {`,
+    `    command = <<-EOT`,
+    `      curl -sS --fail-with-body -X PATCH "$URL" \\`,
+    `        -H "Authorization: Bearer $(gcloud auth print-access-token)" \\`,
+    `        -H "Content-Type: application/json" -d "$BODY"`,
+    `    EOT`,
+    `    environment = { URL = self.input.url, BODY = self.input.body }`,
+    `  }`,
+    `}`,
+  ].join("\n");
+  const gcloud = [`# ${intentEnglish(i)}`, `# There is no gcloud command for this yet; the REST PATCH below is the supported way.`, ...curl, ...ge].join("\n");
+  const rest = [`# ${intentEnglish(i)}`, ...curl, ...ge].join("\n");
+  const python = [
+    `# ${intentEnglish(i)}`,
+    `# The client library has no method for agentGatewayConfig yet, so this PATCHes with an AuthorizedSession.`,
+    `import google.auth`,
+    `from google.auth.transport.requests import AuthorizedSession`,
+    ``,
+    `creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])`,
+    `session = AuthorizedSession(creds)`,
+    `r = session.patch(`,
+    `    ${JSON.stringify(url)},`,
+    `    json=${body},`,
+    `)`,
+    `r.raise_for_status()`,
+    `print("operation:", r.json()["name"])`,
+  ].join("\n");
+  return { outputs: { terraform, gcloud, rest, python }, warnings, notes };
+}
+
+function maOutputs(ctx: Ctx, w: World, i: Intent, off: boolean): { outputs: Outputs; warnings: string[]; notes: string[] } {
+  const gw = i.gateway!;
+  const gid = shortName(gw.name);
+  const gp = gw.name.split("/")[1] ?? ctx.project;
+  const pid = `${gid}-ma-policy`;
+  const ext = w.modelArmor.gateways.find((g) => g.extension)?.extension ?? `projects/${gp}/locations/${ctx.region}/authzExtensions/ma-authz`;
+  const notes = ["Creating or deleting an authz policy is a long-running operation (about 4 minutes).", "Egress screening covers MCP traffic, not A2A."];
+  const warnings: string[] = [];
+  if (gw.direction === "ingress") notes.push("An ingress gateway allows at most one CONTENT_AUTHZ policy.");
+  if (!w.modelArmor.gateways.some((g) => g.extension)) warnings.push("No Model Armor authz extension exists yet; create one first (P4) or replace ma-authz.");
+  const yaml = [
+    `name: ${pid}`,
+    `target:`,
+    `  resources:`,
+    `  - ${gw.name}`,
+    `policyProfile: CONTENT_AUTHZ`,
+    `action: CUSTOM`,
+    `customProvider:`,
+    `  authzExtension:`,
+    `    resources:`,
+    `    - ${ext}`,
+  ];
+  const api = `https://networksecurity.googleapis.com/v1/projects/${gp}/locations/${ctx.region}/authzPolicies`;
+  const body = JSON.stringify({ target: { resources: [gw.name] }, policyProfile: "CONTENT_AUTHZ", action: "CUSTOM", customProvider: { authzExtension: { resources: [ext] } } });
+  if (off) {
+    return {
+      notes,
+      warnings,
+      outputs: {
+        terraform: `# ${intentEnglish(i)}\n# Delete the google_network_security_authz_policy block for ${pid} and run terraform apply.\n# Not managed by Terraform? Use the gcloud tab.`,
+        gcloud: `# ${intentEnglish(i)}\ngcloud network-security authz-policies delete ${pid} \\\n  --location=${ctx.region} --project=${gp} --quiet`,
+        rest: `# ${intentEnglish(i)}\ncurl -sS -X DELETE "${api}/${pid}" \\\n  -H "Authorization: Bearer $(gcloud auth print-access-token)"`,
+        python: `# ${intentEnglish(i)}\n# pip install google-cloud-network-security\nfrom google.cloud import network_security_v1\n\nclient = network_security_v1.NetworkSecurityClient()\nop = client.delete_authz_policy(name=${JSON.stringify(`projects/${gp}/locations/${ctx.region}/authzPolicies/${pid}`)})\nop.result(timeout=900)`,
+      },
+    };
+  }
+  return {
+    notes,
+    warnings,
+    outputs: {
+      terraform: [
+        `# ${intentEnglish(i)}`,
+        `resource "google_network_security_authz_policy" "${ident(pid)}" {`,
+        `  project         = ${hcl(gp)}`,
+        `  location        = var.region`,
+        `  name            = ${hcl(pid)}`,
+        `  policy_profile  = "CONTENT_AUTHZ"`,
+        `  action          = "CUSTOM"`,
+        `  target {`,
+        `    resources = [${hcl(gw.name)}]`,
+        `  }`,
+        `  custom_provider {`,
+        `    authz_extension {`,
+        `      resources = [${hcl(ext)}]`,
+        `    }`,
+        `  }`,
+        `}`,
+      ].join("\n"),
+      gcloud: [`# ${intentEnglish(i)}`, `# authz-policies has no flag-based create: import a YAML file.`, `cat > ma-policy.yaml <<'EOF'`, ...yaml, `EOF`, `gcloud network-security authz-policies import ${pid} \\`, `  --source=ma-policy.yaml --location=${ctx.region} --project=${gp}`].join("\n"),
+      rest: [`# ${intentEnglish(i)}`, `curl -sS -X POST "${api}?authzPolicyId=${pid}" \\`, `  -H "Authorization: Bearer $(gcloud auth print-access-token)" \\`, `  -H "Content-Type: application/json" \\`, `  -d ${sq(body)}`].join("\n"),
+      python: [
+        `# ${intentEnglish(i)}`,
+        `# pip install google-cloud-network-security`,
+        `from google.cloud import network_security_v1 as ns`,
+        ``,
+        `client = ns.NetworkSecurityClient()`,
+        `policy = ns.AuthzPolicy(`,
+        `    target=ns.AuthzPolicy.Target(resources=[${JSON.stringify(gw.name)}]),`,
+        `    policy_profile=ns.AuthzPolicy.PolicyProfile.CONTENT_AUTHZ,`,
+        `    action=ns.AuthzPolicy.AuthzAction.CUSTOM,`,
+        `    custom_provider=ns.AuthzPolicy.CustomProvider(`,
+        `        authz_extension=ns.AuthzPolicy.CustomProvider.AuthzExtension(resources=[${JSON.stringify(ext)}])),`,
+        `)`,
+        `op = client.create_authz_policy(parent=${JSON.stringify(`projects/${gp}/locations/${ctx.region}`)},`,
+        `                                authz_policy=policy, authz_policy_id=${JSON.stringify(pid)})`,
+        `op.result(timeout=900)`,
+      ].join("\n"),
+    },
+  };
+}
+
+export function mockRender(ctx: Ctx, w: World, intents: Intent[]): RenderResult {
+  const items: RenderItem[] = intents.map((i) => {
+    let r: { outputs: Outputs; warnings: string[]; notes: string[] };
+    let anatomy: RenderItem["anatomy"];
+    if (i.kind === "grant" || i.kind === "revoke") {
+      if (!i.source || !i.destination) {
+        return { intent_id: i.id, english: intentEnglish(i), anatomy: { resource: "", role: ROLE, member: "", notes: [] }, outputs: { terraform: "", gcloud: "", rest: "", python: "" }, warnings: ["Pick a source and a destination first."] };
+      }
+      r = grantOutputs(ctx, i, i.kind === "revoke");
+      const cond = i.kind === "grant" ? conditionFor(i.access) : null;
+      anatomy = { resource: iapResource(ctx, i), role: ROLE, member: i.source.principal, condition: cond?.expression ?? null, notes: r.notes };
+      const src = w.inventory.engines.find((e) => e.name === i.source?.engine);
+      if (i.kind === "grant" && src && !src.gateways.egress) r.warnings.push(`${src.display_name} is not bound to an egress gateway, so this grant is never checked: its calls go out directly.`);
+      if (i.kind === "grant" && i.access?.mode === "all" && i.destination.kind === "mcp_server") {
+        const s = w.inventory.mcp_servers.find((m) => m.id === i.destination!.id);
+        const destructive = s?.tools.filter((t) => t.destructive).map((t) => t.name) ?? [];
+        if (destructive.length) r.warnings.push(`Full access includes destructive tools: ${destructive.join(", ")}.`);
+      }
+    } else if (i.kind === "bind_gateway" || i.kind === "unbind_gateway") {
+      r = bindOutputs(ctx, w, i, i.kind === "unbind_gateway");
+      anatomy = { resource: i.engine ?? "", role: "", member: "", condition: null, notes: r.notes };
+    } else {
+      r = maOutputs(ctx, w, i, i.kind === "model_armor_off");
+      anatomy = { resource: i.gateway?.name ?? "", role: "", member: "", condition: null, notes: r.notes };
+    }
+    return { intent_id: i.id, english: intentEnglish(i), anatomy, outputs: r.outputs, warnings: r.warnings };
+  });
+
+  const tf = items.map((x) => x.outputs.terraform).filter(Boolean).join("\n\n");
+  const header = (title: string) => `#!/usr/bin/env bash\n# ${title}\n# Generated by Policy Studio for project ${ctx.project}, region ${ctx.region}.\nset -euo pipefail\n`;
+  return {
+    items,
+    bundle: {
+      terraform: {
+        "main.tf": `terraform {\n  required_providers {\n    google = { source = "hashicorp/google", version = ">= 7.40.0" }\n  }\n}\n\nprovider "google" {\n  project = var.project_id\n  region  = var.region\n}\n\n${tf}\n`,
+        "variables.tf": `variable "project_id" {\n  type    = string\n  default = ${hcl(ctx.project)}\n}\n\nvariable "region" {\n  type    = string\n  default = ${hcl(ctx.region)}\n}\n`,
+      },
+      gcloud: header("Apply with gcloud") + "\n" + items.map((x) => x.outputs.gcloud).join("\n\n") + "\n",
+      rest: header("Apply with the REST API (curl + jq)") + "\n" + items.map((x) => x.outputs.rest).join("\n\n") + "\n",
+      python:
+        "# Apply with the Google Cloud client libraries.\n# Generated by Policy Studio for project " + ctx.project + ", region " + ctx.region + ".\n\n" +
+        items.map((x, n) => `def step_${n + 1}():\n` + x.outputs.python.split("\n").map((l) => (l ? "    " + l : "")).join("\n")).join("\n\n\n") +
+        `\n\n\nif __name__ == "__main__":\n` + (items.length ? items.map((_, n) => `    step_${n + 1}()`).join("\n") : "    pass") + "\n",
+    },
+  };
+}
+
+const sameCond = (a: Binding["condition"], b: Binding["condition"]) => (a?.expression ?? "") === (b?.expression ?? "");
+
+export function mockDiff(w: World, intents: Intent[]): DiffResult {
+  const items: DiffItem[] = intents.map((i) => {
+    if (i.kind === "grant" || i.kind === "revoke") {
+      const res = i.destination?.name ?? "";
+      const current = w.inventory.access[res] ?? [];
+      const mine = current.filter((b) => b.member === i.source?.principal && b.role === ROLE);
+      if (i.kind === "revoke") {
+        // access.title = revoke only the binding with exactly this condition title ("" = unconditional).
+        const t = i.access?.title;
+        if (t !== undefined) {
+          const hit = mine.filter((b) => (b.condition?.title ?? "") === t);
+          return hit.length
+            ? { intent_id: i.id, status: "remove", current, detail: `Removes ${i.source?.label}'s ${t ? `“${t}”` : "unconditional"} binding; other bindings are kept.` }
+            : { intent_id: i.id, status: "absent", current, detail: `${i.source?.label} has no ${t ? `“${t}”` : "unconditional"} grant on ${i.destination?.label}; nothing to remove.` };
+        }
+        return mine.length
+          ? { intent_id: i.id, status: "remove", current, detail: `Removes ${mine.length} binding${mine.length > 1 ? "s" : ""} for ${i.source?.label}.` }
+          : { intent_id: i.id, status: "absent", current, detail: `${i.source?.label} has no grant on ${i.destination?.label}; nothing to remove.` };
+      }
+      const cond = conditionFor(i.access);
+      if (mine.some((b) => sameCond(b.condition, cond))) return { intent_id: i.id, status: "present", current, detail: "An identical grant already exists." };
+      if (mine.length) return { intent_id: i.id, status: "replace", current, detail: `Replaces ${i.source?.label}'s existing grant (${mine[0].condition ? "a different condition" : "unconditional"}).` };
+      const broader = current.find((b) => !b.condition && (b.member.startsWith("principalSet://") || b.member.startsWith("all")));
+      return { intent_id: i.id, status: "add", current, detail: broader ? `Adds a new binding. Note: ${broader.member_label} already has unconditional access.` : "Adds a new binding." };
+    }
+    if (i.kind === "bind_gateway" || i.kind === "unbind_gateway") {
+      const e = w.inventory.engines.find((x) => x.name === i.engine);
+      const cur = e?.gateways[i.gateway!.direction];
+      const has = cur === i.gateway?.name;
+      if (i.kind === "bind_gateway") return { intent_id: i.id, status: has ? "present" : cur ? "replace" : "add", current: null, detail: has ? "Already bound to this gateway." : cur ? `Moves from ${shortName(cur)} to ${shortName(i.gateway!.name)}.` : `Binds ${i.gateway!.direction}; other directions are kept.` };
+      return { intent_id: i.id, status: has ? "remove" : "absent", current: null, detail: has ? "Unbinds this direction; the other is kept." : "Not bound to this gateway." };
+    }
+    const g = w.modelArmor.gateways.find((x) => x.gateway === i.gateway?.name);
+    if (i.kind === "model_armor_on") return { intent_id: i.id, status: g?.enabled ? "present" : "add", current: null, detail: g?.enabled ? "Model Armor is already on." : "Creates a CONTENT_AUTHZ policy on the gateway." };
+    return { intent_id: i.id, status: g?.enabled ? "remove" : "absent", current: null, detail: g?.enabled ? "Deletes the CONTENT_AUTHZ policy." : "Model Armor is already off." };
+  });
+  return { items };
+}

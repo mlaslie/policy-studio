@@ -1,0 +1,88 @@
+// Apply (P3) helpers shared by the store, the Apply step and Review: run state types, which kinds are
+// destructive, typical durations and plain-English labels.
+import type { ApplyState, AuthInfo, Intent } from "../api/types";
+
+export type RunItemState = ApplyState | "queued";
+export type RunItem = {
+  intent: Intent;
+  state: RunItemState;
+  detail?: string;
+  operation?: string;
+  undo: Intent[];
+  startedAt?: number;
+  endedAt?: number;
+};
+export type ApplyRun = {
+  id: string;
+  project: string;
+  region: string;
+  startedAt: number;
+  endedAt?: number;
+  items: RunItem[];
+  done: boolean;
+  /** Whole-request failure (403, network, aborted). */
+  error?: string;
+  summary?: unknown;
+};
+
+export const DESTRUCTIVE_KINDS = new Set<Intent["kind"]>(["revoke", "unbind_gateway", "model_armor_off"]);
+export const isDestructive = (i: Intent) => DESTRUCTIVE_KINDS.has(i.kind);
+
+/** What a destructive kind does, for the acknowledgement checkbox. */
+export const DESTRUCTIVE_PHRASE: Partial<Record<Intent["kind"], string>> = {
+  revoke: "removes access",
+  unbind_gateway: "detaches an agent from a gateway",
+  model_armor_off: "turns off Model Armor",
+};
+
+/** Typical time per kind, shown next to the elapsed timer. */
+export const TYPICAL: Record<Intent["kind"], { label: string; seconds: number }> = {
+  grant: { label: "a few seconds", seconds: 5 },
+  revoke: { label: "a few seconds", seconds: 5 },
+  bind_gateway: { label: "about 5 min", seconds: 300 },
+  unbind_gateway: { label: "about 5 min", seconds: 300 },
+  model_armor_on: { label: "about 4 min", seconds: 240 },
+  model_armor_off: { label: "about 4 min", seconds: 240 },
+};
+export const isLongRunning = (i: Intent) => TYPICAL[i.kind].seconds >= 60;
+
+export const CHANGE_KIND: Record<Intent["kind"], string> = {
+  grant: "IAM grant on the registry entry",
+  revoke: "IAM revoke on the registry entry",
+  bind_gateway: "Agent update (long-running)",
+  unbind_gateway: "Agent update (long-running)",
+  model_armor_on: "Create authz policy (long-running)",
+  model_armor_off: "Delete authz policy (long-running)",
+};
+
+export function fmtElapsed(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+export const isFinal = (s: RunItemState) => s === "verified" || s === "failed" || s === "skipped";
+
+/** Why Apply is unavailable, in one plain sentence (null when it's available). */
+export function applyBlockedReason(a: AuthInfo | null, loading: boolean, error: string | null): string | null {
+  if (!a) return loading ? "Checking your credentials…" : error ? `Couldn't check credentials: ${error}` : "Credentials not checked yet.";
+  if (a.can_apply) return null;
+  if (a.mode === "generate") return a.can_apply_reason || "Generate-only mode: copy the commands and run them yourself.";
+  return a.can_apply_reason || a.checks.find((c) => c.status === "error")?.title || "A credential check failed.";
+}
+
+const KIND_NOUN: Record<Intent["kind"], string> = {
+  grant: "grants",
+  revoke: "revokes",
+  bind_gateway: "gateway bindings",
+  unbind_gateway: "gateway unbindings",
+  model_armor_on: "turning Model Armor on",
+  model_armor_off: "turning Model Armor off",
+};
+/** Why this kind can't be applied by the signed-in user (null when it can, or when /auth doesn't say). */
+export function kindBlockedReason(a: AuthInfo | null, kind: Intent["kind"]): string | null {
+  if (!a?.writable || a.writable[kind] !== false) return null;
+  const fix = a.checks.find((c) => c.id === "can_write");
+  return `You don't have permission to apply ${KIND_NOUN[kind]} in ${a.target_project}${fix?.fix ? " (see the “can write” check on Context for the role grant)" : ""}.`;
+}
+
+export const toList = (u: Intent | Intent[] | null | undefined): Intent[] => (!u ? [] : Array.isArray(u) ? u : [u]);
