@@ -1,7 +1,7 @@
 # Policy Studio: API contract (P1 + P2)
 
 Policy Studio is a standalone app: Python package `policy_studio` (FastAPI) in `backend/`, and a Vite + React app in `frontend/`.
-- It must not import from `agdemo_core`, `agdemo_ui` or `ui/frontend`, so it can move to its own repo unchanged.
+- The backend imports only the standard library and its declared dependencies (a test enforces it).
 - In P1 and P2 every endpoint is **read-only** against GCP.
 - The backend calls Google APIs with Application Default Credentials (your gcloud login when run locally).
 
@@ -104,7 +104,7 @@ DiffItem = { intent_id, status: "add"|"present"|"replace"|"remove"|"absent", det
 - **`read_only_hint`:** `api.getAttribute('iap.googleapis.com/mcp.tool.isReadOnly', false) == true || api.getAttribute('iap.googleapis.com/mcp.toolName', '') == ''`
 - **`tools`:** `api.getAttribute('iap.googleapis.com/mcp.toolName', '') in ['t1', 't2', '']`
 
-The `''` keeps MCP setup traffic (initialize, tools/list) allowed. Both forms are verified live; see the demo repo's docs/ARCHITECTURE.md.
+The `''` keeps MCP setup traffic (initialize, tools/list) allowed. Both forms are verified live against Agent Gateway.
 
 ## Run modes and credentials (P3)
 

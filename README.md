@@ -1,15 +1,16 @@
 # Policy Studio
 
-A guided tool for Gemini Enterprise Agent Gateway: discover what's in a project and region (gateways, authz
-policies, Model Armor, Agent Registry entries, Agent Runtime agents, IAP grants), audit it in plain English, build
-policies (agent → A2A agent / MCP server / API endpoint, with MCP tool conditions), and generate Terraform, gcloud,
-REST (curl) and Python for them.
+Policy Studio is a tool designed to help Google Cloud Agent Platform administrators more easily audit agentic endpoints (A2A agents, MCP servers and API endpoints) within Agent Registry, and understand which agents have Agent Gateway policy enforced and what that enforced policy is.
 
-Discovery, audit and code generation are read-only. Applying changes (P3) is possible only in **apply mode**, which
-is the default when you run it locally; on Cloud Run it runs in **generate mode** and has no write path at all (see
-[Modes](#modes-generate-and-apply)). Plan: [docs/PLAN.md](docs/PLAN.md). API contract: [docs/API.md](docs/API.md).
+In addition to auditing Agent Registry and Agent Gateway, Policy Studio also helps administrators construct and apply new policies through an intuitive graphical interface. When Policy Studio runs locally with Application Default Credentials (ADC), the policies you create can be applied directly. Or you can apply them yourself using the generated Terraform, API calls, Python or gcloud commands.
 
-Policy Studio started as a companion to the [Agent Gateway & Agent Registry demo](https://github.com/mlaslie/agent-gateway-demo) and is fully standalone: the backend package `policy_studio` has no dependency on the demo (a test enforces it).
+Finally, Policy Studio is also meant to be a learning tool: it helps administrators understand the various policy components involved and what each one does.
+
+The setup instructions below cover both a local installation and a centralized Cloud Run service. When deployed to Cloud Run, auditing and command generation are available but applying policy is not. To have Policy Studio apply policy directly, install it locally, so that every policy change can be audited back to a named user.
+
+See [Modes](#modes-generate-and-apply) for how the two modes differ, and [docs/API.md](docs/API.md) for the API contract.
+
+> **Note:** Policy Studio is very green, so if you find a bug, please [report it](https://github.com/mlaslie/policy-studio/issues).
 
 ```
 ./

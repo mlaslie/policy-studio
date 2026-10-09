@@ -1,5 +1,5 @@
 // Code block with light syntax highlighting (shell, HCL, Python, JSON/YAML) and a Copy button.
-// Adapted from the demo UI's CodeView.
+// Code block with light syntax highlighting and a copy button.
 import type { ReactNode } from "react";
 import { CopyButton } from "./Glass";
 

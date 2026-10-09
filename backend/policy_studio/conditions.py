@@ -1,6 +1,6 @@
 """IAM condition expressions for MCP tool-level egress (IAP V1 on Agent Registry resources).
 
-Verified live (see the demo repo's docs/ARCHITECTURE.md):
+Verified live against Agent Gateway (Oct 2026):
   read-only by hint: api.getAttribute('iap.googleapis.com/mcp.tool.isReadOnly', false) == true
                      || api.getAttribute('iap.googleapis.com/mcp.toolName', '') == ''
   tools by name:     api.getAttribute('iap.googleapis.com/mcp.toolName', '') in ['t1', 't2', '']

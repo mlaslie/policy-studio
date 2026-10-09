@@ -3,7 +3,7 @@
 Pure functions: no GCP calls. Everything is generated from the Intent plus a RenderEnv (resolved context and,
 optionally, what discovery knows: current engine gateway bindings, MCP tools).
 
-Sources of truth (verified live in the demo project; see docs/BACKLOG.md "#17 research" there):
+Sources of truth (REST shapes, gcloud flags and Terraform resources verified live against Agent Gateway, Oct 2026):
   grant/revoke   IAP IAM on Agent Registry entries, roles/iap.egressor, policy version 3
                  gcloud iap web add-/remove-iam-policy-binding --resource-type=agent-registry --region=R
                         --agent=ID | --mcp-server=ID | --endpoint=ID [--condition=...]
