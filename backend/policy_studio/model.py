@@ -105,6 +105,7 @@ class Engine(_M):
     gateways: dict[str, str] = Field(default_factory=dict)      # {egress?, ingress?}
     create_time: str = ""
     bindable: bool = False
+    bindable_reason: Optional[str] = None   # why it can't be bound (no Agent Identity, or created before 2026-04-29)
 
 
 class Skill(_M):
@@ -189,7 +190,39 @@ class GatewayRef(_In):
     policy: Optional[str] = None       # model_armor_on/off: CONTENT_AUTHZ authz policy name
 
 
-IntentKind = Literal["grant", "revoke", "bind_gateway", "unbind_gateway", "model_armor_on", "model_armor_off"]
+IntentKind = Literal["grant", "revoke", "bind_gateway", "unbind_gateway", "model_armor_on", "model_armor_off",
+                     "model_armor_template", "model_armor_extension", "iam_project_grant"]
+SETUP_KINDS = ("model_armor_template", "model_armor_extension", "iam_project_grant")
+
+Level = Literal["LOW_AND_ABOVE", "MEDIUM_AND_ABOVE", "HIGH", "off"]
+
+
+class TemplateFilters(_In):
+    """Friendly Model Armor filter choices (model_armor_template). Omitted fields use the defaults below."""
+    pi_jailbreak: Level = "MEDIUM_AND_ABOVE"
+    sdp: Literal["basic", "advanced", "off"] = "basic"
+    rai: dict[str, Level] = Field(default_factory=lambda: {
+        "HATE_SPEECH": "MEDIUM_AND_ABOVE", "HARASSMENT": "MEDIUM_AND_ABOVE",
+        "SEXUALLY_EXPLICIT": "MEDIUM_AND_ABOVE", "DANGEROUS": "MEDIUM_AND_ABOVE"})
+    malicious_uri: bool = True
+
+
+class SetupParams(_In):
+    """Parameters of the Model Armor setup kinds. `delete: true` is the inverse (undo) of each."""
+    project: Optional[str] = None          # where the template / extension / grant lives (default: gateway project)
+    delete: bool = False
+    # model_armor_template
+    template_id: Optional[str] = None
+    filters: Optional[TemplateFilters] = None
+    block_message: Optional[str] = None
+    inspect_template: Optional[str] = None  # sdp "advanced": Sensitive Data Protection inspect template
+    # model_armor_extension
+    name: Optional[str] = None
+    template: Optional[str] = None          # template id or projects/P/locations/R/templates/T
+    # iam_project_grant
+    member: Optional[str] = None
+    roles: Optional[list[str]] = None
+    gateway: Optional[str] = None           # informational: the gateway whose service agent this is
 
 
 class Intent(_In):
@@ -200,6 +233,11 @@ class Intent(_In):
     access: Optional[Access] = None
     gateway: Optional[GatewayRef] = None
     engine: Optional[str] = None
+    params: Optional[SetupParams] = None   # model_armor_template / model_armor_extension / iam_project_grant
+
+    @property
+    def is_delete(self) -> bool:
+        return self.kind in SETUP_KINDS and bool(self.params and self.params.delete)
 
 
 class Finding(_M):
@@ -208,6 +246,7 @@ class Finding(_M):
     detail: str = ""
     resource: Optional[str] = None
     fix: Optional[Intent] = None
+    redeploy: Optional[str] = None     # how to redeploy with Agent Identity (Python), for engines that can't be bound
 
 
 # ------------------------------------------------------------------ requests / results

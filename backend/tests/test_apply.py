@@ -292,7 +292,8 @@ def test_grant_retries_etag_conflict(client, gcp, adc):
 def test_grant_gives_up_after_three_retries(client, gcp, adc):
     gcp.etag_conflicts = 10
     ev = run(client, [grant_intent()])
-    assert final(ev)["g1"]["state"] == "failed" and "409" in final(ev)["g1"]["detail"]
+    f = final(ev)["g1"]
+    assert f["state"] == "failed" and "changed while" in f["detail"] and "409" in f["raw_error"]
     assert len(gcp.writes) == 4
 
 

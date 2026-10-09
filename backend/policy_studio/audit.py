@@ -6,6 +6,7 @@ from typing import Any, Optional
 
 from .conditions import EGRESSOR, classify
 from .english import PROJECT_AGENTS_RE, engine_principal_parts
+from .gcp.engines import REDEPLOY_SNIPPET
 from .model import (Access, Context, Destination, Finding, Gateway, GatewayRef, Grant, Intent, Inventory,
                     McpServer, Source)
 
@@ -89,9 +90,10 @@ def audit(inv: Inventory, gateways: list[Gateway], ctx: Optional[Context] = None
         if not e.bindable:
             findings.append(Finding(
                 severity="medium", title=f"Unprotected egress: {e.display_name}",
-                detail=(f"{e.display_name} is not bound to an egress gateway, and it was created before 2026-04-29 "
-                        "so it can't be bound. Redeploy it to put its outbound traffic behind Agent Gateway."),
-                resource=e.name))
+                detail=(f"{e.display_name} is not bound to an egress gateway, and it can't be: "
+                        f"{e.bindable_reason or 'it was created before 2026-04-29.'} Until it is redeployed its "
+                        "outbound traffic isn't governed by Agent Gateway."),
+                resource=e.name, redeploy=REDEPLOY_SNIPPET))
             continue
         fix = None
         if len(egress_gws) == 1:

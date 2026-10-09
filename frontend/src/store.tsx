@@ -5,7 +5,7 @@ import { api } from "./api/client";
 import type { ApplyConfirm, AuditResp, AuthInfo, ContextInfo, Ctx, GatewaysResp, Intent, Inventory, ModelArmorResp } from "./api/types";
 import { toList, type ApplyRun } from "./lib/apply";
 import { load, save } from "./lib/util";
-import { newId } from "./lib/policy";
+import { intentKey, newId } from "./lib/policy";
 
 export type Loadable<T> = { data: T | null; loading: boolean; error: string | null };
 const empty = <T,>(): Loadable<T> => ({ data: null, loading: false, error: null });
@@ -66,6 +66,10 @@ type Studio = {
   dismissRun: () => void;
   /** Put inverse intents into the cart and open Apply on them. */
   stageUndo: (intents: Intent[]) => void;
+  /** The guided "Set up Model Armor in this region" wizard on the Model Armor step. */
+  maSetupOpen: boolean;
+  openMaSetup: () => void;
+  setMaSetupOpen: (v: boolean) => void;
 };
 
 const Ctx_ = createContext<Studio | null>(null);
@@ -113,6 +117,7 @@ export function StudioProvider({ children }: { children: ReactNode }) {
       return [];
     }
   });
+  const [maSetupOpen, setMaSetupOpen] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const ctxRef = useRef(ctx);
   ctxRef.current = ctx;
@@ -177,10 +182,26 @@ export function StudioProvider({ children }: { children: ReactNode }) {
     setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 3200);
   }, []);
 
+  const cartRef = useRef(cart);
+  cartRef.current = cart;
   const addIntents = useCallback(
     (items: Intent[]) => {
-      setCart((c) => [...c, ...items.map((i) => ({ ...i, id: c.some((x) => x.id === i.id) ? newId() : i.id || newId() }))]);
-      toast(items.length === 1 ? "Added to the policy cart" : `Added ${items.length} items to the policy cart`, "ok");
+      // Same kind + gateway / engine / source / destination / access / params = the same change: add it once.
+      const seen = new Set(cartRef.current.map(intentKey));
+      const fresh = items.filter((i) => {
+        const k = intentKey(i);
+        if (seen.has(k)) return false;
+        seen.add(k);
+        return true;
+      });
+      const dupes = items.length - fresh.length;
+      if (fresh.length) {
+        const next = [...cartRef.current, ...fresh.map((i) => ({ ...i, id: cartRef.current.some((x) => x.id === i.id) ? newId() : i.id || newId() }))];
+        cartRef.current = next;
+        setCart(next);
+      }
+      if (!fresh.length) toast(dupes === 1 ? "Already in the cart" : "All of these are already in the cart", "warn");
+      else toast((fresh.length === 1 ? "Added to the policy cart" : `Added ${fresh.length} items to the policy cart`) + (dupes ? ` (${dupes} already in the cart)` : ""), "ok");
     },
     [toast],
   );
@@ -280,6 +301,7 @@ export function StudioProvider({ children }: { children: ReactNode }) {
                       state,
                       detail: e.detail ?? it.detail,
                       operation: e.operation ?? it.operation,
+                      rawError: e.raw_error ?? it.rawError,
                       undo: e.undo ? toList(e.undo) : it.undo,
                       startedAt: it.startedAt ?? now,
                       endedAt: state === "verified" || state === "failed" || state === "skipped" ? now : undefined,
@@ -332,6 +354,12 @@ export function StudioProvider({ children }: { children: ReactNode }) {
     [goto, toast],
   );
 
+  const openMaSetup = useCallback(() => {
+    setMaSetupOpen(true);
+    goto(2);
+    requestAnimationFrame(() => document.getElementById("ma-setup")?.scrollIntoView({ behavior: "smooth", block: "start" }));
+  }, [goto]);
+
   const value = useMemo<Studio>(
     () => ({
       ctx, setCtx, ctxInfo, gateways, modelArmor, inventory, audit, syncing, syncedAt, sync,
@@ -339,8 +367,9 @@ export function StudioProvider({ children }: { children: ReactNode }) {
       step, goto, draft, openBuilder, reviewFocus, openReview,
       learnOpen, setLearnOpen, glossaryTerm, showTerm, toasts, toast,
       auth, refreshAuth, applyFocus, openApply, run, history, startApply, cancelApply, dismissRun, stageUndo,
+      maSetupOpen, openMaSetup, setMaSetupOpen,
     }),
-    [auth, refreshAuth, applyFocus, openApply, run, history, startApply, cancelApply, dismissRun, stageUndo, ctx, setCtx, ctxInfo, gateways, modelArmor, inventory, audit, syncing, syncedAt, sync, cart, addIntents, updateIntent, removeIntent, duplicateIntent, clearCart, step, goto, draft, openBuilder, reviewFocus, openReview, learnOpen, setLearnOpen, glossaryTerm, showTerm, toasts, toast],
+    [maSetupOpen, openMaSetup, auth, refreshAuth, applyFocus, openApply, run, history, startApply, cancelApply, dismissRun, stageUndo, ctx, setCtx, ctxInfo, gateways, modelArmor, inventory, audit, syncing, syncedAt, sync, cart, addIntents, updateIntent, removeIntent, duplicateIntent, clearCart, step, goto, draft, openBuilder, reviewFocus, openReview, learnOpen, setLearnOpen, glossaryTerm, showTerm, toasts, toast],
   );
   return <Ctx_.Provider value={value}>{children}</Ctx_.Provider>;
 }

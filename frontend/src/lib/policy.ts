@@ -65,6 +65,19 @@ export function intentEnglish(i: Intent): string {
       return `Turn on Model Armor screening on ${gw}.`;
     case "model_armor_off":
       return `Turn off Model Armor screening on ${gw}.`;
+    case "model_armor_template": {
+      const t = shortName(i.params?.template_id ?? "") || "a template";
+      return i.params?.delete ? `Delete Model Armor template ${t}.` : `Create Model Armor template ${t} (the filters Model Armor applies).`;
+    }
+    case "model_armor_extension": {
+      const n = shortName(i.params?.name ?? "") || "an extension";
+      return i.params?.delete ? `Delete Model Armor extension ${n}.` : `Create Model Armor extension ${n}, screening with template ${shortName(i.params?.template ?? "") || "?"}.`;
+    }
+    case "iam_project_grant": {
+      const who = (i.params?.member ?? "the service agent").replace(/^serviceAccount:/, "");
+      const roles = (i.params?.roles ?? []).map(shortName).join(", ") || "no roles";
+      return i.params?.delete ? `Remove ${roles} from ${who}.` : `Let ${who} call Model Armor (${roles}).`;
+    }
   }
 }
 
@@ -75,17 +88,50 @@ export const KIND_LABEL: Record<Intent["kind"], string> = {
   unbind_gateway: "Unbind",
   model_armor_on: "Model Armor on",
   model_armor_off: "Model Armor off",
+  model_armor_template: "Model Armor template",
+  model_armor_extension: "Model Armor extension",
+  iam_project_grant: "Service agent roles",
 };
 
 /** Order used for the review list: infrastructure first, then grants (plan §5). */
 export const KIND_ORDER: Record<Intent["kind"], number> = {
   bind_gateway: 0,
   unbind_gateway: 1,
-  model_armor_on: 2,
-  model_armor_off: 3,
-  grant: 4,
-  revoke: 5,
+  model_armor_template: 2,
+  model_armor_extension: 3,
+  iam_project_grant: 4,
+  model_armor_on: 5,
+  model_armor_off: 6,
+  grant: 7,
+  revoke: 8,
 };
+
+function stable(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(stable).join(",")}]`;
+  if (v && typeof v === "object")
+    return `{${Object.keys(v as object)
+      .filter((k) => (v as Record<string, unknown>)[k] !== undefined && (v as Record<string, unknown>)[k] !== null)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${stable((v as Record<string, unknown>)[k])}`)
+      .join(",")}}`;
+  return JSON.stringify(v);
+}
+
+/** Two intents with the same key do the same thing (ids, labels and discovered fields don't count). Mirrors the
+ *  backend's preflight.intent_key. */
+export function intentKey(i: Intent): string {
+  const g = i.gateway;
+  const a = i.access;
+  return stable({
+    kind: i.kind,
+    gateway: g ? [shortName(g.name), g.direction] : null,
+    engine: i.engine ? shortName(i.engine) : null,
+    source: i.source?.principal ?? null,
+    destination: i.destination ? [i.destination.kind, i.destination.id || shortName(i.destination.name)] : null,
+    access: a ? [a.mode, [...(a.tools ?? [])].filter(Boolean).sort(), a.expression ?? "", a.title ?? null] : null,
+    params: i.params ?? null,
+  });
+}
 
 export function shortName(resource: string): string {
   const p = resource.split("/");

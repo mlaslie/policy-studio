@@ -39,6 +39,8 @@ PERMISSIONS: list[tuple[str, str, str, bool]] = [
     ("iap.webServiceVersions.getIamPolicy", "read who may reach each Agent Registry entry (IAP IAM)",
      "roles/iap.admin", False),
     ("modelarmor.templates.list", "read Model Armor templates and filters", "roles/modelarmor.viewer", False),
+    ("resourcemanager.projects.getIamPolicy", "check the gateway service agents' Model Armor roles",
+     "roles/browser", False),
     # Writes (Apply, apply mode only). The Apply checks are in auth.py (WRITE_PERMISSIONS).
     ("iap.webServiceVersions.setIamPolicy", "apply grants / revokes", "roles/iap.admin", True),
     ("aiplatform.reasoningEngines.update", "bind / unbind agents to gateways",
@@ -47,6 +49,11 @@ PERMISSIONS: list[tuple[str, str, str, bool]] = [
      True),
     ("networksecurity.authzPolicies.delete", "turn Model Armor off", "roles/networksecurity.editor",
      True),
+    ("modelarmor.templates.create", "create a Model Armor template (setup)", "roles/modelarmor.admin", True),
+    ("networkservices.authzExtensions.create", "create the Model Armor authz extension (setup)",
+     "roles/networkservices.admin", True),
+    ("resourcemanager.projects.setIamPolicy", "grant the gateway service agents the Model Armor roles (setup)",
+     "roles/resourcemanager.projectIamAdmin", True),
 ]
 
 _numbers: dict[str, str] = {}
@@ -106,6 +113,11 @@ def organization_id(r: Rest, project: str) -> str | None:
         if a.get("resourceId", {}).get("type") == "organization":
             return a["resourceId"]["id"]
     return None
+
+
+def project_iam_policy(r: Rest, project: str) -> dict:
+    """Project IAM policy (version 3), read-only."""
+    return r.post(f"{CRM}/projects/{project}:getIamPolicy", json={"options": {"requestedPolicyVersion": 3}}) or {}
 
 
 def enabled_apis(r: Rest, project: str) -> dict[str, bool]:

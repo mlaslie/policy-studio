@@ -34,10 +34,17 @@ WRITE_PERMISSIONS: dict[str, tuple[list[str], bool, str, str]] = {
     "unbind_gateway": (["aiplatform.reasoningEngines.update"], False, "project", "roles/aiplatform.user"),
     "model_armor_on": (["networksecurity.authzPolicies.create"], False, "both", "roles/networksecurity.editor"),
     "model_armor_off": (["networksecurity.authzPolicies.delete"], False, "both", "roles/networksecurity.editor"),
+    "model_armor_template": (["modelarmor.templates.create"], False, "both", "roles/modelarmor.admin"),
+    "model_armor_extension": (["networkservices.authzExtensions.create"], False, "both",
+                              "roles/networkservices.admin"),
+    "iam_project_grant": (["resourcemanager.projects.setIamPolicy"], False, "both",
+                          "roles/resourcemanager.projectIamAdmin"),
 }
 KIND_LABEL = {"grant": "grants", "revoke": "revokes", "bind_gateway": "gateway binds",
               "unbind_gateway": "gateway unbinds", "model_armor_on": "Model Armor on",
-              "model_armor_off": "Model Armor off"}
+              "model_armor_off": "Model Armor off", "model_armor_template": "Model Armor templates",
+              "model_armor_extension": "Model Armor extensions",
+              "iam_project_grant": "service agent role grants"}
 
 
 # ------------------------------------------------------------------ machine-facing pieces (replaced in tests)
@@ -315,7 +322,7 @@ def report(target: str, *, mode: str, runtime: str, generate_reason: str, gatewa
                                  role_fix))
         else:
             checks.append(_check("can_write", "ok", "Can apply every kind of change",
-                                 "Grants, revokes, gateway binds and Model Armor."))
+                                 "Grants, revokes, gateway binds, Model Armor and its setup."))
 
     errors = [c for c in checks if c["status"] == "error"]
     can_apply = mode == "apply" and not errors

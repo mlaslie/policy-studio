@@ -3402,3 +3402,276 @@ body.resizing * {
 .type-filter.on .type-count { background: var(--surface); color: var(--blue); }
 .search-clear { border: 0; background: transparent; color: var(--text-3); font-size: 18px; line-height: 1; cursor: pointer; padding: 0 4px; }
 .search-clear:hover { color: var(--text); }
+
+/* ---------------------------------------------------------------- Model Armor setup wizard */
+.ma-setup {
+  border: 1.5px solid color-mix(in srgb, var(--amber) 55%, var(--border));
+  background: linear-gradient(180deg, color-mix(in srgb, var(--amber-weak) 70%, var(--surface)) 0, var(--surface) 160px);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-bottom: 16px;
+  scroll-margin-top: 16px;
+}
+.ma-setup-head {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+.ma-setup-head h2 {
+  margin: 0 0 4px;
+  font-size: 18px;
+}
+.ma-setup-head p {
+  margin: 0;
+  max-width: 72ch;
+}
+.setup-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.setup-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px 5px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-2);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.setup-chip:focus-visible {
+  outline: none;
+  box-shadow: var(--focus);
+}
+.setup-chip-num {
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--surface-3);
+  font-size: 11px;
+  font-weight: 600;
+}
+.setup-chip.done {
+  color: var(--green);
+  border-color: color-mix(in srgb, var(--green) 45%, transparent);
+}
+.setup-chip.done .setup-chip-num {
+  background: var(--green-weak);
+}
+.setup-chip.staged {
+  color: var(--blue);
+  border-color: color-mix(in srgb, var(--blue) 45%, transparent);
+}
+.setup-chip.staged .setup-chip-num {
+  background: var(--blue-weak);
+}
+.setup-chip.active {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--blue) 40%, transparent);
+  color: var(--text);
+}
+.setup-chip-tag {
+  font-size: 11px;
+  opacity: 0.85;
+}
+.setup-step h3 {
+  margin: 0 0 8px;
+  font-size: 15px;
+}
+.setup-step {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.learn-note {
+  display: flex;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--blue-weak);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.learn-note > svg {
+  color: var(--blue);
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.setup-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.setup-form input:not([type="checkbox"]) {
+  width: 100%;
+}
+.filter-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+.filter-row.sub {
+  padding: 5px 0 5px 12px;
+  font-size: 13px;
+}
+.filter-row.check {
+  cursor: pointer;
+}
+.filter-label {
+  font-weight: 500;
+  font-size: 14px;
+}
+.block {
+  display: block;
+}
+.seg {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  flex-wrap: wrap;
+}
+.seg-btn {
+  border: 0;
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-2);
+  font: inherit;
+  font-size: 13px;
+  padding: 5px 11px;
+  cursor: pointer;
+}
+.seg-btn:last-child {
+  border-right: 0;
+}
+.seg-btn.on {
+  background: var(--blue-weak);
+  color: var(--blue);
+  font-weight: 600;
+}
+.seg-btn:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--blue);
+}
+.setup-actions,
+.setup-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.setup-foot {
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+.sa-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.sa-row {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: var(--surface);
+}
+.sa-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.sa-email {
+  overflow-wrap: anywhere;
+}
+.role-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0 0 0 26px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+.role {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.role-mark {
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  font-size: 11px;
+}
+.role.ok .role-mark {
+  background: var(--green-weak);
+  color: var(--green);
+}
+.role.missing .role-mark {
+  background: var(--red-weak);
+  color: var(--red);
+}
+.role.unknown .role-mark {
+  background: var(--surface-3);
+  color: var(--text-2);
+}
+.ma-setup-link {
+  margin-top: 6px;
+}
+@media (max-width: 640px) {
+  .filter-row {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
+
+/* Apply preflight */
+.plan-blocked {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+  align-items: flex-start;
+}
+.plan-row.blocked {
+  border-left: 3px solid var(--red);
+}
+.raw-error {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 4px 0 0;
+  color: var(--text-2);
+}
+.unbindable {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  align-items: center;
+  margin-top: 8px;
+  color: var(--text-2);
+}
+.unbindable-item {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+}
+.unbindable .disclosure {
+  flex-basis: 100%;
+}

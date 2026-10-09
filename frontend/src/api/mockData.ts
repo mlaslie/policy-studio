@@ -1,7 +1,10 @@
 // Realistic mock state for `npm run dev:mock` (VITE_MOCK=1). Built from the context so project and
 // region edits show up everywhere. Defaults: my-demo-project / us-east4.
-import type { AuditResp, Binding, ContextInfo, Ctx, Finding, Gateway, Grant, Inventory, McpTool, ModelArmorResp, Template } from "./types";
+// Region us-central1 has no Model Armor set up (no template, no extension, service agents without the roles), to
+// exercise the "Set up Model Armor in this region" wizard.
+import type { AuditResp, Binding, ContextInfo, Ctx, Finding, Gateway, Grant, Inventory, MaSetup, McpTool, ModelArmorResp, ServiceAgent, Template, TemplateFilters } from "./types";
 import { READ_ONLY_EXPR, ROLE, toolsExpr } from "../lib/policy";
+import { NO_IDENTITY_REASON, REDEPLOY_SNIPPET } from "../components/Redeploy";
 
 export const MOCK_NUMBER = "482915730164";
 const ORG = "739104826351";
@@ -50,9 +53,38 @@ const ENDPOINT_HOSTS = [
   ["iamcredentials", "IAM Credentials"],
 ] as const;
 
+export const MA_ROLES = ["roles/modelarmor.calloutUser", "roles/modelarmor.user", "roles/serviceusage.serviceUsageConsumer"];
+const LEVEL_TEXT: Record<string, string> = { LOW_AND_ABOVE: "low and above", MEDIUM_AND_ABOVE: "medium and above", HIGH: "high" };
+
+/** A Template (as GET /model-armor returns it) from the wizard's friendly filter choices. */
+export function templateFrom(name: string, f: TemplateFilters, block?: string): Template {
+  const rai = Object.entries(f.rai).filter(([, l]) => l !== "off").map(([category, level]) => ({ category, level }));
+  const filterConfig: Record<string, unknown> = {};
+  if (f.pi_jailbreak !== "off") filterConfig.piAndJailbreakFilterSettings = { filterEnforcement: "ENABLED", confidenceLevel: f.pi_jailbreak };
+  if (f.sdp === "basic") filterConfig.sdpSettings = { basicConfig: { filterEnforcement: "ENABLED" } };
+  if (f.sdp === "advanced") filterConfig.sdpSettings = { advancedConfig: { inspectTemplate: "INSPECT_TEMPLATE" } };
+  if (f.malicious_uri) filterConfig.maliciousUriFilterSettings = { filterEnforcement: "ENABLED" };
+  if (rai.length) filterConfig.raiSettings = { raiFilters: rai.map((r) => ({ filterType: r.category, confidenceLevel: r.level })) };
+  return {
+    name,
+    id: name.split("/").pop() ?? name,
+    filters: {
+      pi_jailbreak: f.pi_jailbreak === "off" ? { enabled: false } : { enabled: true, level: f.pi_jailbreak },
+      sdp: f.sdp === "off" ? { enabled: false } : { enabled: true, mode: f.sdp },
+      rai,
+      malicious_uri: { enabled: f.malicious_uri },
+    },
+    block_message: block,
+    raw: { name, filterConfig, templateMetadata: block ? { customPromptSafetyErrorMessage: block, customLlmResponseSafetyErrorMessage: block, logSanitizeOperations: true, logTemplateOperations: true } : {} },
+  };
+}
+export const levelText = (l: string) => LEVEL_TEXT[l] ?? l;
+
 export function buildWorld(ctx: Ctx) {
   const P = ctx.project || "my-demo-project";
   const R = ctx.region || "us-east4";
+  /** us-central1: Model Armor not set up yet. */
+  const noMA = R === "us-central1";
   const GP = ctx.gateway_project || P;
   const loc = `projects/${P}/locations/${R}`;
   const reg = `projects/${GP}/locations/${R}`;
@@ -91,8 +123,20 @@ export function buildWorld(ctx: Ctx) {
       create_time: "2026-08-30T17:15:22Z",
       bindable: true,
     },
+    {
+      // Deployed with a service account instead of Agent Identity: it can never be bound to Agent Gateway.
+      name: eng("5555555555555555555"),
+      id: "5555555555555555555",
+      display_name: "simple-agent-with-psc",
+      principal: `serviceAccount:simple-agent@${P}.iam.gserviceaccount.com`,
+      identity_type: "SERVICE_ACCOUNT",
+      gateways: {},
+      create_time: "2026-09-12T08:20:00Z",
+      bindable: false,
+      bindable_reason: NO_IDENTITY_REASON,
+    },
   ];
-  const [helpdesk, hr, travel] = engines;
+  const [helpdesk, hr, travel, psc] = engines;
 
   const gateways: Gateway[] = [
     {
@@ -103,7 +147,9 @@ export function buildWorld(ctx: Ctx) {
       registries: [`//agentregistry.googleapis.com/${reg}`],
       authz_policies: [
         { name: `projects/${GP}/locations/${R}/authzPolicies/corp-egress-iap-policy`, profile: "REQUEST_AUTHZ", provider: "iap", extension: `projects/${GP}/locations/${R}/authzExtensions/corp-egress-iap-authz`, enforcement: "ENFORCE" },
-        { name: `projects/${GP}/locations/${R}/authzPolicies/corp-egress-ma-policy`, profile: "CONTENT_AUTHZ", provider: "model_armor", extension: `projects/${GP}/locations/${R}/authzExtensions/corp-ma-authz`, enforcement: "ENFORCE" },
+        ...(noMA
+          ? []
+          : [{ name: `projects/${GP}/locations/${R}/authzPolicies/corp-egress-ma-policy`, profile: "CONTENT_AUTHZ" as const, provider: "model_armor" as const, extension: `projects/${GP}/locations/${R}/authzExtensions/corp-ma-authz`, enforcement: "ENFORCE" as const }]),
       ],
       bound_engines: [
         { engine: helpdesk.name, display_name: helpdesk.display_name, direction: "egress" },
@@ -165,10 +211,61 @@ export function buildWorld(ctx: Ctx) {
 
   const modelArmor: ModelArmorResp = {
     gateways: [
-      { gateway: egress, type: "egress", enabled: true, policy: gateways[0].authz_policies[1].name, extension: gateways[0].authz_policies[1].extension, template },
+      noMA
+        ? { gateway: egress, type: "egress", enabled: false, policy: null, extension: null, template: null }
+        : { gateway: egress, type: "egress", enabled: true, policy: gateways[0].authz_policies[1].name, extension: gateways[0].authz_policies[1].extension, template },
       { gateway: ingress, type: "ingress", enabled: false, policy: null, extension: null, template: null },
     ],
-    templates: [template, strictTemplate],
+    templates: noMA ? [] : [template, strictTemplate],
+  };
+  // Model Armor authz extensions in the region, and the gateways' service agents with the roles they hold.
+  const maExtensions: { name: string; templates: string[] }[] = noMA ? [] : [{ name: `projects/${GP}/locations/${R}/authzExtensions/corp-ma-authz`, templates: [template.name] }];
+  const serviceAgents: ServiceAgent[] = [
+    {
+      email: `service-${MOCK_NUMBER}@gcp-sa-dep.iam.gserviceaccount.com`,
+      member: `serviceAccount:service-${MOCK_NUMBER}@gcp-sa-dep.iam.gserviceaccount.com`,
+      gateway: egress,
+      gateways: [egress],
+      project: GP,
+      source: "agentGatewayCard.serviceExtensionsServiceAccount",
+      note: "The gateway's service extensions service account (from the gateway resource).",
+      roles: Object.fromEntries(MA_ROLES.map((r) => [r, !noMA])),
+    },
+    {
+      email: `service-${MOCK_NUMBER}@gcp-sa-aiplatform-re.iam.gserviceaccount.com`,
+      member: `serviceAccount:service-${MOCK_NUMBER}@gcp-sa-aiplatform-re.iam.gserviceaccount.com`,
+      gateway: ingress,
+      gateways: [ingress],
+      project: P,
+      source: "ingress",
+      note: "Agent Runtime service agent used by ingress gateways (verified in one project; check yours).",
+      roles: Object.fromEntries(MA_ROLES.map((r) => [r, !noMA])),
+    },
+  ];
+  const setup = (): MaSetup => {
+    const missing: MaSetup["missing"] = [];
+    if (!modelArmor.templates.length) missing.push("template");
+    if (!maExtensions.length) missing.push("extension");
+    if (serviceAgents.some((a) => Object.values(a.roles).some((v) => v === false))) missing.push("service_agent_roles");
+    const used = maExtensions.flatMap((x) => x.templates);
+    const ids = new Set(modelArmor.templates.map((t) => t.id));
+    const exts = new Set(maExtensions.map((x) => x.name.split("/").pop()));
+    const uniq = (n: string, taken: Set<string | undefined>) => {
+      if (!taken.has(n)) return n;
+      let k = 2;
+      while (taken.has(`${n}-${k}`)) k++;
+      return `${n}-${k}`;
+    };
+    return {
+      ready: !missing.length,
+      missing,
+      region: R,
+      extensions: maExtensions,
+      templates: modelArmor.templates,
+      service_agents: serviceAgents,
+      roles: MA_ROLES,
+      suggested: { template_id: uniq("corp-shield", ids), template: used[0] ?? modelArmor.templates[0]?.name ?? null, extension_name: uniq("corp-ma-authz", exts) },
+    };
   };
 
   const regName = (kind: string, id: string) => `${reg}/${kind}/${id}`;
@@ -294,6 +391,13 @@ export function buildWorld(ctx: Ctx) {
       fix: { id: "fix-bind-travel", kind: "bind_gateway", gateway: { name: egress, direction: "egress" }, engine: travel.name, engine_label: travel.display_name },
     },
     {
+      severity: "medium",
+      title: `Unprotected egress: ${psc.display_name}`,
+      detail: `${psc.display_name} is not bound to an egress gateway, and it can't be: ${NO_IDENTITY_REASON} Until it is redeployed its outbound traffic isn't governed by Agent Gateway.`,
+      resource: psc.name,
+      redeploy: REDEPLOY_SNIPPET,
+    },
+    {
       severity: "high",
       title: "Any signed-in Google account can call Calendar Agent",
       detail: "allAuthenticatedUsers holds roles/iap.egressor on Calendar Agent. Egress grants should name agent identities, not public groups.",
@@ -358,5 +462,5 @@ export function buildWorld(ctx: Ctx) {
 
   const audit = (): AuditResp => ({ grants: grants(), findings: findings(), synced_at: new Date().toISOString() });
 
-  return { P, R, GP, gateways, modelArmor, inventory, context, audit, projectSet };
+  return { P, R, GP, gateways, modelArmor, maExtensions, serviceAgents, setup, inventory, context, audit, projectSet };
 }

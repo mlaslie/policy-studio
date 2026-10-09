@@ -62,6 +62,16 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
     short: "A gateway policy type that screens message content (used for Model Armor).",
     long: "Gateways have two kinds of authz policies: REQUEST_AUTHZ decides who may call what (IAP), CONTENT_AUTHZ looks at what is being said (Model Armor). Turning Model Armor on for a gateway means attaching a CONTENT_AUTHZ policy.",
   },
+  "authz-extension": {
+    term: "Authz extension (Model Armor)",
+    short: "A Network Services resource that tells the gateway which service to ask, here Model Armor with a template.",
+    long: "An authz extension points the gateway at a policy service. A Model Armor extension has service modelarmor.<region>.rep.googleapis.com and metadata.model_armor_settings naming the template used for requests and responses. On its own it does nothing: a CONTENT_AUTHZ policy attaches it to a gateway. failOpen false means traffic is blocked (not let through unscreened) if Model Armor can't be reached.",
+  },
+  "ma-service-agent": {
+    term: "Gateway service agent",
+    short: "The Google-managed identity a gateway uses to call Model Armor; it needs three roles on the project.",
+    long: "When a gateway screens content it calls Model Armor as its service agent, named in the gateway resource (agentGatewayCard.serviceExtensionsServiceAccount, service-…@gcp-sa-dep.iam.gserviceaccount.com). Ingress gateways also use the Agent Runtime service agent (service-<project number>@gcp-sa-aiplatform-re.iam.gserviceaccount.com; verified in one project, check yours). Each needs roles/modelarmor.calloutUser, roles/modelarmor.user and roles/serviceusage.serviceUsageConsumer on the project that holds the template, otherwise every screened request fails.",
+  },
   "request-authz": {
     term: "REQUEST_AUTHZ (IAP)",
     short: "A gateway policy type that checks who may call what, using IAP and IAM grants.",

@@ -12,6 +12,8 @@ import { DownloadIcon, PencilIcon, PlusIcon, TrashIcon, WarnIcon, LockIcon } fro
 import { KIND_LABEL, KIND_ORDER, ROLE, conditionFor, intentEnglish, missingContext } from "../lib/policy";
 import { downloadBlob, makeZip } from "../lib/zip";
 import { useApplyGate } from "../components/Mode";
+import { WarningCallouts } from "./ModelArmorSetup";
+import { RedeployHelp } from "../components/Redeploy";
 import { PlayIcon } from "../components/Icons";
 
 function ApplyButton({ ids, label, small }: { ids: string[] | null; label: string; small?: boolean }) {
@@ -125,9 +127,13 @@ function ItemCard({ intent, idx, res, diff, fmt, setFmt }: { intent: Intent; idx
         </Tip>
         <ApplyButton ids={[intent.id]} label="Apply" small />
       </header>
-      {item?.warnings.map((w) => (
-        <Callout key={w} tone="warn">{w}</Callout>
-      ))}
+      {item?.error && (
+        <Callout tone="danger" title="This item can't work as staged">
+          {item.error}
+          {/Agent Identity|can't be bound/.test(item.error) && <RedeployHelp />}
+        </Callout>
+      )}
+      <WarningCallouts warnings={item?.warnings} />
       <div className="review-body">
         <div className="review-code">
           <Tabs<Fmt> label="Output format" value={fmt} onChange={setFmt} items={FMT.map((x) => ({ id: x.id, label: x.label }))} />

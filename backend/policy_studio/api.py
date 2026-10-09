@@ -9,13 +9,15 @@ from pydantic import ValidationError
 
 from . import __version__, service, settings
 from .apply import Applier, check_confirm
+from . import preflight as pf
 from .diff import diff as diff_intents
 from .gcp import gateways as gw_mod
 from .gcp.discovery import defaults as discovery_defaults
 from .gcp.engines import tail
 from .gcp.rest import err_text
-from .model import ApplyRequest, Context, DiffItem, Intent, IntentsRequest, Inventory, RenderItem, RenderResult
-from .render import RenderEnv, gateway_full, render as render_intents
+from .model import (SETUP_KINDS, ApplyRequest, Context, DiffItem, Intent, IntentsRequest, Inventory, RenderItem,
+                    RenderResult)
+from .render import RenderEnv, gateway_full, render as render_intents, with_staged
 
 router = APIRouter(prefix="/api/studio", tags=["policy-studio"])
 
@@ -130,23 +132,27 @@ def build_env(ctx: Context, intents: list[Intent], notes: Optional[list[str]] = 
     try:
         engines, _ = service.region_engines(ctx)
         env.engines = {e.name: dict(e.gateways) for e in engines}
-        env.engine_info = {e.name: {"display_name": e.display_name, "bindable": e.bindable} for e in engines}
+        env.engine_info = {e.name: {"display_name": e.display_name, "bindable": e.bindable,
+                                    "bindable_reason": e.bindable_reason} for e in engines}
     except Exception as e:  # noqa: BLE001
         notes.append(f"engine lookup failed: {err_text(e)}")
     inv: Optional[Inventory] = service.cache.peek((ctx.key(), "inventory"))
     if inv is not None:
         env.mcp_tools = {m.id: [{"name": t.name, "read_only": t.read_only} for t in m.tools] for m in inv.mcp_servers}
+    # An extension staged in the same cart wins over discovery (render picks it up via with_staged).
+    staged_ext = any(i.kind == "model_armor_extension" and not i.is_delete for i in intents)
     if kinds & {"model_armor_on", "model_armor_off"}:
         try:
             raw = service.gateway_raw(ctx)
             gws = gw_mod.build(raw, [])
+            env.known_extensions = [x["name"] for x in gw_mod.model_armor_extensions(raw)]
             for it in intents:
                 if it.kind not in ("model_armor_on", "model_armor_off") or not it.gateway:
                     continue
                 full = gateway_full(env, it.gateway.name, it.gateway.direction)
                 g = next((x for x in gws if tail(x.name) == tail(full)), None)
                 proj = g.project if g else None
-                if it.kind == "model_armor_on" and not it.gateway.extension:
+                if it.kind == "model_armor_on" and not it.gateway.extension and not staged_ext:
                     exts = gw_mod.model_armor_extensions(raw, proj) or gw_mod.model_armor_extensions(raw)
                     if exts:
                         it.gateway.extension = exts[0]["name"]
@@ -156,7 +162,7 @@ def build_env(ctx: Context, intents: list[Intent], notes: Optional[list[str]] = 
                         it.gateway.policy = ma.name.rsplit("/", 1)[-1]
         except Exception as e:  # noqa: BLE001
             notes.append(f"Model Armor lookup failed: {err_text(e)}")
-    return env
+    return with_staged(env, intents)
 
 
 def parse_intents(raw: list[dict[str, Any]]) -> tuple[list[Intent], dict[int, tuple[str, str]]]:
@@ -200,7 +206,13 @@ def diff(req: IntentsRequest) -> dict[str, list[DiffItem]]:
     env = build_env(ctx, intents)
     inv = _guard(service.inventory_view, ctx, False)
     gws = _guard(service.gateways_view, ctx, False)["gateways"]
-    items = diff_intents(intents, inv, gws, env)
+    ma: Optional[dict[str, Any]] = None
+    if any(i.kind in SETUP_KINDS for i in intents):
+        try:
+            ma = service.model_armor_view(ctx)
+        except Exception:  # noqa: BLE001  (diff says "unknown" instead)
+            ma = None
+    items = diff_intents(intents, inv, gws, env, ma)
     errs = {n: DiffItem(intent_id=i, status="absent", error=e, detail=e) for n, (i, e) in bad.items()}
     return {"items": _merge(items, errs, len(req.intents))}
 
@@ -226,4 +238,32 @@ def apply(req: ApplyRequest) -> StreamingResponse:
     applier = Applier(env, rest, Writer(rest), account=a["adc"].get("account", ""),
                       on_finish=service.cache.clear)       # discovery must not keep serving pre-apply state
     service.cache.clear()                                 # discovery must not serve pre-apply state
-    return StreamingResponse(applier.stream(intents, bad), media_type="application/x-ndjson")
+    return StreamingResponse(applier.stream(intents, bad, a.get("writable")), media_type="application/x-ndjson")
+
+
+@router.post("/preflight")
+def preflight(req: IntentsRequest) -> dict[str, Any]:
+    """Read-only: which staged intents are duplicates or would certainly fail, and why (the same checks /apply
+    enforces). {items: [{intent_id, status: ok|blocked|duplicate|invalid, reason?, fix?, duplicate_of?}]}"""
+    ctx = _request_context(req.context)
+    intents, bad = parse_intents(req.intents)
+    env = build_env(ctx, intents)
+    writable: Optional[dict[str, Any]] = None
+    if settings.current_mode() == "apply":
+        try:
+            writable = service.auth_view(ctx.project, ctx.gateway_project).get("writable")
+        except Exception:  # noqa: BLE001  (the Apply step shows credential problems separately)
+            writable = None
+    dups = pf.duplicates(intents)
+    blocked = pf.blockers([i for i in intents if i.id not in dups], env, writable)
+    items: list[dict[str, Any]] = []
+    for it in intents:
+        if it.id in dups:
+            items.append({"intent_id": it.id, "status": "duplicate", "duplicate_of": dups[it.id],
+                          "reason": f"Same change as {dups[it.id]}; applied once."})
+        elif it.id in blocked:
+            items.append({"intent_id": it.id, "status": "blocked", **blocked[it.id]})
+        else:
+            items.append({"intent_id": it.id, "status": "ok"})
+    errs = [{"intent_id": i, "status": "invalid", "reason": e} for i, e in bad.values()]
+    return {"items": _merge(items, dict(zip(bad.keys(), errs)), len(req.intents))}

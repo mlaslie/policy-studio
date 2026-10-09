@@ -79,7 +79,32 @@ export type ModelArmorGateway = {
   template: Template | null;
   error?: string;
 };
-export type ModelArmorResp = { gateways: ModelArmorGateway[]; templates: Template[] };
+export type MaRole = "roles/modelarmor.calloutUser" | "roles/modelarmor.user" | "roles/serviceusage.serviceUsageConsumer";
+export type ServiceAgent = {
+  email: string;
+  member: string;
+  /** The (first) gateway that uses this identity; `gateways` lists all of them. */
+  gateway: string;
+  gateways: string[];
+  /** Project whose IAM policy the roles are checked on (the gateway's project). */
+  project: string;
+  source: string;
+  note: string;
+  /** null = couldn't read the project IAM policy. */
+  roles: Record<string, boolean | null>;
+  error?: string;
+};
+export type MaSetup = {
+  ready: boolean;
+  missing: ("template" | "extension" | "service_agent_roles")[];
+  region: string;
+  extensions: { name: string; templates: string[] }[];
+  templates: Template[];
+  service_agents: ServiceAgent[];
+  roles: string[];
+  suggested: { template_id: string; template: string | null; extension_name: string };
+};
+export type ModelArmorResp = { gateways: ModelArmorGateway[]; templates: Template[]; extensions?: { name: string; templates: string[] }[]; setup?: MaSetup };
 
 export type Engine = {
   name: string;
@@ -90,6 +115,8 @@ export type Engine = {
   gateways: { egress?: string; ingress?: string };
   create_time: string;
   bindable: boolean;
+  /** Why it can't be bound: no Agent Identity, or created before 2026-04-29. */
+  bindable_reason?: string | null;
   error?: string;
 };
 export type Skill = { id: string; name: string; description: string };
@@ -134,10 +161,41 @@ export type Grant = Binding & {
   resource_label: string;
 };
 export type Severity = "high" | "medium" | "info";
-export type Finding = { severity: Severity; title: string; detail: string; resource?: string; fix?: Intent };
+export type Finding = { severity: Severity; title: string; detail: string; resource?: string; fix?: Intent | null; /** How to redeploy with Agent Identity (Python). */ redeploy?: string | null };
 export type AuditResp = { grants: Grant[]; findings: Finding[]; synced_at: string };
 
-export type IntentKind = "grant" | "revoke" | "bind_gateway" | "unbind_gateway" | "model_armor_on" | "model_armor_off";
+export type IntentKind =
+  | "grant"
+  | "revoke"
+  | "bind_gateway"
+  | "unbind_gateway"
+  | "model_armor_on"
+  | "model_armor_off"
+  | "model_armor_template"
+  | "model_armor_extension"
+  | "iam_project_grant";
+export type MaLevel = "LOW_AND_ABOVE" | "MEDIUM_AND_ABOVE" | "HIGH" | "off";
+export type TemplateFilters = {
+  pi_jailbreak: MaLevel;
+  sdp: "basic" | "advanced" | "off";
+  rai: Record<string, MaLevel>;
+  malicious_uri: boolean;
+};
+/** Parameters of the Model Armor setup kinds (model_armor_template / model_armor_extension / iam_project_grant). */
+export type SetupParams = {
+  project?: string;
+  /** The inverse (undo): delete the template / extension, remove the roles. */
+  delete?: boolean;
+  template_id?: string;
+  filters?: TemplateFilters;
+  block_message?: string;
+  inspect_template?: string;
+  name?: string;
+  template?: string;
+  member?: string;
+  roles?: string[];
+  gateway?: string;
+};
 export type SourceType = "engine" | "project_agents" | "custom";
 export type AccessMode = "all" | "read_only_hint" | "tools" | "custom";
 export type Intent = {
@@ -148,13 +206,14 @@ export type Intent = {
   access?: { mode: AccessMode; tools?: string[]; expression?: string; title?: string };
   gateway?: { name: string; direction: Direction; extension?: string; policy?: string };
   engine?: string;
+  params?: SetupParams;
   /** Client-only: display label for the engine (bind/unbind). Ignored by the backend. */
   engine_label?: string;
 };
 
 export type Outputs = { terraform: string; gcloud: string; rest: string; python: string };
 export type Anatomy = { resource: string; role: string; member: string; condition?: string | null; notes: string[] };
-export type RenderItem = { intent_id: string; english: string; anatomy: Anatomy; outputs: Outputs; warnings: string[] };
+export type RenderItem = { intent_id: string; english: string; anatomy: Anatomy; outputs: Outputs; warnings: string[]; /** This intent can't be rendered (e.g. an engine that can't be bound); left out of the bundle. */ error?: string | null };
 export type RenderResult = {
   items: RenderItem[];
   bundle: { terraform: { "main.tf": string; "variables.tf": string }; gcloud: string; rest: string; python: string };
@@ -192,7 +251,22 @@ export type AuthInfo = {
 };
 export type ApplyState = "running" | "done" | "verified" | "failed" | "skipped";
 /** `progress: true` with state "done" = a long-running operation is still being polled (not final). */
-export type ApplyItemEvent = { intent_id: string; state: ApplyState; detail?: string; operation?: string; progress?: boolean; undo?: Intent | Intent[] | null };
+export type PreflightFix = "ma_setup" | "redeploy" | "permission";
+export type ApplyItemEvent = {
+  intent_id: string;
+  state: ApplyState;
+  detail?: string;
+  operation?: string;
+  progress?: boolean;
+  undo?: Intent | Intent[] | null;
+  /** The Google Cloud error as returned, when `detail` is a friendlier translation. */
+  raw_error?: string;
+  /** Refused by the preflight before any change. */
+  blocked?: boolean;
+  fix?: PreflightFix;
+};
+export type PreflightItem = { intent_id: string; status: "ok" | "blocked" | "duplicate" | "invalid"; reason?: string; fix?: PreflightFix; duplicate_of?: string };
+export type PreflightResult = { items: PreflightItem[] };
 export type ApplyDoneEvent = { type: "done"; summary?: unknown };
 export type ApplyEvent = ApplyItemEvent | ApplyDoneEvent;
 export type ApplyConfirm = { project: string; acknowledge_destructive: boolean };

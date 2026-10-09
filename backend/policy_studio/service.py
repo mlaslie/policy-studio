@@ -174,12 +174,42 @@ def model_armor_view(ctx: Context, refresh: bool = False) -> dict[str, Any]:
                 exts = gw_mod.model_armor_extensions(raw, g.project)
                 row["available_extensions"] = [x["name"] for x in exts]
             rows.append(row)
-        return {"gateways": rows, "templates": list(templates.values()),
-                "extensions": [{"name": x["name"], "templates": ma_mod.template_ids(x)}
-                               for x in gw_mod.model_armor_extensions(raw)],
+        extensions = [{"name": x["name"], "templates": ma_mod.template_ids(x)}
+                      for x in gw_mod.model_armor_extensions(raw)]
+        agents = _service_agents(r, raw, errors)
+        setup = ma_mod.setup_status(region=ctx.region, templates=list(templates.values()), extensions=extensions,
+                                    agents=agents, gateway_ids=[g.id for g in gv["gateways"]])
+        return {"gateways": rows, "templates": list(templates.values()), "extensions": extensions, "setup": setup,
                 "notes": ["Egress screening by Model Armor covers MCP traffic, not A2A (verified)."],
                 "errors": errors + [f"template {k}: {v}" for k, v in tmpl_err.items()]}
     return cache.get((ctx.key(), "model_armor"), build, refresh)
+
+
+def _service_agents(r: Rest, raw: dict[str, Any], errors: list[str]) -> list[dict[str, Any]]:
+    """Gateway service agents with {role: held} for the Model Armor roles (project getIamPolicy, read-only)."""
+    projects = list(dict.fromkeys(g["_project"] for g in raw["gateways"]))
+    numbers: dict[str, str] = {}
+    for p in projects:
+        try:
+            numbers[p] = discovery.project_number(r, p)
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"project number of {p}: {err_text(e)}")
+    agents = ma_mod.service_agents(raw["gateways"], numbers)
+    policies: dict[str, dict | None] = {}
+    for p in dict.fromkeys(a["project"] for a in agents):
+        try:
+            policies[p] = discovery.project_iam_policy(r, p)
+        except Exception as e:  # noqa: BLE001
+            policies[p] = None
+            errors.append(f"read the IAM policy of {p} (service agent roles): {err_text(e)}")
+    for a in agents:
+        pol = policies.get(a["project"])
+        if pol is None:
+            a["roles"] = {role: None for role in ma_mod.MA_ROLES}
+            a["error"] = "couldn't read the project IAM policy"
+        else:
+            a["roles"] = ma_mod.roles_of(pol, a["member"])
+    return agents
 
 
 # ------------------------------------------------------------------ inventory

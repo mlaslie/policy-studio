@@ -57,8 +57,11 @@ POLICIES = [
      "customProvider": {"authzExtension": {"resources": [f"projects/{N}/locations/{R}/authzExtensions/corp-ma"]}}},
 ]
 
+DEP_SA = "service-9090@gcp-sa-dep.iam.gserviceaccount.com"         # egress gateway's service extensions SA
+RE_SA = f"service-{N}@gcp-sa-aiplatform-re.iam.gserviceaccount.com"  # Agent Runtime service agent (ingress)
 GATEWAYS = [
     {"name": EG, "createTime": "2026-08-01T00:00:00Z", "googleManaged": {"governedAccessPath": "AGENT_TO_ANYWHERE"},
+     "agentGatewayCard": {"serviceExtensionsServiceAccount": DEP_SA},
      "registries": [f"//agentregistry.googleapis.com/projects/{P}/locations/{R}"]},
     {"name": IG, "createTime": "2026-08-01T00:00:00Z", "googleManaged": {"governedAccessPath": "CLIENT_TO_AGENT"}},
 ]
@@ -99,12 +102,26 @@ IAP_POLICIES = {
 }
 
 
-class FakeRest:
-    """Answers the read-only URLs policy_studio issues; records every call."""
+# Project IAM policy: the egress gateway's SA holds two of the three Model Armor roles; the ingress one none.
+PROJECT_POLICY = {"version": 1, "etag": "p0", "bindings": [
+    {"role": "roles/owner", "members": ["user:alice@example.com"]},
+    {"role": "roles/modelarmor.calloutUser", "members": [f"serviceAccount:{DEP_SA}"]},
+    {"role": "roles/modelarmor.user", "members": [f"serviceAccount:{DEP_SA}"]},
+    {"role": "roles/serviceusage.serviceUsageConsumer", "members": [f"serviceAccount:{DEP_SA}"],
+     "condition": {"title": "t", "expression": "request.time < timestamp('2030-01-01T00:00:00Z')"}}]}
 
-    def __init__(self, fail: dict[str, int] | None = None):
+
+class FakeRest:
+    """Answers the read-only URLs policy_studio issues; records every call.
+
+    `model_armor=False` simulates a region where Model Armor isn't set up: no Model Armor extension, no template,
+    no CONTENT_AUTHZ policy.
+    """
+
+    def __init__(self, fail: dict[str, int] | None = None, model_armor: bool = True):
         self.calls: list[tuple[str, str]] = []
         self.fail = fail or {}
+        self.model_armor = model_armor
 
     def _maybe_fail(self, url: str) -> None:
         for frag, status in self.fail.items():
@@ -133,6 +150,10 @@ class FakeRest:
                                                                "iap.googleapis.com")]}
         if f"/projects/{P}/" not in url and f"/projects/{N}/" not in url:
             return []
+        if not self.model_armor:
+            data["authzExtensions"] = [x for x in EXTENSIONS if x["service"] == "iap.googleapis.com"]
+            data["authzPolicies"] = [x for x in POLICIES if x["policyProfile"] != "CONTENT_AUTHZ"]
+            data["templates"] = []
         return copy.deepcopy(data.get(key, []))
 
     def post(self, url: str, json: Any = None, ok404: bool = False) -> Any:
@@ -144,6 +165,8 @@ class FakeRest:
                                                                                        ".update", "setIamPolicy"))]}
         if url.endswith(":getAncestry"):
             return {"ancestor": [{"resourceId": {"type": "organization", "id": ORG}}]}
+        if "cloudresourcemanager" in url and url.endswith(":getIamPolicy"):
+            return copy.deepcopy(PROJECT_POLICY)
         if url.endswith(":getIamPolicy"):
             path = url.split("/iap_web/agentRegistry", 1)[1].removesuffix(":getIamPolicy").lstrip("/")
             return copy.deepcopy(IAP_POLICIES.get(path, {}))
@@ -166,6 +189,9 @@ class FakeWriteGcp(FakeRest):
         self.iap = {k: {**copy.deepcopy(v), "etag": "e0"} for k, v in IAP_POLICIES.items()}
         self.engines = {e["name"]: copy.deepcopy(e) for e in ENGINES}
         self.policies = {p["name"].rsplit("/", 1)[-1]: copy.deepcopy(p) for p in POLICIES}
+        self.templates = {TEMPLATE["name"]: copy.deepcopy(TEMPLATE)}
+        self.extensions = {x["name"].rsplit("/", 1)[-1]: copy.deepcopy(x) for x in EXTENSIONS}
+        self.project_policy = copy.deepcopy(PROJECT_POLICY)
         self.ops: dict[str, int] = {}
         self.etag_conflicts = etag_conflicts
         self.op_polls = op_polls
@@ -194,6 +220,18 @@ class FakeWriteGcp(FakeRest):
             name = url.split("/v1/", 1)[1]
             if name in self.engines:
                 return copy.deepcopy(self.engines[name])
+        if ".rep.googleapis.com/v1/" in url and "/templates/" in url:
+            self.calls.append(("GET", url))
+            t = self.templates.get(url.split("/v1/", 1)[1])
+            if t is None and not ok404:
+                raise GcpError(404, "not found", url)
+            return copy.deepcopy(t)
+        if "/authzExtensions/" in url:
+            self.calls.append(("GET", url))
+            x = self.extensions.get(url.rsplit("/", 1)[-1])
+            if x is None and not ok404:
+                raise GcpError(404, "not found", url)
+            return copy.deepcopy(x)
         if "/authzPolicies/" in url:
             self.calls.append(("GET", url))
             pol = self.policies.get(url.rsplit("/", 1)[-1])
@@ -208,6 +246,12 @@ class FakeWriteGcp(FakeRest):
         if key == "authzPolicies":
             self.calls.append(("LIST", url))
             return copy.deepcopy(list(self.policies.values()))
+        if key == "authzExtensions":
+            self.calls.append(("LIST", url))
+            return copy.deepcopy(list(self.extensions.values()))
+        if key == "templates":
+            self.calls.append(("LIST", url))
+            return copy.deepcopy(list(self.templates.values()))
         return super().list_all(url, key, params)
 
     def post(self, url: str, json: Any = None, ok404: bool = False) -> Any:
@@ -216,6 +260,10 @@ class FakeWriteGcp(FakeRest):
             self.calls.append(("POST", url))
             self._maybe_fail(url)
             return {"permissions": list(json["permissions"])}
+        if "cloudresourcemanager" in url and url.endswith(":getIamPolicy"):
+            self.calls.append(("POST", url))
+            self._maybe_fail(url)
+            return copy.deepcopy(self.project_policy)
         if url.endswith(":getIamPolicy"):
             self.calls.append(("POST", url))
             self._maybe_fail(url)
@@ -227,6 +275,41 @@ class FakeWriteGcp(FakeRest):
                  ok404: bool = False) -> Any:
         self.writes.append((method, url, copy.deepcopy(json)))
         self._maybe_fail(url)
+        if method == "POST" and "cloudresourcemanager" in url and url.endswith(":setIamPolicy"):
+            if self.etag_conflicts > 0:
+                self.etag_conflicts -= 1
+                self.project_policy["etag"] += "x"
+                raise GcpError(409, "ABORTED: There were concurrent policy changes.", url)
+            pol = json["policy"]
+            if pol.get("etag") != self.project_policy.get("etag"):
+                raise GcpError(409, "ABORTED: etag mismatch", url)
+            self._n += 1
+            self.project_policy = {**copy.deepcopy(pol), "etag": f"p{self._n}"}
+            return copy.deepcopy(self.project_policy)
+        if method == "POST" and "/templates?templateId=" in url:
+            base = url.split("/v1/", 1)[1].split("?", 1)[0]
+            name = f"{base}/{url.split('templateId=', 1)[1]}"
+            if name in self.templates:
+                raise GcpError(409, "already exists", url)
+            self.templates[name] = {"name": name, **copy.deepcopy(json)}
+            return copy.deepcopy(self.templates[name])
+        if method == "DELETE" and ".rep.googleapis.com" in url and "/templates/" in url:
+            name = url.split("/v1/", 1)[1]
+            if any(name in x.get("metadata", {}).get("model_armor_settings", "") for x in self.extensions.values()):
+                raise GcpError(400, "FAILED_PRECONDITION: template is in use", url)
+            del self.templates[name]
+            return {}
+        if method == "POST" and "/authzExtensions?authzExtensionId=" in url:
+            xid = url.split("authzExtensionId=", 1)[1]
+            base = url.split("/v1/", 1)[1].split("?", 1)[0]
+            if xid in self.extensions:
+                raise GcpError(409, "already exists", url)
+            self.extensions[xid] = {"name": f"{base}/{xid}", **copy.deepcopy(json)}
+            return self._op(base.rsplit("/authzExtensions", 1)[0])
+        if method == "DELETE" and "/authzExtensions/" in url:
+            xid = url.rsplit("/", 1)[-1]
+            del self.extensions[xid]
+            return self._op(url.split("/v1/", 1)[1].rsplit("/authzExtensions", 1)[0])
         if method == "POST" and url.endswith(":setIamPolicy"):
             path = self._iap_path(url, ":setIamPolicy")
             cur = self.iap.setdefault(path, {"etag": "e0"})

@@ -17,6 +17,9 @@ const TONE: Record<Intent["kind"], string> = {
   unbind_gateway: "amber",
   model_armor_on: "purple",
   model_armor_off: "amber",
+  model_armor_template: "purple",
+  model_armor_extension: "purple",
+  iam_project_grant: "purple",
 };
 
 const FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]), [tabindex]:not([tabindex="-1"])';

@@ -87,8 +87,14 @@ Apply is available when the mode is `apply` and no check is an error.
 
 - The request must repeat the project (`confirm.project == context.project`); revokes, unbinds and Model Armor off
   also need `confirm.acknowledge_destructive`.
-- Every write goes through `gcp/writer.py`, which allows exactly four calls: IAP `setIamPolicy` on Agent Registry
-  resources, the engine `PATCH` of `agentGatewayConfig`, and create/delete of authz policies.
+- Every write goes through `gcp/writer.py`, which allows only: IAP `setIamPolicy` on Agent Registry resources, the
+  engine `PATCH` of `agentGatewayConfig`, create/delete of authz policies, and for Model Armor setup create/delete of
+  Model Armor templates and authz extensions plus project `setIamPolicy`, which is checked so that it can only add or
+  remove members of the three Model Armor roles (anything else in the policy must be unchanged).
+- Before any call, Apply skips duplicate items and refuses items that would certainly fail (a bind of an engine
+  without Agent Identity, Model Armor on with no extension in the region and none staged, a kind you can't write);
+  the Apply step runs the same preflight (`POST /api/studio/preflight`) and shows them as **Blocked** with a fix.
+  Known Google Cloud errors are shown in plain English with the raw error alongside.
 - Grants and revokes are read-modify-write with the policy etag and version 3 (retried up to 3 times on an etag
   conflict). Other bindings are untouched; a revoke removes only the member from the binding with that role and
   condition.
@@ -99,6 +105,33 @@ Apply is available when the mode is `apply` and no check is an error.
   and returned with its inverse (`undo`). Results are appended to `~/.policy-studio/apply-log.jsonl`
   (`STUDIO_APPLY_LOG` overrides the path).
 
+## Model Armor
+
+Model Armor on a gateway is a `CONTENT_AUTHZ` authz policy that points at a Model Armor authz extension. It needs, in
+the gateway's region:
+
+1. a Model Armor **template** (the filters: prompt injection & jailbreak, sensitive data, responsible AI, malicious
+   URLs, and the message people see when blocked);
+2. a Model Armor **authz extension** (`service: modelarmor.<region>.rep.googleapis.com`, `failOpen: false`,
+   `metadata.model_armor_settings` naming the template for requests and responses);
+3. **permissions** for each gateway's service agent on the template's project: `roles/modelarmor.calloutUser`,
+   `roles/modelarmor.user` and `roles/serviceusage.serviceUsageConsumer`. The identity is the gateway resource's
+   `agentGatewayCard.serviceExtensionsServiceAccount`; ingress gateways also use
+   `service-<PROJECT_NUMBER>@gcp-sa-aiplatform-re.iam.gserviceaccount.com` (verified in one project; check yours);
+4. then **Model Armor on** for the gateway.
+
+`GET /api/studio/model-armor` reports what's there in `setup` (templates, extensions, each service agent with ✓/✗ per
+role from the project IAM policy, and suggested names). When something is missing, the Model Armor step shows
+**"Model Armor isn't set up in <region> yet"** with a guided four-step setup (pick or create a template with friendly
+controls, name the extension, grant only the missing roles, pick the gateways). "Stage all steps" adds them to the
+cart in order; Review renders them as Terraform (`google_model_armor_template`,
+`google_network_services_authz_extension`, `google_project_iam_member`, with `depends_on` into the policy), gcloud
+(`gcloud model-armor templates create` with its regional endpoint override, `gcloud service-extensions
+authz-extensions import`, `gcloud projects add-iam-policy-binding`), REST and Python. Wherever Model Armor on would
+otherwise use the `MODEL_ARMOR_EXTENSION` placeholder, a **"Set up Model Armor in this region →"** button opens the
+setup. In apply mode each step is applied, read back, and undoable (delete template / delete extension / remove the
+roles). Model Armor egress screening covers MCP traffic, not A2A.
+
 ## Permissions
 
 Read access: the Context step lists what your credentials can read (`testIamPermissions`) with the role and the
@@ -107,7 +140,10 @@ command to grant it. Reading needs roughly: `roles/browser`, `roles/serviceusage
 and an IAP role that can read IAM policies (`roles/iap.admin` includes it).
 
 Apply additionally needs `roles/iap.admin` (grants / revokes, on the Agent Registry project), `roles/aiplatform.user`
-(gateway binds) and `roles/networksecurity.editor` (Model Armor on/off); the **Can write** check names what's missing.
+(gateway binds) and `roles/networksecurity.editor` (Model Armor on/off); Model Armor setup also needs
+`roles/modelarmor.admin` (templates), `roles/networkservices.admin` (authz extensions) and
+`roles/resourcemanager.projectIamAdmin` (service agent roles). The **Can write** check names what's missing. Reading
+the service agents' roles uses `resourcemanager.projects.getIamPolicy` (`roles/browser`).
 
 ## Generated code
 

@@ -16,6 +16,33 @@ from .rest import Rest, aiplatform
 MASK = "spec.deploymentSpec.agentGatewayConfig"
 KEYS = {"egress": "agentToAnywhereConfig", "ingress": "clientToAgentConfig"}
 BINDABLE_SINCE = "2026-04-29"
+REASON_IDENTITY = ("Created without Agent Identity: Agent Gateway needs identity_type=AGENT_IDENTITY, which can't be "
+                   "changed. Redeploy the agent with Agent Identity.")
+REASON_DATE = ("Created before 2026-04-29: engines that old can't be bound to Agent Gateway. Redeploy the agent (with "
+               "Agent Identity).")
+REDEPLOY_SNIPPET = """import vertexai
+from vertexai import types
+
+client = vertexai.Client(project="PROJECT_ID", location="REGION")
+remote = client.agent_engines.create(
+    agent=app,                     # your ADK app / agent object
+    config={
+        "identity_type": types.IdentityType.AGENT_IDENTITY,   # required for Agent Gateway; can't be changed later
+        "display_name": "my-agent",
+        "requirements": ["google-cloud-aiplatform[agent_engines,adk]"],
+        # ... the rest of your existing deployment config
+    },
+)
+# Then bind the new engine to the gateway (Policy Studio, Gateways step) and move grants to its new identity."""
+
+
+def bind_blocker(identity: str, create_time: str) -> str | None:
+    """Why an engine can't be bound to Agent Gateway (None when it can)."""
+    if identity != "AGENT_IDENTITY":
+        return REASON_IDENTITY
+    if not create_time or create_time[:10] < BINDABLE_SINCE:
+        return REASON_DATE
+    return None
 
 
 def gateway_config(eng: dict | None) -> dict:
@@ -52,9 +79,11 @@ def identity_type(eng: dict) -> str:
 def parse_engine(eng: dict) -> Engine:
     name = eng.get("name", "")
     ct = eng.get("createTime", "") or ""
+    it = identity_type(eng)
+    reason = bind_blocker(it, ct)
     return Engine(name=name, id=name.rsplit("/", 1)[-1], display_name=eng.get("displayName") or name.rsplit("/", 1)[-1],
-                  principal=principal_of(eng), identity_type=identity_type(eng), gateways=gateways_of(eng),
-                  create_time=ct, bindable=bool(ct) and ct[:10] >= BINDABLE_SINCE)
+                  principal=principal_of(eng), identity_type=it, gateways=gateways_of(eng),
+                  create_time=ct, bindable=reason is None, bindable_reason=reason)
 
 
 def list_engines(r: Rest, project: str, region: str) -> list[Engine]:

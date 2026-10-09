@@ -7,6 +7,7 @@ import { Badge, Callout, Disclosure, Load, StepHeader, Term } from "../component
 import { CodeView } from "../components/CodeView";
 import { GatewayIcon, LockIcon, PlusIcon, RobotIcon, ShieldIcon, SparkIcon, WarnIcon } from "../components/Icons";
 import { newId, shortName } from "../lib/policy";
+import { RedeployHelp } from "../components/Redeploy";
 import { fmtDate } from "../lib/util";
 
 export function ProviderChip({ p }: { p: Gateway["authz_policies"][number] }) {
@@ -45,9 +46,9 @@ function BindPicker({ gw, onDone }: { gw: Gateway; onDone: () => void }) {
         <select id={`bind-${gw.id}`} value={sel} onChange={(e) => setSel(e.target.value)}>
           <option value="">Choose an agent…</option>
           {choices.map((e) => (
-            <option key={e.name} value={e.name} disabled={!e.bindable}>
+            <option key={e.name} value={e.name} disabled={!e.bindable} title={e.bindable ? undefined : e.bindable_reason ?? "Can't be bound"}>
               {e.display_name}
-              {!e.bindable ? " (created before 2026-04-29, can't be bound)" : e.gateways[gw.type] ? ` (now on ${shortName(e.gateways[gw.type]!)})` : ""}
+              {!e.bindable ? ` (can't be bound: ${e.identity_type !== "AGENT_IDENTITY" ? "no Agent Identity" : "created before 2026-04-29"})` : e.gateways[gw.type] ? ` (now on ${shortName(e.gateways[gw.type]!)})` : ""}
             </option>
           ))}
         </select>
@@ -68,6 +69,20 @@ function BindPicker({ gw, onDone }: { gw: Gateway; onDone: () => void }) {
           Cancel
         </button>
       </div>
+      {choices.some((e) => !e.bindable) && (
+        <div className="unbindable small">
+          {choices
+            .filter((e) => !e.bindable)
+            .map((e) => (
+              <Tip key={e.name} tip={e.bindable_reason ?? "This agent can't be bound to Agent Gateway."}>
+                <span className="unbindable-item" tabIndex={0}>
+                  <LockIcon size={12} /> {e.display_name} can't be bound
+                </span>
+              </Tip>
+            ))}
+          <RedeployHelp />
+        </div>
+      )}
       {other && <p className="small warn-text"><WarnIcon size={13} /> It is currently bound to {shortName(other)}; this moves it.</p>}
       {!choices.length && <p className="muted small">Every agent is already bound.</p>}
       <p className="muted small">The agent redeploys when this is applied; it takes a few minutes. Nothing changes until you run the generated command.</p>
@@ -190,7 +205,7 @@ function Unprotected({ engines, egress }: { engines: Engine[]; egress?: Gateway 
             <li key={e.name}>
               <b>{e.display_name}</b>{" "}
               {!e.bindable ? (
-                <span className="muted small">created {fmtDate(e.create_time)}, before 2026-04-29: can't be bound. Redeploy it to protect it.</span>
+                <span className="muted small">can't be bound: {e.bindable_reason ?? `created ${fmtDate(e.create_time)}, before 2026-04-29. Redeploy it to protect it.`}</span>
               ) : staged ? (
                 <Badge tone="blue">Bind staged</Badge>
               ) : egress ? (

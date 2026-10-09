@@ -1,6 +1,6 @@
 // API client for /api/studio/* (studio/docs/API.md). With VITE_MOCK=1 every call is answered by the
 // in-browser mock (mockData.ts + mockRender.ts) instead of the backend.
-import type { ApplyConfirm, ApplyEvent, AuditResp, AuthInfo, ContextInfo, Ctx, Defaults, DiffResult, GatewaysResp, Health, Intent, Inventory, ModelArmorResp, RenderResult } from "./types";
+import type { ApplyConfirm, ApplyEvent, AuditResp, AuthInfo, ContextInfo, Ctx, Defaults, DiffResult, GatewaysResp, Health, Intent, Inventory, ModelArmorResp, PreflightResult, RenderResult } from "./types";
 
 export const IS_MOCK = import.meta.env.VITE_MOCK === "1";
 const BASE = "/api/studio";
@@ -54,6 +54,9 @@ export const api = {
     IS_MOCK ? mock((m) => m.render(ctx, intents), 120) : http("/render", { method: "POST", body: JSON.stringify({ context: ctx, intents }) }),
   diff: (ctx: Ctx, intents: Intent[]): Promise<DiffResult> =>
     IS_MOCK ? mock((m) => m.diff(ctx, intents), 160) : http("/diff", { method: "POST", body: JSON.stringify({ context: ctx, intents }) }),
+  /** Read-only: which intents are duplicates or would certainly fail (the checks /apply enforces). */
+  preflight: (ctx: Ctx, intents: Intent[]): Promise<PreflightResult> =>
+    IS_MOCK ? mock((m) => m.preflight(ctx, intents), 140) : http("/preflight", { method: "POST", body: JSON.stringify({ context: ctx, intents }) }),
   auth: (ctx: Ctx, refresh = false): Promise<AuthInfo> => (IS_MOCK ? mock((m) => m.auth(ctx), 250) : http(`/auth?${qs(ctx, refresh)}`)),
   /** POST /apply and call onEvent for every streamed event (NDJSON, or SSE `data:` lines). */
   apply: async (ctx: Ctx, intents: Intent[], confirm: ApplyConfirm, onEvent: (e: ApplyEvent) => void, signal?: AbortSignal): Promise<void> => {

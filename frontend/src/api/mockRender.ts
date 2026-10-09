@@ -2,7 +2,7 @@
 // It mirrors what the backend generates closely enough to exercise the UI end to end.
 import type { Binding, Ctx, DiffItem, DiffResult, Intent, Outputs, RenderItem, RenderResult } from "./types";
 import type { World } from "./mockData";
-import { MOCK_NUMBER } from "./mockData";
+import { MOCK_NUMBER, templateFrom } from "./mockData";
 import { ROLE, conditionFor, intentEnglish, shortName } from "../lib/policy";
 
 const IAP = "https://iap.googleapis.com/v1";
@@ -211,16 +211,24 @@ function bindOutputs(ctx: Ctx, w: World, i: Intent, unbind: boolean): { outputs:
   return { outputs: { terraform, gcloud, rest, python }, warnings, notes };
 }
 
-function maOutputs(ctx: Ctx, w: World, i: Intent, off: boolean): { outputs: Outputs; warnings: string[]; notes: string[] } {
+function maOutputs(ctx: Ctx, w: World, i: Intent, off: boolean, all: Intent[]): { outputs: Outputs; warnings: string[]; notes: string[] } {
   const gw = i.gateway!;
   const gid = shortName(gw.name);
   const gp = gw.name.split("/")[1] ?? ctx.project;
   const pid = `${gid}-ma-policy`;
-  const ext = w.modelArmor.gateways.find((g) => g.extension)?.extension ?? `projects/${gp}/locations/${ctx.region}/authzExtensions/ma-authz`;
+  const staged = all.filter((x) => x.kind === "model_armor_extension" && !x.params?.delete).map((x) => `projects/${x.params?.project || w.GP}/locations/${ctx.region}/authzExtensions/${x.params?.name}`);
+  const known = gw.extension ?? staged[0] ?? w.maExtensions[0]?.name;
+  const ext = known ?? `projects/${gp}/locations/${ctx.region}/authzExtensions/MODEL_ARMOR_EXTENSION`;
   const notes = ["Creating or deleting an authz policy is a long-running operation (about 4 minutes).", "Egress screening covers MCP traffic, not A2A."];
   const warnings: string[] = [];
   if (gw.direction === "ingress") notes.push("An ingress gateway allows at most one CONTENT_AUTHZ policy.");
-  if (!w.modelArmor.gateways.some((g) => g.extension)) warnings.push("No Model Armor authz extension exists yet; create one first (P4) or replace ma-authz.");
+  if (staged.includes(ext)) notes.push(`Uses ${shortName(ext)}, which an earlier item in this cart creates.`);
+  if (!off && known && gw.extension && !staged.includes(known) && !w.maExtensions.some((x) => x.name === known))
+    warnings.push(`Model Armor isn't set up in ${ctx.region} yet: the extension ${shortName(known)} doesn't exist and isn't staged in this cart. Stage the setup (template, extension, service agent roles) with this item.`);
+  if (!off && !known)
+    warnings.push(
+      `Model Armor isn't set up in ${ctx.region} yet: there's no Model Armor authz extension for this gateway to use. Set it up first (a template, an extension and permissions for the gateway's service agent); this item then uses the new extension automatically. Until then the commands below use the placeholder MODEL_ARMOR_EXTENSION.`,
+    );
   const yaml = [
     `name: ${pid}`,
     `target:`,
@@ -292,6 +300,69 @@ function maOutputs(ctx: Ctx, w: World, i: Intent, off: boolean): { outputs: Outp
   };
 }
 
+function setupOutputs(ctx: Ctx, w: World, i: Intent): { outputs: Outputs; warnings: string[]; notes: string[]; resource: string } {
+  const p = i.params ?? {};
+  const proj = p.project || w.GP;
+  const R = ctx.region;
+  const del = !!p.delete;
+  const head = `# ${intentEnglish(i)}\n`;
+  const notes: string[] = [];
+  const warnings: string[] = [];
+  if (i.kind === "model_armor_template") {
+    const id = p.template_id || "TEMPLATE_ID";
+    const f = p.filters ?? { pi_jailbreak: "MEDIUM_AND_ABOVE", sdp: "basic", rai: {}, malicious_uri: true };
+    const raw = templateFrom(`projects/${proj}/locations/${R}/templates/${id}`, f, p.block_message).raw as Record<string, unknown>;
+    const body = JSON.stringify({ filterConfig: raw.filterConfig, templateMetadata: raw.templateMetadata });
+    const url = `https://modelarmor.${R}.rep.googleapis.com/v1/projects/${proj}/locations/${R}/templates`;
+    notes.push("A template is a named set of filters; an authz extension names it, and an authz policy attaches the extension to a gateway.");
+    if (f.sdp === "advanced") warnings.push("Sensitive data “advanced” needs a Sensitive Data Protection inspect template; the commands use the placeholder INSPECT_TEMPLATE.");
+    return {
+      resource: `projects/${proj}/locations/${R}/templates/${id}`,
+      notes,
+      warnings,
+      outputs: {
+        terraform: head + (del ? `# Delete the google_model_armor_template block for ${id} and run terraform apply.` : `resource "google_model_armor_template" "${ident(id)}" {\n  project     = ${hcl(proj)}\n  location    = ${hcl(R)}\n  template_id = ${hcl(id)}\n  # filter_config { ... } (mock preview; the real backend renders every filter)\n}`),
+        gcloud: head + (del ? `CLOUDSDK_API_ENDPOINT_OVERRIDES_MODELARMOR=https://modelarmor.${R}.rep.googleapis.com/ gcloud model-armor templates delete ${id} --project=${proj} --location=${R} --quiet` : `CLOUDSDK_API_ENDPOINT_OVERRIDES_MODELARMOR=https://modelarmor.${R}.rep.googleapis.com/ gcloud model-armor templates create ${id} \\\n  --project=${proj} --location=${R} \\\n  --malicious-uri-filter-settings-enforcement=${f.malicious_uri ? "enabled" : "disabled"}`),
+        rest: head + (del ? `curl -sS -X DELETE "${url}/${id}" -H "Authorization: Bearer $(gcloud auth print-access-token)"` : `curl -sS -X POST "${url}?templateId=${id}" \\\n  -H "Authorization: Bearer $(gcloud auth print-access-token)" -H "Content-Type: application/json" \\\n  -d ${sq(body)}`),
+        python: head + `# pip install google-cloud-modelarmor\n# ${del ? "delete_template" : "create_template"}(${JSON.stringify(proj)}, ${JSON.stringify(R)}, ${JSON.stringify(id)}${del ? "" : ", body"})`,
+      },
+    };
+  }
+  if (i.kind === "model_armor_extension") {
+    const name = p.name || "EXTENSION_NAME";
+    const tmpl = p.template?.startsWith("projects/") ? p.template : `projects/${proj}/locations/${R}/templates/${p.template ?? "TEMPLATE_ID"}`;
+    const settings = JSON.stringify([{ request_template_id: tmpl, response_template_id: tmpl }]);
+    const body = JSON.stringify({ service: `modelarmor.${R}.rep.googleapis.com`, failOpen: false, timeout: "5s", metadata: { model_armor_settings: settings } });
+    const url = `https://networkservices.googleapis.com/v1/projects/${proj}/locations/${R}/authzExtensions`;
+    notes.push("service modelarmor.<region>.rep.googleapis.com makes this a Model Armor extension; metadata.model_armor_settings names the template.", "A long-running operation.");
+    return {
+      resource: `projects/${proj}/locations/${R}/authzExtensions/${name}`,
+      notes,
+      warnings,
+      outputs: {
+        terraform: head + (del ? `# Delete the google_network_services_authz_extension block for ${name} and run terraform apply.` : `resource "google_network_services_authz_extension" "${ident(name)}" {\n  project   = ${hcl(proj)}\n  location  = ${hcl(R)}\n  name      = ${hcl(name)}\n  service   = "modelarmor.${R}.rep.googleapis.com"\n  timeout   = "5s"\n  fail_open = false\n  metadata = {\n    model_armor_settings = jsonencode([{ request_template_id = ${hcl(tmpl)}, response_template_id = ${hcl(tmpl)} }])\n  }\n}`),
+        gcloud: head + (del ? `gcloud service-extensions authz-extensions delete ${name} --location=${R} --project=${proj} --quiet` : `cat > ${name}.yaml <<'EOF'\nname: ${name}\nservice: modelarmor.${R}.rep.googleapis.com\nfailOpen: false\ntimeout: 5s\nmetadata:\n  model_armor_settings: '${settings}'\nEOF\ngcloud service-extensions authz-extensions import ${name} \\\n  --source=${name}.yaml --location=${R} --project=${proj}`),
+        rest: head + (del ? `curl -sS -X DELETE "${url}/${name}" -H "Authorization: Bearer $(gcloud auth print-access-token)"` : `curl -sS -X POST "${url}?authzExtensionId=${name}" \\\n  -H "Authorization: Bearer $(gcloud auth print-access-token)" -H "Content-Type: application/json" \\\n  -d ${sq(body)}`),
+        python: head + `# pip install google-cloud-network-services\n# ${del ? "delete_authz_extension" : "create_authz_extension"}(${JSON.stringify(proj)}, ${JSON.stringify(R)}, ${JSON.stringify(name)}${del ? "" : ", body"})`,
+      },
+    };
+  }
+  const member = p.member?.includes(":") ? p.member : `serviceAccount:${p.member ?? "SERVICE_AGENT"}`;
+  const roles = p.roles ?? [];
+  notes.push("Project-level IAM on the template's project, so the gateway's service agent can call Model Armor.");
+  return {
+    resource: `projects/${proj}`,
+    notes,
+    warnings,
+    outputs: {
+      terraform: head + (del ? "# Delete the google_project_iam_member block and run terraform apply." : `resource "google_project_iam_member" "${ident(`ma_roles_${member}`)}" {\n  for_each = toset(${JSON.stringify(roles)})\n\n  project = ${hcl(proj)}\n  role    = each.value\n  member  = ${hcl(member)}\n}`),
+      gcloud: head + roles.map((r) => `gcloud projects ${del ? "remove" : "add"}-iam-policy-binding ${proj} \\\n  --member=${member} --role=${r} --condition=None`).join("\n"),
+      rest: head + `# getIamPolicy -> ${del ? "remove" : "add"} ${member} in ${roles.join(", ")} -> setIamPolicy (read-modify-write with the etag)`,
+      python: head + `# pip install google-cloud-resource-manager\n# ${del ? "revoke" : "grant"}_project_roles(${JSON.stringify(proj)}, ${JSON.stringify(member)}, ${JSON.stringify(roles)})`,
+    },
+  };
+}
+
 export function mockRender(ctx: Ctx, w: World, intents: Intent[]): RenderResult {
   const items: RenderItem[] = intents.map((i) => {
     let r: { outputs: Outputs; warnings: string[]; notes: string[] };
@@ -313,8 +384,12 @@ export function mockRender(ctx: Ctx, w: World, intents: Intent[]): RenderResult 
     } else if (i.kind === "bind_gateway" || i.kind === "unbind_gateway") {
       r = bindOutputs(ctx, w, i, i.kind === "unbind_gateway");
       anatomy = { resource: i.engine ?? "", role: "", member: "", condition: null, notes: r.notes };
+    } else if (i.kind === "model_armor_template" || i.kind === "model_armor_extension" || i.kind === "iam_project_grant") {
+      const s = setupOutputs(ctx, w, i);
+      r = s;
+      anatomy = { resource: s.resource, role: i.kind === "iam_project_grant" ? (i.params?.roles ?? []).join(", ") : "", member: i.params?.member ?? "", condition: null, notes: s.notes };
     } else {
-      r = maOutputs(ctx, w, i, i.kind === "model_armor_off");
+      r = maOutputs(ctx, w, i, i.kind === "model_armor_off", intents);
       anatomy = { resource: i.gateway?.name ?? "", role: "", member: "", condition: null, notes: r.notes };
     }
     return { intent_id: i.id, english: intentEnglish(i), anatomy, outputs: r.outputs, warnings: r.warnings };
@@ -372,6 +447,27 @@ export function mockDiff(w: World, intents: Intent[]): DiffResult {
       const has = cur === i.gateway?.name;
       if (i.kind === "bind_gateway") return { intent_id: i.id, status: has ? "present" : cur ? "replace" : "add", current: null, detail: has ? "Already bound to this gateway." : cur ? `Moves from ${shortName(cur)} to ${shortName(i.gateway!.name)}.` : `Binds ${i.gateway!.direction}; other directions are kept.` };
       return { intent_id: i.id, status: has ? "remove" : "absent", current: null, detail: has ? "Unbinds this direction; the other is kept." : "Not bound to this gateway." };
+    }
+    if (i.kind === "model_armor_template" || i.kind === "model_armor_extension" || i.kind === "iam_project_grant") {
+      const p = i.params ?? {};
+      const del = !!p.delete;
+      let have = false;
+      let what = "";
+      if (i.kind === "model_armor_template") {
+        have = w.modelArmor.templates.some((t) => t.id === p.template_id);
+        what = `template ${p.template_id}`;
+      } else if (i.kind === "model_armor_extension") {
+        have = w.maExtensions.some((x) => shortName(x.name) === p.name);
+        what = `extension ${p.name}`;
+      } else {
+        const a = w.serviceAgents.find((x) => x.member === p.member);
+        const held = (p.roles ?? []).filter((r) => a?.roles[r]);
+        const todo = (p.roles ?? []).filter((r) => !a?.roles[r]);
+        if (del) return { intent_id: i.id, status: held.length ? "remove" : "absent", current: null, detail: held.length ? `Removes ${held.join(", ")}.` : "Holds none of these roles." };
+        return { intent_id: i.id, status: todo.length ? "add" : "present", current: null, detail: todo.length ? `Grants ${todo.join(", ")}.` : "Already holds every role." };
+      }
+      if (del) return { intent_id: i.id, status: have ? "remove" : "absent", current: null, detail: have ? `Deletes ${what}.` : `${what} doesn't exist.` };
+      return { intent_id: i.id, status: have ? "present" : "add", current: null, detail: have ? `${what} already exists.` : `Creates ${what}.` };
     }
     const g = w.modelArmor.gateways.find((x) => x.gateway === i.gateway?.name);
     if (i.kind === "model_armor_on") return { intent_id: i.id, status: g?.enabled ? "present" : "add", current: null, detail: g?.enabled ? "Model Armor is already on." : "Creates a CONTENT_AUTHZ policy on the gateway." };

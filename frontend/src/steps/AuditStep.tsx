@@ -11,7 +11,8 @@ import { AuditIcon, DownloadIcon, PencilIcon, TrashIcon, WarnIcon, CheckIcon, In
 import { grantToIntent } from "../lib/grants";
 import { downloadBlob, makeZip } from "../lib/zip";
 import { ago } from "../lib/util";
-import { KIND_LABEL, intentEnglish } from "../lib/policy";
+import { KIND_LABEL, intentEnglish, intentKey } from "../lib/policy";
+import { RedeployHelp } from "../components/Redeploy";
 
 const SEV: Record<Finding["severity"], { tone: "red" | "amber" | "neutral"; label: string }> = {
   high: { tone: "red", label: "High" },
@@ -96,7 +97,7 @@ export function AuditStep() {
   const [cond, setCond] = useState<"" | "conditional" | "unconditional">("");
   const [exporting, setExporting] = useState(false);
 
-  const staged = (f: Finding) => !!f.fix && cart.some((c) => c.kind === f.fix!.kind && JSON.stringify({ ...c, id: "" }) === JSON.stringify({ ...f.fix!, id: "" }));
+  const staged = (f: Finding) => !!f.fix && cart.some((c) => intentKey(c) === intentKey(f.fix!));
   const revokeStaged = (g: Grant) => cart.some((c) => c.kind === "revoke" && c.source?.principal === g.member && c.destination?.name === g.resource);
 
   return (
@@ -159,6 +160,7 @@ export function AuditStep() {
                             <Badge tone={SEV[f.severity].tone}>{SEV[f.severity].label}</Badge> {f.title}
                           </div>
                           <p className="small">{f.detail}</p>
+                          {f.redeploy && <RedeployHelp code={f.redeploy} />}
                           {f.fix && (
                             <div className="row">
                               {staged(f) ? (

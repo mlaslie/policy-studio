@@ -145,7 +145,7 @@ def test_unbind_last_direction_sends_empty_config():
 
 def test_bind_warnings():
     old = one(Intent(id="o", kind="bind_gateway", engine=F.E3, gateway=GatewayRef(name=F.EG)))
-    assert any("before 2026-04-29" in w for w in old.warnings)
+    assert old.error and "can't be bound" in old.error and not old.error.startswith("Blocked")
     unknown = one(Intent(id="n", kind="bind_gateway", engine="projects/1/locations/x/reasoningEngines/5",
                          gateway=GatewayRef(name=F.EG)))
     assert any("unknown" in w for w in unknown.warnings)

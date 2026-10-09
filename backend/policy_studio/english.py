@@ -121,4 +121,21 @@ def intent_english(intent: Intent) -> str:
         return f"Screen traffic on Agent Gateway {_short(gw.name) if gw else '?'} with Model Armor."
     if k == "model_armor_off":
         return f"Stop screening traffic on Agent Gateway {_short(gw.name) if gw else '?'} with Model Armor."
+    p = intent.params
+    delete = bool(p and p.delete)
+    if k == "model_armor_template":
+        tid = _short((p.template_id if p else "") or "") or "TEMPLATE_ID"
+        return (f"Delete Model Armor template {tid}." if delete else
+                f"Create Model Armor template {tid}: the filters Model Armor applies to prompts and responses.")
+    if k == "model_armor_extension":
+        name = _short((p.name if p else "") or "") or "EXTENSION"
+        tmpl = _short((p.template if p else "") or "") or "TEMPLATE"
+        return (f"Delete Model Armor authz extension {name}." if delete else
+                f"Create Model Armor authz extension {name}, which screens with template {tmpl}.")
+    if k == "iam_project_grant":
+        member = member_label((p.member if p else "") or "") or "the service agent"
+        roles = ", ".join((p.roles if p else None) or []) or "no roles"
+        where = f" on project {p.project}" if p and p.project else ""
+        return (f"Remove {roles} from {member}{where}." if delete else
+                f"Let {member} call Model Armor: grant {roles}{where}.")
     return k

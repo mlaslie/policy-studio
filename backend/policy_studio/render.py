@@ -12,6 +12,14 @@ Sources of truth (REST shapes, gcloud flags and Terraform resources verified liv
   bind/unbind    PATCH https://R-aiplatform.googleapis.com/v1/<engine>?updateMask=spec.deploymentSpec.agentGatewayConfig
                  (replaces the whole field, so the other direction is re-sent). No gcloud command exists.
   model armor    networksecurity authzPolicies: CONTENT_AUTHZ, action CUSTOM -> Model Armor authz extension
+  setup          Model Armor template  POST https://modelarmor.R.rep.googleapis.com/v1/projects/P/locations/R/templates
+                   ?templateId=T; gcloud model-armor templates create (flags checked with --help; regional endpoint
+                   via CLOUDSDK_API_ENDPOINT_OVERRIDES_MODELARMOR); Terraform google_model_armor_template
+                 authz extension  POST https://networkservices.googleapis.com/v1/projects/P/locations/R/authzExtensions
+                   ?authzExtensionId=NAME (long-running); gcloud service-extensions authz-extensions import;
+                   Terraform google_network_services_authz_extension
+                 service agent roles  project getIamPolicy / setIamPolicy (read-modify-write); gcloud projects
+                   add-iam-policy-binding; Terraform google_project_iam_member
 """
 from __future__ import annotations
 
@@ -23,7 +31,9 @@ from typing import Any, Optional
 from . import hcl
 from .conditions import EGRESSOR, condition_for
 from .english import PROJECT_AGENTS_RE, engine_principal_parts, intent_english, member_label
-from .model import Anatomy, Bundle, Condition, Context, Intent, Outputs, RenderItem, RenderResult
+from .gcp import model_armor as ma_mod
+from .model import (Anatomy, Bundle, Condition, Context, Intent, Outputs, RenderItem, RenderResult, SetupParams,
+                    TemplateFilters)
 
 PROVIDER_VERSION = ">= 8.1.0"
 TF_VERSION = ">= 1.5"
@@ -36,7 +46,12 @@ TF_RESOURCE = {"agent": ("google_iap_agent_registry_agent_iam_member", "agent_id
                "endpoint": ("google_iap_agent_registry_endpoint_iam_member", "endpoint_id")}
 KIND_LABEL = {"agent": "A2A agent", "mcp_server": "MCP server", "endpoint": "API endpoint",
               "registry": "Agent Registry (every entry)"}
-ORDER = {"bind_gateway": 0, "unbind_gateway": 0, "model_armor_on": 1, "model_armor_off": 1, "grant": 2, "revoke": 2}
+# Bundle order: gateway bindings, Model Armor setup (template -> extension -> service agent roles), Model Armor
+# on/off, grants. Setup deletes (undo) run after Model Armor off, in reverse.
+ORDER = {"bind_gateway": 0, "unbind_gateway": 0, "model_armor_template": 1, "model_armor_extension": 2,
+         "iam_project_grant": 3, "model_armor_on": 4, "model_armor_off": 4, "grant": 5, "revoke": 5}
+DELETE_ORDER = {"iam_project_grant": 6, "model_armor_extension": 7, "model_armor_template": 8}
+PLACEHOLDER_EXT = "MODEL_ARMOR_EXTENSION"
 
 
 # ====================================================================== environment
@@ -47,6 +62,9 @@ class RenderEnv:
     engine_info: dict[str, dict[str, Any]] = field(default_factory=dict)  # engine name -> {display_name, bindable}
     mcp_tools: dict[str, list[dict[str, Any]]] = field(default_factory=dict)  # mcp id -> [{name, read_only}]
     staged_egress: set[str] = field(default_factory=set)   # engines a staged intent binds to an egress gateway
+    staged_extensions: list[str] = field(default_factory=list)  # Model Armor extensions created by staged intents
+    staged_templates: list[str] = field(default_factory=list)   # Model Armor templates created by staged intents
+    known_extensions: Optional[list[str]] = None   # Model Armor extensions discovery found (None = not looked up)
 
     @property
     def project(self) -> str:
@@ -159,6 +177,39 @@ class MaSpec:
     project: str
     policy: str
     extension: str
+    staged_extension: bool = False      # the extension is created by a staged intent in this cart
+
+
+@dataclass
+class TemplateSpec:
+    op: str                        # create | delete
+    project: str
+    region: str
+    template_id: str
+    name: str                      # projects/P/locations/R/templates/T
+    body: dict[str, Any]
+    summary: list[str]
+
+
+@dataclass
+class ExtSpec:
+    op: str                        # create | delete
+    project: str
+    region: str
+    ext_id: str
+    name: str                      # projects/P/locations/R/authzExtensions/NAME
+    template: str                  # full template name
+    body: dict[str, Any]
+    staged_template: bool
+
+
+@dataclass
+class ProjIamSpec:
+    op: str                        # add | remove
+    project: str
+    member: str
+    roles: list[str]
+    gateway: str
 
 
 def gateway_full(env: RenderEnv, name: str, direction: str) -> str:
@@ -214,6 +265,15 @@ def iam_spec(intent: Intent, env: RenderEnv, warnings: list[str]) -> IamSpec:
                    src_label=(s.label if s and s.label else member_label(member)))
 
 
+def engine_info_for(env: RenderEnv, engine: str) -> dict[str, Any]:
+    """Discovery info of an engine, matched by full name or, failing that, by engine id (project id vs number)."""
+    info = env.engine_info.get(engine)
+    if info is None:
+        eid = short(engine)
+        info = next((v for k, v in env.engine_info.items() if short(k) == eid), None)
+    return info or {}
+
+
 def bind_spec(intent: Intent, env: RenderEnv, warnings: list[str]) -> BindSpec:
     gw = intent.gateway
     direction = gw.direction if gw else "egress"
@@ -236,9 +296,10 @@ def bind_spec(intent: Intent, env: RenderEnv, warnings: list[str]) -> BindSpec:
             warnings.append(f"The engine's {direction} gateway is {short(prev[direction])}, not {short(gateway)}; "
                             "unbinding removes it anyway.")
         new.pop(direction, None)
-    info = env.engine_info.get(engine) or {}
+    info = engine_info_for(env, engine)
     if intent.kind == "bind_gateway" and info and not info.get("bindable", True):
-        warnings.append("This engine was created before 2026-04-29 and can't be bound to a gateway; redeploy it first.")
+        raise Blocked(f"{info.get('display_name') or short(engine)} can't be bound to Agent Gateway. "
+                      + (info.get("bindable_reason") or "It was created before 2026-04-29; redeploy it first."))
     return BindSpec(op="bind" if intent.kind == "bind_gateway" else "unbind", engine=engine,
                     engine_label=info.get("display_name") or short(engine), direction=direction, gateway=gateway,
                     new=new, prev=prev, known=known)
@@ -257,13 +318,120 @@ def ma_spec(intent: Intent, env: RenderEnv, warnings: list[str]) -> MaSpec:
     if intent.kind == "model_armor_off" and not (gw and gw.policy):
         warnings.append(f"Policy name assumed to be {policy}; check the Model Armor step for the actual name.")
     ext = gw.extension if gw and gw.extension else ("AUTHZ_EXTENSION" if intent.kind == "model_armor_off" else "")
+    staged = False
+    if intent.kind == "model_armor_on" and not ext and env.staged_extensions:
+        ext = next((x for x in env.staged_extensions if project_of(x) == project), env.staged_extensions[0])
+        staged = True
+    elif ext and ext in env.staged_extensions:
+        staged = True
+    if intent.kind == "model_armor_on" and ext and not staged and env.known_extensions is not None and \
+            not any(short(x) == short(ext) for x in env.known_extensions):
+        warnings.append(f"Model Armor isn't set up in {env.region} yet: the extension {short(ext)} doesn't exist and "
+                        "isn't staged in this cart. Stage the setup (template, extension, service agent roles) with "
+                        "this item.")
     if intent.kind == "model_armor_on" and not ext:
-        ext = f"projects/{project}/locations/{env.region}/authzExtensions/MODEL_ARMOR_EXTENSION"
-        warnings.append("No Model Armor authz extension found in this region: create one (service "
-                        f"modelarmor.{env.region}.rep.googleapis.com, metadata.model_armor_settings naming a template) "
-                        "and replace MODEL_ARMOR_EXTENSION.")
+        ext = f"projects/{project}/locations/{env.region}/authzExtensions/{PLACEHOLDER_EXT}"
+        warnings.append(f"Model Armor isn't set up in {env.region} yet: there's no Model Armor authz extension for "
+                        "this gateway to use. Set it up first (a template, an extension and permissions for the "
+                        "gateway's service agent); this item then uses the new extension automatically. Until then "
+                        f"the commands below use the placeholder {PLACEHOLDER_EXT}.")
     return MaSpec(op="on" if intent.kind == "model_armor_on" else "off", gateway=gateway, project=project,
-                  policy=policy, extension=ext)
+                  policy=policy, extension=ext, staged_extension=staged)
+
+
+class Blocked(ValueError):
+    """An intent that can't work as staged (rendered as a per-item error with just this message)."""
+
+
+_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,63}$")
+
+
+def setup_project(p: SetupParams, env: RenderEnv) -> str:
+    return (p.project or "").strip() or env.gw_project
+
+
+def template_spec(intent: Intent, env: RenderEnv, warnings: list[str]) -> TemplateSpec:
+    p = intent.params or SetupParams()
+    project = setup_project(p, env)
+    tid = short(p.template_id or "")
+    if not tid:
+        warnings.append("No template id: enter a name for the template.")
+        tid = "TEMPLATE_ID"
+    elif not _ID_RE.match(tid):
+        warnings.append(f"Template id {tid!r} should use only letters, digits, - and _ (at most 63).")
+    filters = p.filters or TemplateFilters()
+    body: dict[str, Any] = {}
+    summary: list[str] = []
+    if not p.delete:
+        if filters.sdp == "advanced" and not p.inspect_template:
+            warnings.append("Sensitive data “advanced” needs a Sensitive Data Protection inspect template; the "
+                            "commands use the placeholder INSPECT_TEMPLATE.")
+        body = ma_mod.template_body(filters, p.block_message if p.block_message is not None
+                                    else ma_mod.DEFAULT_BLOCK_MESSAGE, p.inspect_template)
+        if not body["filterConfig"]:
+            warnings.append("Every filter is off, so this template screens nothing.")
+        summary = ma_mod.parse_template({"name": "x", **body}).summary
+    return TemplateSpec(op="delete" if p.delete else "create", project=project, region=env.region, template_id=tid,
+                        name=f"projects/{project}/locations/{env.region}/templates/{tid}", body=body, summary=summary)
+
+
+def ext_spec(intent: Intent, env: RenderEnv, warnings: list[str]) -> ExtSpec:
+    p = intent.params or SetupParams()
+    project = setup_project(p, env)
+    name = short(p.name or "")
+    if not name:
+        warnings.append("No extension name: enter a name for the authz extension.")
+        name = "EXTENSION_NAME"
+    elif not re.match(r"^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$", name):
+        warnings.append(f"Extension name {name!r} should be lowercase letters, digits and hyphens, starting with a "
+                        "letter (at most 63).")
+    template = ""
+    if not p.delete:
+        if not p.template:
+            warnings.append("No template: pick the Model Armor template this extension screens with.")
+        template = ma_mod.template_name(project, env.region, p.template or "TEMPLATE_ID")
+        loc = ma_mod.region_of(template, env.region)
+        if loc != env.region:
+            warnings.append(f"The template is in {loc}, but the extension is in {env.region}: a Model Armor "
+                            "extension uses templates of its own region.")
+    body = ma_mod.extension_body(env.region, template) if not p.delete else {}
+    return ExtSpec(op="delete" if p.delete else "create", project=project, region=env.region, ext_id=name,
+                   name=f"projects/{project}/locations/{env.region}/authzExtensions/{name}", template=template,
+                   body=body, staged_template=template in env.staged_templates)
+
+
+def proj_iam_spec(intent: Intent, env: RenderEnv, warnings: list[str]) -> ProjIamSpec:
+    p = intent.params or SetupParams()
+    member = ma_mod.normalize_member(p.member or "")
+    if not member:
+        warnings.append("No member: pick the gateway service agent to grant the roles to.")
+        member = "serviceAccount:SERVICE_AGENT"
+    roles = list(dict.fromkeys(p.roles or ma_mod.MA_ROLES))
+    other = [r for r in roles if r not in ma_mod.MA_ROLES]
+    if other:
+        warnings.append(f"Policy Studio only grants the Model Armor roles ({', '.join(ma_mod.MA_ROLES)}); Apply "
+                        f"refuses {', '.join(other)}.")
+    return ProjIamSpec(op="remove" if p.delete else "add", project=setup_project(p, env), member=member,
+                       roles=roles, gateway=p.gateway or "")
+
+
+def with_staged(env: RenderEnv, intents: list[Intent]) -> RenderEnv:
+    """Remember the Model Armor templates / extensions that staged intents create, so later intents in the same
+    cart (an extension naming the template, model_armor_on without an extension) refer to them."""
+    exts, tmpls = list(env.staged_extensions), list(env.staged_templates)
+    for it in intents:
+        if it.is_delete or not it.params:
+            continue
+        project = setup_project(it.params, env)
+        if it.kind == "model_armor_extension" and it.params.name:
+            n = f"projects/{project}/locations/{env.region}/authzExtensions/{short(it.params.name)}"
+            if n not in exts:
+                exts.append(n)
+        if it.kind == "model_armor_template" and it.params.template_id:
+            n = f"projects/{project}/locations/{env.region}/templates/{short(it.params.template_id)}"
+            if n not in tmpls:
+                tmpls.append(n)
+    return replace(env, staged_extensions=exts, staged_templates=tmpls)
 
 
 # ====================================================================== anatomy
@@ -584,6 +752,9 @@ def ma_anatomy(sp: MaSpec, env: RenderEnv) -> Anatomy:
              "metadata names the template",
              "verified: egress screening covers MCP traffic, not A2A",
              "a long-running operation (about 4 minutes)"]
+    if sp.staged_extension:
+        notes.append(f"uses {short(sp.extension)}, which an earlier item in this cart creates (run that first; the "
+                     "bundle orders it so)")
     return Anatomy(resource=f"projects/{sp.project}/locations/{env.region}/authzPolicies/{sp.policy}",
                    role="CONTENT_AUTHZ → CUSTOM (Model Armor)", member=sp.gateway, notes=notes)
 
@@ -646,11 +817,30 @@ def python_ma_call(sp: MaSpec, env: RenderEnv) -> str:
     return "model_armor_off(" + ", ".join(py_str(a) for a in (sp.project, env.region, sp.policy)) + ")"
 
 
-def tf_ma(sp: MaSpec, env: RenderEnv, name: str, bundle: bool) -> str:
+def _tf_project(project: str, env: RenderEnv) -> str:
+    return "local.gateway_project" if project == env.gw_project else (
+        "var.project_id" if project == env.project else hcl.q(project))
+
+
+def _tf_where(b: hcl.Block, project: str, env: RenderEnv, bundle: bool) -> None:
+    if bundle:
+        b.attr("project", _tf_project(project, env))
+        b.attr("location", "var.region")
+    else:
+        b.s("project", project)
+        b.s("location", env.region)
+
+
+def _depends(b: hcl.Block, deps: Optional[list[str]]) -> None:
+    if deps:
+        b.blank()
+        b.attr("depends_on", "[" + ", ".join(deps) + "]")
+
+
+def tf_ma(sp: MaSpec, env: RenderEnv, name: str, bundle: bool, deps: Optional[list[str]] = None) -> str:
     b = hcl.Block(f'resource "google_network_security_authz_policy" "{name}"')
     if bundle:
-        b.attr("project", "local.gateway_project" if sp.project == env.gw_project else
-               ("var.project_id" if sp.project == env.project else hcl.q(sp.project)))
+        b.attr("project", _tf_project(sp.project, env))
         b.attr("location", "var.region")
     else:
         b.s("project", sp.project)
@@ -662,6 +852,7 @@ def tf_ma(sp: MaSpec, env: RenderEnv, name: str, bundle: bool) -> str:
     b.block("target").attr("resources", hcl.obj([sp.gateway], 2))
     b.blank()
     b.block("custom_provider").block("authz_extension").attr("resources", hcl.obj([sp.extension], 3))
+    _depends(b, deps)
     text = b.render()
     if sp.op == "on":
         return text
@@ -669,6 +860,379 @@ def tf_ma(sp: MaSpec, env: RenderEnv, name: str, bundle: bool) -> str:
         "Model Armor off: Terraform deletes the authz policy when its resource is removed. Delete this block from "
         "your configuration and run `terraform apply`. If the policy was created outside Terraform, use the "
         "gcloud, REST or Python tab instead.") + "#\n" + hcl.commented(text))
+
+
+# ====================================================================== Model Armor setup
+def py_obj(v: Any, ind: int = 0) -> str:
+    """Python literal for JSON data (True/False/None), indented like json.dumps(indent=4)."""
+    pad, inner = "    " * ind, "    " * (ind + 1)
+    if isinstance(v, dict):
+        if not v:
+            return "{}"
+        return "{\n" + "".join(f"{inner}{py_str(k)}: {py_obj(x, ind + 1)},\n" for k, x in v.items()) + pad + "}"
+    if isinstance(v, list):
+        if not v:
+            return "[]"
+        return "[\n" + "".join(f"{inner}{py_obj(x, ind + 1)},\n" for x in v) + pad + "]"
+    if isinstance(v, bool):
+        return "True" if v else "False"
+    if v is None:
+        return "None"
+    if isinstance(v, str):
+        return py_str(v)
+    return json.dumps(v)
+
+
+def ma_template_url(sp: TemplateSpec, with_id: bool) -> str:
+    base = f"{ma_mod.modelarmor(sp.region)}/projects/{sp.project}/locations/{sp.region}/templates"
+    return f"{base}?templateId={sp.template_id}" if with_id else f"{base}/{sp.template_id}"
+
+
+def ext_url(sp: ExtSpec, with_id: bool) -> str:
+    base = f"https://networkservices.googleapis.com/v1/projects/{sp.project}/locations/{sp.region}/authzExtensions"
+    return f"{base}?authzExtensionId={sp.ext_id}" if with_id else f"{base}/{sp.ext_id}"
+
+
+def template_anatomy(sp: TemplateSpec) -> Anatomy:
+    notes = ["resource: a Model Armor template, a named set of filters in one region "
+             f"(API host modelarmor.{sp.region}.rep.googleapis.com)",
+             "a template does nothing on its own: an authz extension names it, and an authz policy attaches the "
+             "extension to a gateway"]
+    if sp.op == "create":
+        notes += [f"filter: {line}" for line in sp.summary]
+        notes.append("templateMetadata: the custom error code / message is what callers see when a request or "
+                     "response is blocked; logging of sanitize operations helps you tune the filters")
+    else:
+        notes.append("delete: fails while an authz extension still uses the template; delete the extension first")
+    return Anatomy(resource=sp.name, role="Model Armor template (filters)",
+                   member="(used by a Model Armor authz extension)", notes=notes)
+
+
+def gcloud_template(sp: TemplateSpec) -> str:
+    env_line = f"CLOUDSDK_API_ENDPOINT_OVERRIDES_MODELARMOR=https://modelarmor.{sp.region}.rep.googleapis.com/"
+    head = ("# gcloud model-armor talks to the regional endpoint, set here for this one command. Flags checked against\n"
+            "# `gcloud model-armor templates create --help`; the REST tab sends the identical body.\n")
+    if sp.op == "delete":
+        return head + cont([f"{env_line} gcloud model-armor templates delete {sp.template_id}",
+                            f"--project={sp.project}", f"--location={sp.region}", "--quiet"])
+    fc = sp.body["filterConfig"]
+    md = sp.body["templateMetadata"]
+    flags = [f"{env_line} gcloud model-armor templates create {sp.template_id}", f"--project={sp.project}",
+             f"--location={sp.region}"]
+    pi = fc.get("piAndJailbreakFilterSettings")
+    if pi:
+        flags += ["--pi-and-jailbreak-filter-settings-enforcement=enabled",
+                  "--pi-and-jailbreak-filter-settings-confidence-level="
+                  + pi["confidenceLevel"].lower().replace("_", "-")]
+    sdp = fc.get("sdpSettings") or {}
+    if "basicConfig" in sdp:
+        flags.append("--basic-config-filter-enforcement=enabled")
+    if "advancedConfig" in sdp:
+        flags.append(f"--advanced-config-inspect-template={shq(sdp['advancedConfig']['inspectTemplate'])}")
+    if "maliciousUriFilterSettings" in fc:
+        flags.append("--malicious-uri-filter-settings-enforcement=enabled")
+    rai = (fc.get("raiSettings") or {}).get("raiFilters")
+    if rai:
+        flags.append("--rai-settings-filters=" + shq(json.dumps(
+            [{"confidenceLevel": r["confidenceLevel"], "filterType": r["filterType"]} for r in rai],
+            separators=(",", ":"))))
+    if md.get("customPromptSafetyErrorMessage"):
+        flags += ["--template-metadata-custom-prompt-safety-error-code=403",
+                  f"--template-metadata-custom-prompt-safety-error-message={shq(md['customPromptSafetyErrorMessage'])}",
+                  "--template-metadata-custom-llm-response-safety-error-code=403",
+                  "--template-metadata-custom-llm-response-safety-error-message="
+                  + shq(md["customLlmResponseSafetyErrorMessage"])]
+    flags += ["--template-metadata-log-operations", "--template-metadata-log-sanitize-operations"]
+    return head + cont(flags)
+
+
+def rest_template(sp: TemplateSpec) -> str:
+    if sp.op == "delete":
+        return curl("DELETE", ma_template_url(sp, False))
+    return ("# Returns the template (not a long-running operation).\n"
+            + curl("POST", ma_template_url(sp, True), body=json.dumps(sp.body, separators=(",", ":"))))
+
+
+PY_TEMPLATE_HELPERS = """import json
+
+from google.api_core.client_options import ClientOptions
+from google.cloud import modelarmor_v1  # pip install google-cloud-modelarmor
+
+
+def _model_armor(region):
+    # Model Armor is regional: the client must use the region's endpoint.
+    return modelarmor_v1.ModelArmorClient(
+        client_options=ClientOptions(api_endpoint=f"modelarmor.{region}.rep.googleapis.com"))
+
+
+def create_template(project, region, template_id, body):
+    \"\"\"Create a Model Armor template from its REST body (the same JSON as the REST tab).\"\"\"
+    template = modelarmor_v1.Template.from_json(json.dumps(body))
+    created = _model_armor(region).create_template(
+        parent=f"projects/{project}/locations/{region}", template_id=template_id, template=template)
+    print("created", created.name)
+    return created
+
+
+def delete_template(project, region, template_id):
+    _model_armor(region).delete_template(name=f"projects/{project}/locations/{region}/templates/{template_id}")
+    print("deleted", template_id)
+"""
+
+
+def python_template_call(sp: TemplateSpec) -> str:
+    if sp.op == "delete":
+        return f"delete_template({py_str(sp.project)}, {py_str(sp.region)}, {py_str(sp.template_id)})"
+    return (f"create_template(\n    {py_str(sp.project)},\n    {py_str(sp.region)},\n    {py_str(sp.template_id)},\n"
+            f"    {py_obj(sp.body, 1)},\n)")
+
+
+def tf_template(sp: TemplateSpec, env: RenderEnv, name: str, bundle: bool) -> str:
+    b = hcl.Block(f'resource "google_model_armor_template" "{name}"')
+    _tf_where(b, sp.project, env, bundle)
+    b.s("template_id", sp.template_id)
+    fc = sp.body.get("filterConfig") or {}
+    md = sp.body.get("templateMetadata") or {}
+    b.blank()
+    f = b.block("filter_config")
+    if fc.get("piAndJailbreakFilterSettings"):
+        pi = f.block("pi_and_jailbreak_filter_settings")
+        pi.s("filter_enforcement", "ENABLED")
+        pi.s("confidence_level", fc["piAndJailbreakFilterSettings"]["confidenceLevel"])
+    sdp = fc.get("sdpSettings") or {}
+    if "basicConfig" in sdp:
+        f.block("sdp_settings").block("basic_config").s("filter_enforcement", "ENABLED")
+    if "advancedConfig" in sdp:
+        f.block("sdp_settings").block("advanced_config").s("inspect_template",
+                                                           sdp["advancedConfig"]["inspectTemplate"])
+    if "maliciousUriFilterSettings" in fc:
+        f.block("malicious_uri_filter_settings").s("filter_enforcement", "ENABLED")
+    rai = (fc.get("raiSettings") or {}).get("raiFilters") or []
+    if rai:
+        rb = f.block("rai_settings")
+        for r in rai:
+            x = rb.block("rai_filters")
+            x.s("filter_type", r["filterType"])
+            x.s("confidence_level", r["confidenceLevel"])
+    if md:
+        b.blank()
+        m = b.block("template_metadata")
+        for key, tf_key in (("customPromptSafetyErrorCode", "custom_prompt_safety_error_code"),
+                            ("customPromptSafetyErrorMessage", "custom_prompt_safety_error_message"),
+                            ("customLlmResponseSafetyErrorCode", "custom_llm_response_safety_error_code"),
+                            ("customLlmResponseSafetyErrorMessage", "custom_llm_response_safety_error_message"),
+                            ("logSanitizeOperations", "log_sanitize_operations"),
+                            ("logTemplateOperations", "log_template_operations")):
+            if key in md:
+                m.attr(tf_key, hcl.obj(md[key], 2))
+    text = b.render()
+    if sp.op == "create":
+        return text
+    return (hcl.comment_lines(
+        "Delete the template: remove its google_model_armor_template block and run `terraform apply`. If it was "
+        "created outside Terraform, use the gcloud, REST or Python tab.") + "#\n" + hcl.commented(text))
+
+
+def ext_anatomy(sp: ExtSpec) -> Anatomy:
+    notes = [f"resource: a Network Services authz extension; service modelarmor.{sp.region}.rep.googleapis.com "
+             "makes it a Model Armor extension",
+             "metadata.model_armor_settings: a JSON string naming the template for requests and for responses",
+             "failOpen false: if Model Armor can't be reached, traffic is blocked rather than let through unscreened",
+             "timeout 5s: how long the gateway waits for Model Armor's verdict",
+             "the extension is attached to a gateway by a CONTENT_AUTHZ authz policy (Model Armor on)",
+             "a long-running operation"]
+    if sp.staged_template:
+        notes.append(f"uses template {short(sp.template)}, which an earlier item in this cart creates")
+    if sp.op == "delete":
+        notes = ["delete: fails while an authz policy (Model Armor on) still uses the extension; turn Model Armor "
+                 "off first", "a long-running operation"]
+    return Anatomy(resource=sp.name, role=f"service modelarmor.{sp.region}.rep.googleapis.com",
+                   member=sp.template or "(deleted)", notes=notes)
+
+
+def ext_yaml(sp: ExtSpec) -> str:
+    return (f"name: {sp.ext_id}\n"
+            f"service: {sp.body['service']}\n"
+            "failOpen: false\n"
+            f"timeout: {sp.body['timeout']}\n"
+            "metadata:\n"
+            f"  model_armor_settings: '{sp.body['metadata']['model_armor_settings']}'\n")
+
+
+def gcloud_ext(sp: ExtSpec) -> str:
+    if sp.op == "delete":
+        return cont([f"gcloud service-extensions authz-extensions delete {sp.ext_id}", f"--location={sp.region}",
+                     f"--project={sp.project}", "--quiet"])
+    f = f"{sp.ext_id}.yaml"
+    return (f"cat > {f} <<'EOF'\n{ext_yaml(sp)}EOF\n"
+            + cont([f"gcloud service-extensions authz-extensions import {sp.ext_id}", f"--source={f}",
+                    f"--location={sp.region}", f"--project={sp.project}"]))
+
+
+def rest_ext(sp: ExtSpec) -> str:
+    if sp.op == "delete":
+        return "# Long-running operation.\n" + curl("DELETE", ext_url(sp, False))
+    return ("# Long-running operation: poll the returned operation name.\n"
+            + curl("POST", ext_url(sp, True), body=json.dumps(sp.body, separators=(",", ":"))))
+
+
+PY_EXT_HELPERS = """import json
+
+from google.cloud import network_services_v1  # pip install google-cloud-network-services
+
+dep = network_services_v1.DepServiceClient()
+
+
+def create_authz_extension(project, region, name, body):
+    \"\"\"Create an authz extension from its REST body (long-running).\"\"\"
+    parent = f"projects/{project}/locations/{region}"
+    ext = network_services_v1.AuthzExtension.from_json(
+        json.dumps({"name": f"{parent}/authzExtensions/{name}", **body}))
+    op = dep.create_authz_extension(parent=parent, authz_extension_id=name, authz_extension=ext)
+    return op.result(timeout=900)
+
+
+def delete_authz_extension(project, region, name):
+    op = dep.delete_authz_extension(name=f"projects/{project}/locations/{region}/authzExtensions/{name}")
+    return op.result(timeout=900)
+"""
+
+
+def python_ext_call(sp: ExtSpec) -> str:
+    if sp.op == "delete":
+        return f"delete_authz_extension({py_str(sp.project)}, {py_str(sp.region)}, {py_str(sp.ext_id)})"
+    return (f"create_authz_extension(\n    {py_str(sp.project)},\n    {py_str(sp.region)},\n    {py_str(sp.ext_id)},\n"
+            f"    {py_obj(sp.body, 1)},\n)")
+
+
+def tf_ext(sp: ExtSpec, env: RenderEnv, name: str, bundle: bool, deps: Optional[list[str]] = None) -> str:
+    b = hcl.Block(f'resource "google_network_services_authz_extension" "{name}"')
+    _tf_where(b, sp.project, env, bundle)
+    b.s("name", sp.ext_id)
+    b.s("service", sp.body.get("service") or f"modelarmor.{sp.region}.rep.googleapis.com")
+    b.s("timeout", sp.body.get("timeout") or "5s")
+    b.attr("fail_open", "false")
+    settings = [{"request_template_id": sp.template, "response_template_id": sp.template}]
+    b.attr("metadata", "{\n    model_armor_settings = jsonencode(" + hcl.obj(settings, 2) + ")\n  }")
+    _depends(b, deps)
+    text = b.render()
+    if sp.op == "create":
+        return text
+    return (hcl.comment_lines(
+        "Delete the extension: remove its google_network_services_authz_extension block and run `terraform apply`. "
+        "If it was created outside Terraform, use the gcloud, REST or Python tab.") + "#\n" + hcl.commented(text))
+
+
+def proj_iam_anatomy(sp: ProjIamSpec) -> Anatomy:
+    notes = ["resource: the project that holds the Model Armor template (project-level IAM)",
+             "roles/modelarmor.calloutUser: lets the gateway call Model Armor as a service extension",
+             "roles/modelarmor.user: lets it use the template to screen content",
+             "roles/serviceusage.serviceUsageConsumer: lets it use the Model Armor API in this project",
+             "member: the gateway's service agent, the identity the gateway uses for extension callouts "
+             "(agentGatewayCard.serviceExtensionsServiceAccount; for ingress gateways also the Agent Runtime "
+             "service agent, verified in one project: check yours)",
+             "read-modify-write of the project IAM policy with its etag; other bindings are untouched"]
+    if sp.op == "remove":
+        notes.append("remove: takes the member out of these roles' unconditional bindings only")
+    return Anatomy(resource=f"projects/{sp.project}", role=", ".join(sp.roles), member=sp.member, notes=notes)
+
+
+def gcloud_proj_iam(sp: ProjIamSpec) -> str:
+    verb = "add-iam-policy-binding" if sp.op == "add" else "remove-iam-policy-binding"
+    return "\n".join(cont([f"gcloud projects {verb} {sp.project}", f"--member={shq(sp.member)}", f"--role={r}",
+                           "--condition=None"]) for r in sp.roles)
+
+
+def rest_proj_iam(sp: ProjIamSpec) -> str:
+    jq = JQ_ADD if sp.op == "add" else JQ_REMOVE
+    lines = [f"RESOURCE={shq(f'https://cloudresourcemanager.googleapis.com/v1/projects/{sp.project}')}",
+             f"MEMBER={shq(sp.member)}",
+             "TITLE=''",
+             "EXPR=''",
+             "",
+             f"# Read-modify-write per role: get the project policy, {'add' if sp.op == 'add' else 'remove'} the "
+             "member with jq, set it back (the etag guards against concurrent edits).",
+             f"for ROLE in {' '.join(sp.roles)}; do",
+             "  " + cont(['curl -sS --fail-with-body -X POST "$RESOURCE:getIamPolicy"',
+                          '-H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json"',
+                          "-d '{\"options\":{\"requestedPolicyVersion\":3}}'"], "    ") + " \\",
+             '  | jq --arg role "$ROLE" --arg member "$MEMBER" --arg title "$TITLE" --arg expr "$EXPR" \'',
+             jq + "' \\",
+             "  " + cont(['| curl -sS --fail-with-body -X POST "$RESOURCE:setIamPolicy"',
+                          '-H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json"', "-d @-"],
+                         "    "),
+             "done"]
+    return "\n".join(lines)
+
+
+PY_PROJECT_IAM_HELPERS = """from google.cloud import resourcemanager_v3  # pip install google-cloud-resource-manager
+from google.iam.v1 import iam_policy_pb2, options_pb2, policy_pb2
+
+crm = resourcemanager_v3.ProjectsClient()
+
+
+def _project_policy(project):
+    return crm.get_iam_policy(request=iam_policy_pb2.GetIamPolicyRequest(
+        resource=f"projects/{project}", options=options_pb2.GetPolicyOptions(requested_policy_version=3)))
+
+
+def _has(policy, member, role):
+    return any(b.role == role and member in b.members and not b.condition.expression for b in policy.bindings)
+
+
+def grant_project_roles(project, member, roles):
+    \"\"\"Add member to each role (unconditional) on the project; read-modify-write with the etag.\"\"\"
+    policy = _project_policy(project)
+    added = [r for r in roles if not _has(policy, member, r)]
+    for role in added:
+        policy.bindings.append(policy_pb2.Binding(role=role, members=[member]))
+    if added:
+        policy.version = 3
+        crm.set_iam_policy(request=iam_policy_pb2.SetIamPolicyRequest(resource=f"projects/{project}", policy=policy))
+    print(f"granted {added or 'nothing (already granted)'} to {member} on {project}")
+
+
+def revoke_project_roles(project, member, roles):
+    \"\"\"Remove member from the unconditional bindings of these roles; other bindings are kept.\"\"\"
+    policy = _project_policy(project)
+    kept, removed = [], []
+    for b in policy.bindings:
+        members = list(b.members)
+        if b.role in roles and member in members and not b.condition.expression:
+            members.remove(member)
+            removed.append(b.role)
+        if members:
+            nb = policy_pb2.Binding(role=b.role, members=members)
+            if b.HasField("condition"):
+                nb.condition.CopyFrom(b.condition)
+            kept.append(nb)
+    if removed:
+        policy.ClearField("bindings")
+        policy.bindings.extend(kept)
+        policy.version = 3
+        crm.set_iam_policy(request=iam_policy_pb2.SetIamPolicyRequest(resource=f"projects/{project}", policy=policy))
+    print(f"removed {removed or 'nothing'} from {member} on {project}")
+"""
+
+
+def python_proj_iam_call(sp: ProjIamSpec) -> str:
+    fn = "grant_project_roles" if sp.op == "add" else "revoke_project_roles"
+    return (f"{fn}(\n    {py_str(sp.project)},\n    {py_str(sp.member)},\n    {py_obj(sp.roles, 1)},\n)")
+
+
+def tf_proj_iam(sp: ProjIamSpec, env: RenderEnv, name: str, bundle: bool) -> str:
+    b = hcl.Block(f'resource "google_project_iam_member" "{name}"')
+    b.attr("for_each", "toset(" + hcl.obj(sp.roles, 1) + ")")
+    b.blank()
+    b.attr("project", _tf_project(sp.project, env) if bundle else hcl.q(sp.project))
+    b.attr("role", "each.value")
+    b.s("member", sp.member)
+    text = b.render()
+    if sp.op == "add":
+        return text
+    return (hcl.comment_lines(
+        "Remove the roles: delete this google_project_iam_member block and run `terraform apply`. If they were "
+        "granted outside Terraform, use the gcloud, REST or Python tab.") + "#\n" + hcl.commented(text))
 
 
 # ====================================================================== per intent
@@ -689,6 +1253,12 @@ def _tf_name(intent: Intent, spec: Any) -> str:
         base = f"{spec.src_label}_{spec.dest_label}" + ("" if not spec.condition else "_conditional")
     elif isinstance(spec, BindSpec):
         base = f"{spec.op}_{spec.engine_label}_{spec.direction}"
+    elif isinstance(spec, TemplateSpec):
+        base = f"ma_template_{spec.template_id}"
+    elif isinstance(spec, ExtSpec):
+        base = f"ma_extension_{spec.ext_id}"
+    elif isinstance(spec, ProjIamSpec):
+        base = f"ma_roles_{spec.member.split(':', 1)[-1].split('@', 1)[0]}"
     else:
         base = f"model_armor_{short(spec.gateway)}"
     return hcl.ident(base)
@@ -734,6 +1304,23 @@ def render_one(intent: Intent, env: RenderEnv, tf_name: Optional[str] = None) ->
         sp = bind_spec(intent, env, warnings)
         name = tf_name or _tf_name(intent, sp)
         return _from_bind(intent.id, k, sp, env, bind_english(sp), name, warnings)
+    if k == "model_armor_template":
+        sp = template_spec(intent, env, warnings)
+        name = tf_name or _tf_name(intent, sp)
+        return _assemble(intent.id, k, intent_english(intent), template_anatomy(sp), sp, gcloud_template(sp),
+                         rest_template(sp), PY_TEMPLATE_HELPERS, python_template_call(sp),
+                         tf_template(sp, env, name, bundle=False), name, warnings)
+    if k == "model_armor_extension":
+        sp = ext_spec(intent, env, warnings)
+        name = tf_name or _tf_name(intent, sp)
+        return _assemble(intent.id, k, intent_english(intent), ext_anatomy(sp), sp, gcloud_ext(sp), rest_ext(sp),
+                         PY_EXT_HELPERS, python_ext_call(sp), tf_ext(sp, env, name, bundle=False), name, warnings)
+    if k == "iam_project_grant":
+        sp = proj_iam_spec(intent, env, warnings)
+        name = tf_name or _tf_name(intent, sp)
+        return _assemble(intent.id, k, intent_english(intent), proj_iam_anatomy(sp), sp, gcloud_proj_iam(sp),
+                         rest_proj_iam(sp), PY_PROJECT_IAM_HELPERS, python_proj_iam_call(sp),
+                         tf_proj_iam(sp, env, name, bundle=False), name, warnings)
     sp = ma_spec(intent, env, warnings)
     name = tf_name or _tf_name(intent, sp)
     return _assemble(intent.id, k, intent_english(intent), ma_anatomy(sp, env), sp, gcloud_ma(sp, env),
@@ -792,6 +1379,15 @@ def _main_tf(env: RenderEnv, rendered: list[_Rendered]) -> str:
     lo = hcl.Block("locals")
     lo.attr("gateway_project", "coalesce(var.gateway_project_id, var.project_id)")
     out += [lo.render()]
+    # Resources created in this bundle that later ones depend on (Model Armor setup before Model Armor on).
+    tmpl_ref = {r.spec.name: f"google_model_armor_template.{r.tf_name}" for r in rendered
+                if isinstance(r.spec, TemplateSpec) and r.spec.op == "create"}
+    ext_ref = {r.spec.name: f"google_network_services_authz_extension.{r.tf_name}" for r in rendered
+               if isinstance(r.spec, ExtSpec) and r.spec.op == "create"}
+    iam_refs = {r.spec.project: [] for r in rendered if isinstance(r.spec, ProjIamSpec)}
+    for r in rendered:
+        if isinstance(r.spec, ProjIamSpec) and r.spec.op == "add":
+            iam_refs[r.spec.project].append(f"google_project_iam_member.{r.tf_name}")
     for r in rendered:
         out.append("\n")
         out.append(f"# {r.item.english}\n")
@@ -799,8 +1395,18 @@ def _main_tf(env: RenderEnv, rendered: list[_Rendered]) -> str:
             out.append(tf_iam(r.spec, env, r.tf_name, bundle=True))
         elif isinstance(r.spec, BindSpec):
             out.append(tf_bind(r.spec, env, r.tf_name, bundle=True))
+        elif isinstance(r.spec, TemplateSpec):
+            out.append(tf_template(r.spec, env, r.tf_name, bundle=True))
+        elif isinstance(r.spec, ExtSpec):
+            dep = tmpl_ref.get(r.spec.template)
+            out.append(tf_ext(r.spec, env, r.tf_name, bundle=True, deps=[dep] if dep else None))
+        elif isinstance(r.spec, ProjIamSpec):
+            out.append(tf_proj_iam(r.spec, env, r.tf_name, bundle=True))
         else:
-            out.append(tf_ma(r.spec, env, r.tf_name, bundle=True))
+            deps = []
+            if r.spec.op == "on" and r.spec.extension in ext_ref:
+                deps = [ext_ref[r.spec.extension]] + iam_refs.get(project_of(r.spec.extension) or "", [])
+            out.append(tf_ma(r.spec, env, r.tf_name, bundle=True, deps=deps))
     return re.sub(r"\n{3,}", "\n\n", "".join(out)).rstrip("\n") + "\n"
 
 
@@ -808,12 +1414,19 @@ def _shell_header(env: RenderEnv, what: str) -> str:
     return ("#!/usr/bin/env bash\n"
             f"# {what} generated by Policy Studio for project {env.project} ({env.number}), region {env.region}"
             + (f", gateway project {env.gw_project}" if env.gw_project != env.project else "") + ".\n"
-            "# Review before running. Order: gateway bindings, Model Armor, then grants.\n"
+            "# Review before running. Order: gateway bindings, Model Armor setup (template, extension, service\n"
+            "# agent roles), Model Armor on/off, then grants.\n"
             "set -euo pipefail\n")
 
 
 def _section(n: int, total: int, english: str) -> str:
     return f"\n# ---- [{n}/{total}] {english}\n"
+
+
+def order_key(r: _Rendered) -> int:
+    if getattr(r.spec, "op", "") in ("delete", "remove") and r.kind in DELETE_ORDER:
+        return DELETE_ORDER[r.kind]
+    return ORDER.get(r.kind, 9)
 
 
 def bundle(env: RenderEnv, rendered: list[_Rendered]) -> Bundle:
@@ -828,7 +1441,7 @@ def bundle(env: RenderEnv, rendered: list[_Rendered]) -> Bundle:
         else:
             units.append(r)
     merged = [merge_binds(groups[u], env) if isinstance(u, str) else u for u in units]
-    ordered = sorted(merged, key=lambda r: ORDER.get(r.kind, 9))
+    ordered = sorted(merged, key=order_key)
     n = len(ordered)
     gcloud_parts = [_shell_header(env, "apply.sh")]
     rest_parts = [_shell_header(env, "REST calls"), TOKEN_LINE + "\n"]
@@ -855,9 +1468,11 @@ def render(intents: list[Intent], env: RenderEnv) -> RenderResult:
     state = {k: dict(v) for k, v in env.engines.items()}
     staged = {engine_full(env, i.engine or "") for i in intents if i.kind == "bind_gateway"
               and (not i.gateway or i.gateway.direction == "egress")}
-    env = replace(env, staged_egress=set(env.staged_egress) | staged)
+    env = with_staged(replace(env, staged_egress=set(env.staged_egress) | staged), intents)
     touched: dict[str, list[str]] = {}
     items: list[RenderItem] = []
+    from .preflight import duplicates      # (imports render; local import avoids the cycle)
+    dups = duplicates(intents)
     for it in intents:
         e = replace(env, engines={k: dict(v) for k, v in state.items()})
         try:
@@ -871,7 +1486,13 @@ def render(intents: list[Intent], env: RenderEnv) -> RenderResult:
                 english = intent_english(it)
             except Exception:  # noqa: BLE001
                 english = it.kind
-            items.append(RenderItem(intent_id=it.id, english=english, error=f"{type(ex).__name__}: {ex}"[:400]))
+            msg = str(ex) if isinstance(ex, Blocked) else f"{type(ex).__name__}: {ex}"
+            items.append(RenderItem(intent_id=it.id, english=english, error=msg[:600]))
+            continue
+        if it.id in dups:
+            r.item.warnings.append(f"Same change as item {dups[it.id]} earlier in the cart: left out of the bundle "
+                                   "(it's applied once).")
+            items.append(r.item)
             continue
         if isinstance(r.spec, BindSpec):
             earlier = touched.setdefault(r.spec.engine, [])

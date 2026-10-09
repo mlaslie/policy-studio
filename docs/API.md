@@ -28,11 +28,12 @@ Every request carries the context as query params (GET) or a `context` object (P
 | GET | `/api/studio/defaults` | `{project, region}` from env `STUDIO_PROJECT` / `STUDIO_REGION`, or the gcloud config |
 | GET | `/api/studio/context` | `{project, project_number, region, gateway_project, gateway_project_number, ge_app, ge_location, principal, principal_set, apis: {"networkservices.googleapis.com": true, …}, permissions: [PermissionCheck], can_apply: false, errors: [str]}` |
 | GET | `/api/studio/gateways` | `{gateways: [Gateway], notes: [str], errors: [str], synced_at}` |
-| GET | `/api/studio/model-armor` | `{gateways: [{gateway, type, enabled, policy, extension, template: Template \| null, available_extensions?: [str], error?}], templates: [Template], extensions: [{name, templates}], notes, errors}` |
+| GET | `/api/studio/model-armor` | `{gateways: [{gateway, type, enabled, policy, extension, template: Template \| null, available_extensions?: [str], error?}], templates: [Template], extensions: [{name, templates}], setup: MaSetup, notes, errors}` |
 | GET | `/api/studio/inventory` | `Inventory` |
 | GET | `/api/studio/audit` | `{grants: [Grant], findings: [Finding], synced_at}` |
 | POST | `/api/studio/render` | `{context, intents: [Intent]}` → `RenderResult` |
 | POST | `/api/studio/diff` | `{context, intents: [Intent]}` → `{items: [DiffItem]}` |
+| POST | `/api/studio/preflight` | `{context, intents: [Intent]}` → `{items: [PreflightItem]}` (read-only; the checks `/apply` enforces) |
 
 GET responses are cached for 30 s per context. `?refresh=1` bypasses the cache; the **Sync** button uses it. Partial failures appear per item as `error: "…"` and never fail the whole request. A failure of the whole request (no credentials, network) is HTTP 502 `{detail}`.
 
@@ -50,6 +51,17 @@ Gateway = { name, id, project, type: "egress" | "ingress", governed_access_path,
             authz_policies: [{name, profile: "REQUEST_AUTHZ"|"CONTENT_AUTHZ", provider: "iap"|"model_armor"|"other",
                               extension, enforcement?: "ENFORCE"|"DRY_RUN"}],
             bound_engines: [{engine, display_name, direction: "egress"|"ingress"}], create_time }
+MaSetup = { ready: boolean, missing: ("template"|"extension"|"service_agent_roles")[], region,
+            extensions: [{name, templates}], templates: [Template],
+            service_agents: [{email, member, gateway, gateways: [str], project, source, note,
+                              roles: {"roles/modelarmor.calloutUser"|"roles/modelarmor.user"|
+                                      "roles/serviceusage.serviceUsageConsumer": boolean | null /* null = IAM unreadable */},
+                              error?}],
+            roles: [str], suggested: {template_id /* for a new template */, template /* existing one to reuse */ | null,
+                                      extension_name} }
+  // service agents: each gateway's agentGatewayCard.serviceExtensionsServiceAccount, plus for ingress gateways
+  // service-<PROJECT_NUMBER>@gcp-sa-aiplatform-re.iam.gserviceaccount.com (verified in one project; check yours).
+  // Roles are read with project getIamPolicy (read-only); only unconditional bindings count.
 Template = { name, id, filters: {
                pi_jailbreak: {enabled, level?},            // e.g. MEDIUM_AND_ABOVE
                sdp: {enabled, mode?: "basic"|"advanced"},
@@ -58,7 +70,9 @@ Template = { name, id, filters: {
              block_message?: string, summary: string[] /* plain-English lines */, raw: object }
 Inventory = {
   engines: [{ name, id, display_name, principal, identity_type /* AGENT_IDENTITY|SERVICE_AGENT|SERVICE_ACCOUNT */,
-              gateways: {egress?, ingress?}, create_time, bindable: boolean /* created on/after 2026-04-29 */ }],
+              gateways: {egress?, ingress?}, create_time,
+              bindable: boolean /* identity_type AGENT_IDENTITY and created on/after 2026-04-29 */,
+              bindable_reason: string | null }],
   agents:  [{ name, id, display_name, kind: "runtime"|"a2a", url?, skills: [{id, name, description}], engine?, error? }],
   mcp_servers: [{ name, id, display_name, url?, tools: [{name, description, read_only, destructive, annotations}], error? }],
   endpoints: [{ name, id, display_name, url, error? }],
@@ -66,16 +80,35 @@ Inventory = {
   project_agents_principal: string | null, errors: string[], synced_at }
 Binding = { role, member, member_label, condition?: {title, expression}, english }
 Grant  = Binding & { resource, resource_kind: "agent"|"mcp_server"|"endpoint"|"registry", resource_label }
-Finding = { severity: "high"|"medium"|"info", title, detail, resource?, fix?: Intent, fixes?: Intent[] }
+Finding = { severity: "high"|"medium"|"info", title, detail, resource?, fix?: Intent, fixes?: Intent[],
+            redeploy?: string /* Python: redeploy with Agent Identity, for engines that can't be bound (no fix) */ }
   // fix intents for grant/revoke carry full source and destination objects with labels; bind fixes carry source too
 
-Intent = { id, kind: "grant"|"revoke"|"bind_gateway"|"unbind_gateway"|"model_armor_on"|"model_armor_off",
+Intent = { id, kind: "grant"|"revoke"|"bind_gateway"|"unbind_gateway"|"model_armor_on"|"model_armor_off"
+              |"model_armor_template"|"model_armor_extension"|"iam_project_grant",
   source?:      { type: "engine"|"project_agents"|"custom", principal, label, engine? },
   destination?: { kind: "agent"|"mcp_server"|"endpoint"|"registry", id, name, label },
   access?:      { mode: "all"|"read_only_hint"|"tools"|"custom", tools?: string[], expression?: string,
                   title?: string /* exact condition title, e.g. when revoking an existing binding */ },
   gateway?:     { name, direction: "egress"|"ingress", extension?: string, policy?: string },
-  engine?:      string }
+  engine?:      string,
+  params?:      SetupParams /* the Model Armor setup kinds */ }
+SetupParams = { project? /* default: the gateway project */, delete?: boolean /* the inverse (undo) */,
+  // model_armor_template
+  template_id?, block_message?, inspect_template? /* sdp "advanced" */,
+  filters?: { pi_jailbreak: "LOW_AND_ABOVE"|"MEDIUM_AND_ABOVE"|"HIGH"|"off", sdp: "basic"|"advanced"|"off",
+              rai: {HATE_SPEECH|HARASSMENT|SEXUALLY_EXPLICIT|DANGEROUS: level|"off"}, malicious_uri: boolean },
+  // model_armor_extension
+  name?, template? /* id or projects/P/locations/R/templates/T */,
+  // iam_project_grant (only the three Model Armor roles)
+  member?, roles?: string[], gateway? }
+  // model_armor_on without gateway.extension uses an extension a model_armor_extension in the same request creates
+  // (no placeholder, no warning); otherwise the one discovery finds; otherwise MODEL_ARMOR_EXTENSION with a warning.
+  // Bundle / apply order: bindings, template -> extension -> service agent roles -> Model Armor on/off, grants;
+  // setup deletes after Model Armor off, in reverse.
+  // Duplicates (same kind + gateway / engine / source / destination / access / params) render with a warning
+  // and are left out of the bundle; /apply skips them. bind_gateway of an engine that can't be bound renders as an
+  // item error.
   // Unknown fields (e.g. a client-only engine_label) are ignored.
   // destination.kind "registry" = a registry-wide grant: id "", name "projects/<P>/locations/<R>" (the Grant.resource
   // of a resource_kind "registry" grant). Rendered on the IAP resource .../iap_web/agentRegistry, gcloud without
@@ -91,6 +124,11 @@ RenderResult = { context /* resolved, incl. project_number */,
   // Intents are validated one by one: an invalid intent (or one that fails to render) gets an item with `error`,
   // in its original position, and the others still render. Items with an error are left out of the bundle. Binding changes to the same engine are chained in cart order
   // and the bundle sends them as one PATCH.
+
+PreflightItem = { intent_id, status: "ok"|"blocked"|"duplicate"|"invalid", reason?,
+                  fix?: "ma_setup"|"redeploy"|"permission", duplicate_of? }
+  // blocked: bind_gateway of an engine that can't be bound; model_armor_on with no Model Armor extension in the
+  // region and none staged; a kind the caller can't write (apply mode, /auth writable).
 
 DiffItem = { intent_id, status: "add"|"present"|"replace"|"remove"|"absent", detail, error? /* invalid intent */,
              current: Binding[] | null /* the member's roles/iap.egressor bindings on the resource today */,
@@ -150,13 +188,18 @@ Available only when `can_apply`; otherwise it returns 403 with the reason.
 {"context": {...}, "intents": [Intent], "confirm": {"project": "proj-b", "acknowledge_destructive": false}}
 ```
 
-`confirm.project` must equal `context.project`. Revokes, unbinds and `model_armor_off` need `acknowledge_destructive: true`.
+`confirm.project` must equal `context.project`. Revokes, unbinds, `model_armor_off` and setup deletes (`params.delete`) need `acknowledge_destructive: true`.
 
-The response streams NDJSON or SSE events per intent: `{intent_id, state: "running"|"done"|"verified"|"failed"|"skipped", detail, operation?, undo?: Intent}`, then `{type: "done", summary}`.
+The response streams NDJSON or SSE events per intent: `{intent_id, state: "running"|"done"|"verified"|"failed"|"skipped", detail, operation?, undo?: Intent, raw_error?, blocked?, fix?}`, then `{type: "done", summary}` (`summary.blocked` counts preflight refusals).
+
+Before any call, duplicates are `skipped` and the `/preflight` blockers `failed` with `blocked: true`. Known Google Cloud errors get a plain-English `detail` (e.g. the AGENT_IDENTITY 400 on a bind) with the original in `raw_error`.
 
 Each intent is applied, then read back and verified:
 - **IAP grant/revoke:** getIamPolicy → modify → setIamPolicy with the etag, version 3, and the condition preserved; read back and confirm the binding is there (or gone).
 - **bind/unbind gateway:** an engine PATCH that keeps the other direction, one PATCH per engine at a time. It's a long-running operation; the result reports the operation, and a later read-back confirms `agentGatewayConfig`.
 - **model_armor_on/off:** create or delete the `CONTENT_AUTHZ` authz policy (long-running operation, about 4 min).
+- **model_armor_template:** create (or delete) the template on `modelarmor.<R>.rep.googleapis.com`; read back.
+- **model_armor_extension:** create (or delete) the authz extension (long-running; waited for, so a `model_armor_on` in the same request can use it); read back that it names the template.
+- **iam_project_grant:** project getIamPolicy → add (or remove) the member in the Model Armor roles only → setIamPolicy with the etag (retried on a conflict); read back. The writer refuses any other change to the project policy.
 
 Every applied intent returns its inverse in `undo`, which the UI keeps as an "Undo last apply" list. An apply log is appended to `~/.policy-studio/apply-log.jsonl` (locally).

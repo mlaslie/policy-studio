@@ -7,6 +7,7 @@ import { Badge, Callout, Disclosure, Load, StepHeader, Term } from "../component
 import { CodeView } from "../components/CodeView";
 import { CheckIcon, CloseIcon, SparkIcon } from "../components/Icons";
 import { newId, shortName } from "../lib/policy";
+import { MaSetupCallout, ModelArmorSetup } from "./ModelArmorSetup";
 
 const LEVEL: Record<string, string> = {
   LOW_AND_ABOVE: "≥ LOW (strictest: blocks even weak signals)",
@@ -69,7 +70,7 @@ export function TemplateCard({ t }: { t: Template }) {
   );
 }
 
-function GatewayMA({ g }: { g: ModelArmorGateway }) {
+function GatewayMA({ g, setupReady }: { g: ModelArmorGateway; setupReady: boolean }) {
   const { addIntents, cart } = useStudio();
   const staged = cart.find((i) => (i.kind === "model_armor_on" || i.kind === "model_armor_off") && i.gateway?.name === g.gateway);
   const stage = (on: boolean) => addIntents([{ id: newId(), kind: on ? "model_armor_on" : "model_armor_off", gateway: { name: g.gateway, direction: g.type } }]);
@@ -122,15 +123,17 @@ function GatewayMA({ g }: { g: ModelArmorGateway }) {
           </div>
           {g.template ? <TemplateCard t={g.template} /> : <Callout tone="warn" title="Template not readable">The policy is attached but its template couldn't be read.</Callout>}
         </>
-      ) : (
+      ) : setupReady ? (
         <p className="muted">Nothing is screened on this gateway. “Turn on” stages a CONTENT_AUTHZ policy that uses the Model Armor extension; you'll get the commands in Review.</p>
+      ) : (
+        <MaSetupCallout text="Nothing is screened on this gateway, and the region doesn't have everything Model Armor needs yet (a template, an extension and permissions for the gateway's service agent). The guided setup stages all of it, including turning it on here." />
       )}
     </article>
   );
 }
 
 export function ModelArmorStep() {
-  const { modelArmor } = useStudio();
+  const { modelArmor, maSetupOpen, openMaSetup } = useStudio();
   return (
     <>
       <StepHeader
@@ -149,9 +152,20 @@ export function ModelArmorStep() {
         {(d) => (
           <>
             {d.gateways.length === 0 && <p className="muted">No gateways in this region. Create one first (step 1).</p>}
+            {d.gateways.length > 0 && <ModelArmorSetup data={d} />}
+            {d.setup?.ready && !maSetupOpen && d.gateways.length > 0 && (
+              <p className="small muted">
+                Model Armor is set up in this region (template, extension and service agent roles).{" "}
+                <Tip tip="Open the guided setup to stage another template or extension, or turn Model Armor on for more gateways.">
+                  <button className="link-btn" onClick={openMaSetup}>
+                    Open the setup steps
+                  </button>
+                </Tip>
+              </p>
+            )}
             <div className="ma-grid">
               {d.gateways.map((g) => (
-                <GatewayMA key={g.gateway} g={g} />
+                <GatewayMA key={g.gateway} g={g} setupReady={d.setup?.ready ?? true} />
               ))}
             </div>
             {d.templates.length > 0 && (

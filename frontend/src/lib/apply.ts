@@ -9,6 +9,8 @@ export type RunItem = {
   detail?: string;
   operation?: string;
   undo: Intent[];
+  /** Raw Google Cloud error when `detail` is a friendlier translation. */
+  rawError?: string;
   startedAt?: number;
   endedAt?: number;
 };
@@ -26,13 +28,19 @@ export type ApplyRun = {
 };
 
 export const DESTRUCTIVE_KINDS = new Set<Intent["kind"]>(["revoke", "unbind_gateway", "model_armor_off"]);
-export const isDestructive = (i: Intent) => DESTRUCTIVE_KINDS.has(i.kind);
+export const SETUP_KINDS = new Set<Intent["kind"]>(["model_armor_template", "model_armor_extension", "iam_project_grant"]);
+/** Revokes, unbinds, Model Armor off, and the delete (undo) form of the Model Armor setup kinds. */
+export const isDestructive = (i: Intent) => DESTRUCTIVE_KINDS.has(i.kind) || (SETUP_KINDS.has(i.kind) && !!i.params?.delete);
 
 /** What a destructive kind does, for the acknowledgement checkbox. */
 export const DESTRUCTIVE_PHRASE: Partial<Record<Intent["kind"], string>> = {
   revoke: "removes access",
   unbind_gateway: "detaches an agent from a gateway",
   model_armor_off: "turns off Model Armor",
+  // Setup kinds are destructive only in their delete (undo) form.
+  model_armor_template: "deletes a Model Armor template",
+  model_armor_extension: "deletes a Model Armor extension",
+  iam_project_grant: "removes a service agent's Model Armor roles",
 };
 
 /** Typical time per kind, shown next to the elapsed timer. */
@@ -43,6 +51,9 @@ export const TYPICAL: Record<Intent["kind"], { label: string; seconds: number }>
   unbind_gateway: { label: "about 5 min", seconds: 300 },
   model_armor_on: { label: "about 4 min", seconds: 240 },
   model_armor_off: { label: "about 4 min", seconds: 240 },
+  model_armor_template: { label: "a few seconds", seconds: 5 },
+  model_armor_extension: { label: "about 1 min", seconds: 60 },
+  iam_project_grant: { label: "a few seconds", seconds: 5 },
 };
 export const isLongRunning = (i: Intent) => TYPICAL[i.kind].seconds >= 60;
 
@@ -53,6 +64,9 @@ export const CHANGE_KIND: Record<Intent["kind"], string> = {
   unbind_gateway: "Agent update (long-running)",
   model_armor_on: "Create authz policy (long-running)",
   model_armor_off: "Delete authz policy (long-running)",
+  model_armor_template: "Model Armor template (setup)",
+  model_armor_extension: "Authz extension (setup, long-running)",
+  iam_project_grant: "Project IAM for the gateway's service agent (setup)",
 };
 
 export function fmtElapsed(ms: number): string {
@@ -77,6 +91,9 @@ const KIND_NOUN: Record<Intent["kind"], string> = {
   unbind_gateway: "gateway unbindings",
   model_armor_on: "turning Model Armor on",
   model_armor_off: "turning Model Armor off",
+  model_armor_template: "creating Model Armor templates",
+  model_armor_extension: "creating Model Armor extensions",
+  iam_project_grant: "granting the service agent roles",
 };
 /** Why this kind can't be applied by the signed-in user (null when it can, or when /auth doesn't say). */
 export function kindBlockedReason(a: AuthInfo | null, kind: Intent["kind"]): string | null {

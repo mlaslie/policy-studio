@@ -7,6 +7,7 @@ import { api } from "../api/client";
 import type { AccessMode, Binding, Grant, Intent, RenderItem, SourceType } from "../api/types";
 import { Badge, Callout, KindIcon, Load, StepHeader, Tabs, Term } from "../components/ui";
 import { ToolBadge, useDestinations } from "./InventoryStep";
+import { WarningCallouts } from "./ModelArmorSetup";
 import { grantToIntent } from "../lib/grants";
 import { CheckIcon, PlusIcon, RobotIcon, SearchIcon, WarnIcon } from "../components/Icons";
 import {
@@ -84,7 +85,7 @@ function useChecks(intent: Intent | null): Check[] {
       const e = engineByName.get(src.engine);
       if (e && !e.gateways.egress) {
         const staged = cart.some((i) => i.kind === "bind_gateway" && i.engine === e.name && i.gateway?.direction === "egress");
-        if (!e.bindable) out.push({ id: "nobind", tone: "red", text: <>{e.display_name} isn't behind an egress gateway and can't be bound (created before 2026-04-29). This grant won't be checked until it is redeployed.</> });
+        if (!e.bindable) out.push({ id: "nobind", tone: "red", text: <>{e.display_name} isn't behind an egress gateway and can't be bound ({e.bindable_reason ?? "created before 2026-04-29"}). This grant won't be checked until it is redeployed.</> });
         else if (staged) out.push({ id: "bindstaged", tone: "info", text: <>{e.display_name} will be bound to an egress gateway (already in your cart).</> });
         else
           out.push({
@@ -604,9 +605,7 @@ export function BuilderStep() {
                       </div>
                     )}
                     <Anatomy item={render} intent={intent} />
-                    {render?.warnings.filter((w) => !/egress gateway|destructive/i.test(w)).map((w) => (
-                      <Callout key={w} tone="warn">{w}</Callout>
-                    ))}
+                    <WarningCallouts warnings={render?.warnings.filter((w) => !/egress gateway|destructive/i.test(w))} />
                     {renderErr && <Callout tone="warn" title="Couldn't render on the server; showing a local preview">{renderErr}</Callout>}
                   </>
                 ) : (

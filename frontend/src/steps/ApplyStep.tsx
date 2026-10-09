@@ -5,7 +5,8 @@ import { Tip, unavailable } from "../components/Tooltip";
 import { useEffect, useMemo, useState } from "react";
 import { useStudio } from "../store";
 import { api } from "../api/client";
-import type { DiffItem, Intent } from "../api/types";
+import type { DiffItem, Intent, PreflightItem } from "../api/types";
+import { RedeployHelp } from "../components/Redeploy";
 import { Badge, Callout, Disclosure, Spinner, StepHeader } from "../components/ui";
 import { ArrowIcon, CheckIcon, ClockIcon, CloseIcon, CopyIcon, LockIcon, PlayIcon, RefreshIcon, WarnIcon } from "../components/Icons";
 import { useApplyGate } from "../components/Mode";
@@ -28,6 +29,9 @@ const KIND_TONE: Record<Intent["kind"], "green" | "red" | "blue" | "amber" | "pu
   unbind_gateway: "amber",
   model_armor_on: "purple",
   model_armor_off: "amber",
+  model_armor_template: "purple",
+  model_armor_extension: "purple",
+  iam_project_grant: "purple",
 };
 
 function useNow(active: boolean) {
@@ -42,12 +46,36 @@ function useNow(active: boolean) {
 
 // ---------------- plan ----------------
 
-function PlanRow({ intent, n, d }: { intent: Intent; n: number; d: DiffItem | undefined }) {
+/** What to do about an item the preflight blocked. */
+function BlockedFix({ p }: { p: PreflightItem }) {
+  const { openMaSetup, goto } = useStudio();
+  if (p.fix === "ma_setup")
+    return (
+      <Tip tip="Open the guided Model Armor setup: stage a template, an extension and the service agent roles, then come back to Apply. Nothing changes until you apply.">
+        <button className="btn btn-small btn-primary" onClick={openMaSetup}>
+          Set up Model Armor in this region <ArrowIcon size={13} />
+        </button>
+      </Tip>
+    );
+  if (p.fix === "redeploy") return <RedeployHelp />;
+  if (p.fix === "permission")
+    return (
+      <Tip tip="Open Context to see which role you're missing and the command to grant it.">
+        <button className="link-btn small" onClick={() => goto(0)}>
+          See the missing permission on Context
+        </button>
+      </Tip>
+    );
+  return null;
+}
+
+function PlanRow({ intent, n, d, p }: { intent: Intent; n: number; d: DiffItem | undefined; p?: PreflightItem }) {
   const { auth } = useStudio();
   const denied = kindBlockedReason(auth.data, intent.kind);
   const noop = d && (d.status === "present" || d.status === "absent");
+  const blocked = p && p.status !== "ok";
   return (
-    <li className={`plan-row ${noop ? "noop" : ""} ${isDestructive(intent) ? "destructive" : ""}`}>
+    <li className={`plan-row ${noop || blocked ? "noop" : ""} ${blocked ? "blocked" : ""} ${isDestructive(intent) ? "destructive" : ""}`}>
       <span className="review-num">{n}</span>
       <div className="grow plan-main">
         <div className="plan-tags">
@@ -63,8 +91,23 @@ function PlanRow({ intent, n, d }: { intent: Intent; n: number; d: DiffItem | un
               <LockIcon size={11} /> No permission
             </span>
           )}
+          {p?.status === "blocked" && (
+            <span className="badge badge-red">
+              <LockIcon size={11} /> Blocked
+            </span>
+          )}
+          {p?.status === "duplicate" && <span className="badge badge-neutral">Duplicate</span>}
         </div>
         <div className="plan-text">{intentEnglish(intent)}</div>
+        {blocked && (
+          <div className="plan-blocked">
+            <span className="small field-error">
+              {p.status === "blocked" ? "Will certainly fail, so it's left out of this apply: " : p.status === "duplicate" ? "Left out: " : ""}
+              {p.reason}
+            </span>
+            <BlockedFix p={p} />
+          </div>
+        )}
         {!d ? (
           <Spinner label="Comparing with the project…" />
         ) : d.error ? (
@@ -86,7 +129,7 @@ function PlanRow({ intent, n, d }: { intent: Intent; n: number; d: DiffItem | un
   );
 }
 
-function ConfirmCard({ items, diff }: { items: Intent[]; diff: DiffItem[] | null }) {
+function ConfirmCard({ items, diff, blocked }: { items: Intent[]; diff: DiffItem[] | null; blocked: number }) {
   const { ctx, startApply, run, auth, openApply } = useStudio();
   const denied = items.filter((i) => kindBlockedReason(auth.data, i.kind));
   const other = projectMismatch(auth.data);
@@ -128,6 +171,12 @@ function ConfirmCard({ items, diff }: { items: Intent[]; diff: DiffItem[] | null
       <h3 className="card-title">Confirm</h3>
       <p className="small">
         Apply <b>{items.length} change{items.length > 1 ? "s" : ""}</b> to project <b className="mono">{ctx.project}</b> ({ctx.region}), in the order above. Each one is read back and verified.
+        {blocked > 0 && (
+          <>
+            {" "}
+            <b>{blocked} blocked</b> item{blocked > 1 ? "s are" : " is"} left out (see above); {blocked > 1 ? "they stay" : "it stays"} in the cart.
+          </>
+        )}
         {lro > 0 && <> {lro} of them {lro > 1 ? "are" : "is a"} long-running operation{lro > 1 ? "s" : ""} (binding an agent takes about 5 minutes, Model Armor about 4); you can keep using Policy Studio meanwhile.</>}
       </p>
       {denied.length > 0 && (
@@ -210,6 +259,11 @@ function RunRow({ it, now }: { it: RunItem; now: number }) {
           {it.detail ? ` · ${it.detail}` : ""}
         </span>
         {it.operation && <span className="mono tiny muted" title="Long-running operation">{it.operation}</span>}
+        {it.rawError && (
+          <Disclosure summary="Show the Google Cloud error">
+            <pre className="mono tiny raw-error">{it.rawError}</pre>
+          </Disclosure>
+        )}
         {live && isLongRunning(it.intent) && (
           <div className="lro" aria-label={`Elapsed ${fmtElapsed(elapsed)}, usually ${typ.label}`}>
             <div className="lro-bar">
@@ -460,22 +514,38 @@ export function ApplyStep() {
   const items = focused.length ? focused : sorted;
   const [diff, setDiff] = useState<DiffItem[] | null>(null);
   const [diffErr, setDiffErr] = useState<string | null>(null);
+  const [pre, setPre] = useState<PreflightItem[] | null>(null);
   const key = JSON.stringify([items, ctx]);
 
   useEffect(() => {
     setDiff(null);
     setDiffErr(null);
+    setPre(null);
     if (!items.length) return;
     let live = true;
     api
       .diff(ctx, items)
       .then((d) => live && setDiff(d.items))
       .catch((e) => live && setDiffErr(e instanceof Error ? e.message : String(e)));
+    // Preflight: items that would certainly fail (or repeat another) are left out of the run.
+    api
+      .preflight(ctx, items)
+      .then((p) => {
+        if (!live) return;
+        // "Same change as <id>" -> "Same change as item N" (ids mean nothing to people).
+        const pos = new Map(items.map((i, n) => [i.id, n + 1]));
+        setPre(p.items.map((x) => (x.status === "duplicate" && x.duplicate_of && pos.has(x.duplicate_of) ? { ...x, reason: `Same change as item ${pos.get(x.duplicate_of)}; it's applied once.` } : x)));
+      })
+      .catch(() => live && setPre([]));
     return () => {
       live = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, run?.done]);
+
+  const skip = new Set((pre ?? []).filter((x) => x.status !== "ok").map((x) => x.intent_id));
+  const runnable = items.filter((i) => !skip.has(i.id));
+  const blockedN = skip.size;
 
   const lead = canApply ? (
     <>Make the staged changes in <b className="mono">{ctx.project}</b> with your credentials. You confirm first; each change is read back and verified, and can be undone.</>
@@ -525,13 +595,18 @@ export function ApplyStep() {
                     <span className="mono small">{diffErr}</span>
                   </Callout>
                 )}
+                {blockedN > 0 && (
+                  <Callout tone="warn" title={`${blockedN} blocked`}>
+                    {blockedN > 1 ? "These items" : "This item"} would certainly fail (or repeat another one), so Apply leaves {blockedN > 1 ? "them" : "it"} out. Each one says why and how to fix it.
+                  </Callout>
+                )}
                 <ol className="plan-list">
                   {items.map((i, n) => (
-                    <PlanRow key={i.id} intent={i} n={n + 1} d={diff?.find((d) => d.intent_id === i.id)} />
+                    <PlanRow key={i.id} intent={i} n={n + 1} d={diff?.find((d) => d.intent_id === i.id)} p={pre?.find((x) => x.intent_id === i.id)} />
                   ))}
                 </ol>
               </section>
-              {canApply && <ConfirmCard items={items} diff={diff} />}
+              {canApply && (pre ? <ConfirmCard items={runnable} diff={diff} blocked={blockedN} /> : <Spinner label="Checking what can be applied…" />)}
             </>
           )}
         </>
