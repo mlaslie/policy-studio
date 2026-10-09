@@ -39,12 +39,16 @@ WRITE_PERMISSIONS: dict[str, tuple[list[str], bool, str, str]] = {
                               "roles/networkservices.admin"),
     "iam_project_grant": (["resourcemanager.projects.setIamPolicy"], False, "both",
                           "roles/resourcemanager.projectIamAdmin"),
+    "set_enforcement": (["networkservices.authzExtensions.update"], False, "both", "roles/networkservices.admin"),
+    "dedicate_extension": (["networkservices.authzExtensions.create", "networksecurity.authzPolicies.update"], False,
+                           "both", "roles/networkservices.admin roles/networksecurity.editor"),
 }
 KIND_LABEL = {"grant": "grants", "revoke": "revokes", "bind_gateway": "gateway binds",
               "unbind_gateway": "gateway unbinds", "model_armor_on": "Model Armor on",
               "model_armor_off": "Model Armor off", "model_armor_template": "Model Armor templates",
               "model_armor_extension": "Model Armor extensions",
-              "iam_project_grant": "service agent role grants"}
+              "iam_project_grant": "service agent role grants",
+              "set_enforcement": "enforcement mode changes", "dedicate_extension": "dedicated IAP extensions"}
 
 
 # ------------------------------------------------------------------ machine-facing pieces (replaced in tests)
@@ -305,10 +309,11 @@ def report(target: str, *, mode: str, runtime: str, generate_reason: str, gatewa
         for k in no:
             _perms, _any, where, role = WRITE_PERMISSIONS[k]
             proj = (gateway_project or target) if where == "gateway" else target
-            line = (f"gcloud projects add-iam-policy-binding {proj} "
-                    f"--member='{_member(adc['account'], adc['type'])}' --role={role}")
-            if line not in lines:
-                lines.append(line)
+            for r in role.split():             # (a kind may need two roles, space-separated)
+                line = (f"gcloud projects add-iam-policy-binding {proj} "
+                        f"--member='{_member(adc['account'], adc['type'])}' --role={r}")
+                if line not in lines:
+                    lines.append(line)
         role_fix = "\n".join(lines) or None
         if errs and not writable:
             checks.append(_check("can_write", "warn", "Couldn't check write permissions", "; ".join(errs)))
@@ -322,7 +327,7 @@ def report(target: str, *, mode: str, runtime: str, generate_reason: str, gatewa
                                  role_fix))
         else:
             checks.append(_check("can_write", "ok", "Can apply every kind of change",
-                                 "Grants, revokes, gateway binds, Model Armor and its setup."))
+                                 "Grants, revokes, gateway binds, Model Armor and its setup, enforcement mode."))
 
     errors = [c for c in checks if c["status"] == "error"]
     can_apply = mode == "apply" and not errors

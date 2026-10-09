@@ -163,7 +163,8 @@ def audit(inv: Inventory, gateways: list[Gateway], ctx: Optional[Context] = None
                         "egress gateway, so nothing checks this grant (its egress is unrestricted)."),
                 resource=g.resource))
 
-    # 6. Gateways without Model Armor; IAP in dry run
+    # 6. Gateways without Model Armor; IAP in dry run (one finding per IAP extension, naming every gateway it serves)
+    dry_seen: set[str] = set()
     for gw in gateways:
         if not any(p.profile == "CONTENT_AUTHZ" for p in gw.authz_policies):
             findings.append(Finding(
@@ -173,14 +174,29 @@ def audit(inv: Inventory, gateways: list[Gateway], ctx: Optional[Context] = None
                 resource=gw.name,
                 fix=Intent(id=_id("ma", gw.name), kind="model_armor_on",
                            gateway=GatewayRef(name=gw.name, direction=gw.type))))
-        for p in gw.authz_policies:
-            if p.provider == "iap" and p.enforcement == "DRY_RUN":
-                findings.append(Finding(
-                    severity="medium", title=f"IAP in dry run on {gw.id}",
-                    detail=(f"The IAP authz extension {p.extension.rsplit('/', 1)[-1]} on {gw.id} runs in DRY_RUN: "
-                            "denials are only logged, every request is allowed. Switch it to ENFORCE "
-                            "(remove metadata.iamEnforcementMode and set failOpen: false)."),
-                    resource=p.extension))
+        enf = gw.enforcement
+        if enf.mode == "DRY_RUN" and enf.extension not in dry_seen:
+            dry_seen.add(enf.extension)
+            ids = [gw.id] + [x.rsplit("/", 1)[-1] for x in enf.shared_with]
+            ext = enf.extension.rsplit("/", 1)[-1]
+            shared = len(ids) > 1
+            names = ", ".join(ids[:-1]) + " and " + ids[-1] if shared else gw.id
+            findings.append(Finding(
+                severity="high",
+                title=(f"Gateways {names} are in dry run: nothing is blocked" if shared else
+                       f"Gateway {gw.id} is in dry run: nothing is blocked"),
+                detail=(f"The IAP authz extension {ext} runs in dry run (metadata.iamEnforcementMode DRY_RUN"
+                        + (", failOpen true" if enf.failOpen else "") + "): IAP still decides, but denials are only "
+                        "logged and every request goes through, so roles/iap.egressor grants don't restrict "
+                        + ("these gateways" if shared else "this gateway") + ". Switch it to enforce"
+                        + (f" (the extension is shared, so the fix switches {names} together; to change one gateway "
+                           "only, give it its own extension on the Gateways step)" if shared else "")
+                        + ". Check the “would have been denied” log on the Gateways step first, so enforcing doesn't "
+                        "break calls that should be allowed."),
+                resource=enf.extension,
+                fix=Intent(id=_id("enforce", enf.extension), kind="set_enforcement",
+                           gateway=GatewayRef(name=gw.name, direction=gw.type), extension=enf.extension,
+                           mode="ENFORCE", scope="shared" if shared else "dedicated")))
         if gw.type == "egress" and not any(p.provider == "iap" for p in gw.authz_policies):
             findings.append(Finding(
                 severity="medium", title=f"No IAP authorization on {gw.id}",

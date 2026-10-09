@@ -79,7 +79,8 @@ source file; gcloud's account and project when the CLI is installed; and these c
 - **Project**: warns when your ADC/gcloud default project isn't the target (Apply always names the target explicitly).
 - **Can write**: `testIamPermissions` for each kind of change (IAP `setIamPolicy` for grants,
   `aiplatform.reasoningEngines.update` for gateway binds, `networksecurity.authzPolicies.create/delete` for Model
-  Armor). Error when nothing is writable, warning when only some kinds are.
+  Armor, `networkservices.authzExtensions.update` for the enforcement mode). Error when nothing is writable, warning
+  when only some kinds are.
 
 Apply is available when the mode is `apply` and no check is an error.
 
@@ -88,7 +89,9 @@ Apply is available when the mode is `apply` and no check is an error.
 - The request must repeat the project (`confirm.project == context.project`); revokes, unbinds and Model Armor off
   also need `confirm.acknowledge_destructive`.
 - Every write goes through `gcp/writer.py`, which allows only: IAP `setIamPolicy` on Agent Registry resources, the
-  engine `PATCH` of `agentGatewayConfig`, create/delete of authz policies, and for Model Armor setup create/delete of
+  engine `PATCH` of `agentGatewayConfig`, create/delete of authz policies, the authz extension `PATCH` of
+  `metadata,failOpen` (enforcement mode) and the authz policy `PATCH` of `customProvider.authzExtension.resources`
+  (dedicated extension), and for Model Armor setup create/delete of
   Model Armor templates and authz extensions plus project `setIamPolicy`, which is checked so that it can only add or
   remove members of the three Model Armor roles (anything else in the policy must be unchanged).
 - Before any call, Apply skips duplicate items and refuses items that would certainly fail (a bind of an engine
@@ -132,17 +135,37 @@ otherwise use the `MODEL_ARMOR_EXTENSION` placeholder, a **"Set up Model Armor i
 setup. In apply mode each step is applied, read back, and undoable (delete template / delete extension / remove the
 roles). Model Armor egress screening covers MCP traffic, not A2A.
 
+## Enforce vs dry run
+
+Each gateway card on the Gateways step has an **Enforce / Dry run** switch. Agent Gateway has no gateway-level
+enforcement setting: the gateway's IAP `REQUEST_AUTHZ` policy calls an IAP authz extension, and the mode lives there.
+**Enforce** (`failOpen: false`, no `iamEnforcementMode`) blocks calls without a `roles/iap.egressor` grant with a
+403. **Dry run** (`metadata.iamEnforcementMode: DRY_RUN`, `failOpen: true`) lets every call through and only logs
+IAP's decision; it's for testing grants before enforcing them. A dry-run gateway shows an amber banner and a
+**Would have been denied (last 24 h)** list from its request log (`GET /api/studio/gateway-logs`, read-only; needs
+`roles/logging.viewer`), and the audit flags it as high severity with an "enforce" fix.
+
+One extension can serve several gateways, and then they switch together. When it's shared, the switch offers
+**Change for all N gateways** or **Give this gateway its own extension** (recommended): a copy of the extension, then
+the gateway's IAP policy pointed at the copy, then the mode change on the copy, staged together. In apply mode both are
+applied, read back and undoable (dry run and reverting a dedicated extension need the destructive acknowledgement).
+Not verified live yet: flipping an existing extension, how long a flip takes to take effect (typically within a few
+minutes; not yet measured), and updating an existing policy's extension in place; the dry-run log format ("would have
+been denied") hasn't been seen live either.
+
 ## Permissions
 
 Read access: the Context step lists what your credentials can read (`testIamPermissions`) with the role and the
 command to grant it. Reading needs roughly: `roles/browser`, `roles/serviceusage.serviceUsageViewer`, `roles/networkservices.viewer`,
-`roles/networksecurity.viewer`, `roles/aiplatform.viewer`, `roles/agentregistry.viewer`, `roles/modelarmor.viewer`
-and an IAP role that can read IAM policies (`roles/iap.admin` includes it).
+`roles/networksecurity.viewer`, `roles/aiplatform.viewer`, `roles/agentregistry.viewer`, `roles/modelarmor.viewer`,
+`roles/logging.viewer` (gateway request logs) and an IAP role that can read IAM policies (`roles/iap.admin` includes
+it).
 
 Apply additionally needs `roles/iap.admin` (grants / revokes, on the Agent Registry project), `roles/aiplatform.user`
 (gateway binds) and `roles/networksecurity.editor` (Model Armor on/off); Model Armor setup also needs
 `roles/modelarmor.admin` (templates), `roles/networkservices.admin` (authz extensions) and
-`roles/resourcemanager.projectIamAdmin` (service agent roles). The **Can write** check names what's missing. Reading
+`roles/resourcemanager.projectIamAdmin` (service agent roles); switching enforcement needs `roles/networkservices.admin`
+(and `roles/networksecurity.editor` to give a gateway its own extension). The **Can write** check names what's missing. Reading
 the service agents' roles uses `resourcemanager.projects.getIamPolicy` (`roles/browser`).
 
 ## Generated code

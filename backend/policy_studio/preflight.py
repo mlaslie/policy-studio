@@ -9,13 +9,16 @@ from typing import Any, Optional
 
 from .gcp.engines import REASON_IDENTITY, tail
 from .model import Intent
-from .render import PLACEHOLDER_EXT, RenderEnv, engine_full, engine_info_for, ma_spec, short
+from .render import (PLACEHOLDER_EXT, Blocked, RenderEnv, dedicate_names, enf_spec, engine_full, engine_info_for,
+                     english_list, gateway_full, ma_spec, short)
 
 KIND_LABEL = {"grant": "grants", "revoke": "revokes", "bind_gateway": "gateway binds",
               "unbind_gateway": "gateway unbinds", "model_armor_on": "turning Model Armor on",
               "model_armor_off": "turning Model Armor off", "model_armor_template": "creating Model Armor templates",
               "model_armor_extension": "creating Model Armor extensions",
-              "iam_project_grant": "granting the service agent roles"}
+              "iam_project_grant": "granting the service agent roles",
+              "set_enforcement": "changing a gateway's enforcement mode",
+              "dedicate_extension": "giving a gateway its own IAP extension"}
 
 
 # ------------------------------------------------------------------ duplicates
@@ -38,6 +41,12 @@ def intent_key(it: Intent) -> str:
         key["access"] = [a.mode, sorted(t for t in (a.tools or []) if t), a.expression or "", a.title]
     if it.params:
         key["params"] = it.params.model_dump(exclude_none=True)
+    for f in ("extension", "mode", "scope", "source_extension", "new_name"):
+        v = getattr(it, f)
+        if v:
+            key[f] = short(v) if f in ("extension", "source_extension", "new_name") else v
+    if it.revert:
+        key["revert"] = True
     return json.dumps(key, sort_keys=True, default=str)
 
 
@@ -81,7 +90,79 @@ def blockers(intents: list[Intent], env: RenderEnv, writable: Optional[dict[str,
                 out[it.id] = {"reason": f"Model Armor isn't set up in {env.region} yet: {what}, and none is staged in "
                                         "this cart. Set it up first (template, extension, service agent roles).",
                               "fix": "ma_setup"}
+        if it.kind in ("set_enforcement", "dedicate_extension"):
+            b = _enforcement_blocker(it, env)
+            if b:
+                out[it.id] = b
     return out
+
+
+def _enforcement_blocker(it: Intent, env: RenderEnv) -> Optional[dict[str, str]]:
+    """No IAP policy on the gateway, a no-op mode change ("already"), or a dedicate that can't work."""
+    if not it.gateway or not it.gateway.name:
+        return {"reason": "No gateway.", "fix": ""}
+    gateway = gateway_full(env, it.gateway.name, it.gateway.direction)
+    gid = short(gateway)
+    if env.iap is None:
+        return None                          # discovery unavailable: render warns, apply re-checks live
+    pols = env.iap["by_gateway"].get(_tail(gateway)) or []
+    if it.kind == "set_enforcement":
+        ext = it.extension or ""
+        if ext and _tail(ext) in env.staged_copies:
+            return None                      # a copy created in this request (its mode is the source's)
+        if not pols:
+            return {"reason": f"{gid} has no IAP REQUEST_AUTHZ policy, so it has no enforcement mode to change "
+                              "(nothing on it is checked against roles/iap.egressor grants).", "fix": ""}
+        try:
+            sp = enf_spec(it, env, [])
+        except Blocked as e:
+            return {"reason": str(e), "fix": ""}
+        if sp.prev_mode and sp.prev_mode == sp.mode:
+            return {"reason": f"Already {'enforcing' if sp.mode == 'ENFORCE' else 'in dry run'}: {sp.ext_id} on {gid} "
+                              "is in that mode, so there is nothing to change.", "fix": "already"}
+        return None
+    if not pols:
+        return {"reason": f"{gid} has no IAP REQUEST_AUTHZ policy to point at its own extension.", "fix": ""}
+    try:
+        src, new = dedicate_names(it, env)
+    except Blocked as e:
+        return {"reason": str(e), "fix": ""}
+    if it.revert:
+        return None
+    if _tail(new) in set(env.iap.get("all_extensions") or []) | set(env.iap.get("extensions", {})):
+        return {"reason": f"An authz extension named {short(new)} already exists in {env.region}; pick another name.",
+                "fix": ""}
+    targets = [t for p in pols[:1] for t in (p.get("target") or {}).get("resources") or []]
+    others = [short(t) for t in targets if _tail(t) != _tail(gateway)]
+    if others:
+        return {"reason": f"{gid}'s IAP policy also targets {english_list(others)}; pointing it at a copy would move "
+                          f"{'them' if len(others) > 1 else 'it'} too. Give {gid} its own IAP policy first.",
+                "fix": ""}
+    return None
+
+
+def advisories(intents: list[Intent], env: RenderEnv) -> dict[str, str]:
+    """{intent id: warning} for intents that are fine to apply but affect more than they name (a shared IAP
+    extension)."""
+    out: dict[str, str] = {}
+    for it in intents:
+        if it.kind != "set_enforcement" or env.iap is None:
+            continue
+        try:
+            sp = enf_spec(it, env, [])
+        except Blocked:
+            continue
+        if sp.shared_with:
+            out[it.id] = (f"{sp.ext_id} also controls {english_list(sp.shared_with)}: "
+                          f"{'they' if len(sp.shared_with) > 1 else 'it'} switch"
+                          f"{'' if len(sp.shared_with) > 1 else 'es'} to "
+                          f"{'enforce' if sp.mode == 'ENFORCE' else 'dry run'} too.")
+    return out
+
+
+def _tail(resource: str) -> str:
+    i = (resource or "").find("/locations/")
+    return resource[i + 1:] if i >= 0 else resource
 
 
 # ------------------------------------------------------------------ friendlier errors

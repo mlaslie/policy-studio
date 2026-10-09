@@ -41,6 +41,8 @@ PERMISSIONS: list[tuple[str, str, str, bool]] = [
     ("modelarmor.templates.list", "read Model Armor templates and filters", "roles/modelarmor.viewer", False),
     ("resourcemanager.projects.getIamPolicy", "check the gateway service agents' Model Armor roles",
      "roles/browser", False),
+    ("logging.logEntries.list", "read gateway request logs (dry-run “would have been denied”)",
+     "roles/logging.viewer", False),
     # Writes (Apply, apply mode only). The Apply checks are in auth.py (WRITE_PERMISSIONS).
     ("iap.webServiceVersions.setIamPolicy", "apply grants / revokes", "roles/iap.admin", True),
     ("aiplatform.reasoningEngines.update", "bind / unbind agents to gateways",
@@ -54,6 +56,10 @@ PERMISSIONS: list[tuple[str, str, str, bool]] = [
      "roles/networkservices.admin", True),
     ("resourcemanager.projects.setIamPolicy", "grant the gateway service agents the Model Armor roles (setup)",
      "roles/resourcemanager.projectIamAdmin", True),
+    ("networkservices.authzExtensions.update", "switch a gateway between enforce and dry run",
+     "roles/networkservices.admin", True),
+    ("networksecurity.authzPolicies.update", "give a gateway its own IAP extension", "roles/networksecurity.editor",
+     True),
 ]
 
 _numbers: dict[str, str] = {}

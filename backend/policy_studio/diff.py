@@ -8,7 +8,8 @@ from .english import condition_english, make_binding
 from .gcp.engines import tail
 from .model import Binding, Condition, DiffItem, Gateway, Intent, Inventory
 from .gcp import model_armor as ma_mod
-from .render import RenderEnv, engine_full, ext_spec, gateway_full, proj_iam_spec, short, template_spec
+from .render import (MODE_LABEL, Blocked, RenderEnv, dedicate_names, engine_full, english_list, ext_spec, gateway_full,
+                     proj_iam_spec, short, template_spec)
 
 
 def _resource_key(intent: Intent, inv: Inventory, env: RenderEnv) -> Optional[str]:
@@ -138,6 +139,56 @@ def _diff_setup(intent: Intent, env: RenderEnv, ma: Optional[dict[str, Any]]) ->
             else DiffItem(intent_id=intent.id, status="add", detail=f"will create {what}"))
 
 
+def _diff_enforcement(intent: Intent, gateways: list[Gateway], env: RenderEnv) -> DiffItem:
+    """set_enforcement: current vs target mode; dedicate_extension: which extension the gateway's IAP policy uses."""
+    direction = intent.gateway.direction if intent.gateway else "egress"
+    gw_name = gateway_full(env, intent.gateway.name if intent.gateway else "", direction)
+    gw = next((g for g in gateways if tail(g.name) == tail(gw_name)), None)
+    if gw is None:
+        return DiffItem(intent_id=intent.id, status="absent", detail="gateway not found in this region")
+    enf = gw.enforcement
+    cur_ext = enf.extension or ""
+    if intent.kind == "set_enforcement":
+        want = intent.mode or "ENFORCE"
+        ext = intent.extension or cur_ext
+        if ext and tail(ext) in env.staged_copies:
+            src = env.staged_copies[tail(ext)]
+            now = MODE_LABEL.get(enf.mode or "", "unknown") if tail(src) == tail(cur_ext) else "unknown"
+            return DiffItem(intent_id=intent.id, status="replace" if now != MODE_LABEL[want] else "add",
+                            detail=f"{gw.id}: {now} → {MODE_LABEL[want]} (on its own extension {short(ext)}, created "
+                                   "by an earlier item); other gateways keep their mode", current_mode=enf.mode,
+                            target_mode=want)
+        if not enf.mode:
+            return DiffItem(intent_id=intent.id, status="absent", detail=enf.reason or "no IAP enforcement mode on "
+                            "this gateway", current_mode=None, target_mode=want)
+        others = enf.shared_with if tail(ext) == tail(cur_ext) else []
+        also = f"; also {english_list([short(x) for x in others])} (shared extension)" if others else ""
+        if enf.mode == want:
+            return DiffItem(intent_id=intent.id, status="present", detail=f"already {MODE_LABEL[want].lower()}",
+                            current_mode=enf.mode, target_mode=want)
+        return DiffItem(intent_id=intent.id, status="replace",
+                        detail=f"{gw.id}: {MODE_LABEL[enf.mode]} → {MODE_LABEL[want]}{also}", current_mode=enf.mode,
+                        target_mode=want)
+    try:
+        src, new = dedicate_names(intent, env)
+    except Blocked as e:
+        return DiffItem(intent_id=intent.id, status="absent", detail=str(e))
+    if intent.revert:
+        if tail(cur_ext) == tail(new):
+            return DiffItem(intent_id=intent.id, status="remove",
+                            detail=f"{gw.id} goes back to {short(src)}; {short(new)} is deleted")
+        return DiffItem(intent_id=intent.id, status="absent", detail=f"{gw.id} doesn't use {short(new)}")
+    if tail(cur_ext) == tail(new):
+        return DiffItem(intent_id=intent.id, status="present", detail=f"{gw.id} already uses {short(new)}")
+    if not enf.policy:
+        return DiffItem(intent_id=intent.id, status="absent", detail=enf.reason or "no IAP policy on this gateway")
+    return DiffItem(intent_id=intent.id, status="add",
+                    detail=f"creates {short(new)} (copy of {short(cur_ext or src)}, "
+                           f"{MODE_LABEL.get(enf.mode or '', 'same mode').lower()}) and points {gw.id}'s IAP policy "
+                           "at it" + (f"; {english_list([short(x) for x in enf.shared_with])} keep "
+                                      f"{short(cur_ext)}" if enf.shared_with else ""))
+
+
 def diff(intents: list[Intent], inv: Inventory, gateways: list[Gateway], env: RenderEnv,
          ma: Optional[dict[str, Any]] = None) -> list[DiffItem]:
     out = []
@@ -148,6 +199,8 @@ def diff(intents: list[Intent], inv: Inventory, gateways: list[Gateway], env: Re
             out.append(_diff_bind(it, inv, env))
         elif it.kind in ("model_armor_template", "model_armor_extension", "iam_project_grant"):
             out.append(_diff_setup(it, env, ma))
+        elif it.kind in ("set_enforcement", "dedicate_extension"):
+            out.append(_diff_enforcement(it, gateways, env))
         else:
             out.append(_diff_ma(it, gateways, env))
     return out

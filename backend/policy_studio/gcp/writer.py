@@ -11,6 +11,11 @@ Every write is checked against an allowlist of exactly the calls Apply makes:
   DELETE https://modelarmor.R.rep.googleapis.com/v1/projects/P/locations/R/templates/T
   POST   https://networkservices.googleapis.com/v1/projects/P/locations/R/authzExtensions?authzExtensionId=NAME
   DELETE https://networkservices.googleapis.com/v1/projects/P/locations/R/authzExtensions/NAME
+  Enforcement mode (IAP enforce / dry run):
+  PATCH  https://networkservices.googleapis.com/v1/projects/P/locations/R/authzExtensions/NAME
+           ?updateMask=metadata,failOpen     (body: only metadata and failOpen)
+  PATCH  https://networksecurity.googleapis.com/v1/projects/P/locations/R/authzPolicies/NAME
+           ?updateMask=customProvider.authzExtension.resources     (body: only that field; dedicate / revert)
   POST   https://cloudresourcemanager.googleapis.com/v1/projects/P:setIamPolicy  (guarded: only through
            set_project_iam_policy, and only when the change adds or removes members of the Model Armor roles)
 Reads (getIamPolicy, GET engine / operation / policy) go through the read-only Rest client.
@@ -42,6 +47,10 @@ ALLOWED: list[tuple[str, re.Pattern[str]]] = [
                         rf"authzExtensions\?authzExtensionId={_SEG}$")),
     ("DELETE", re.compile(rf"^https://networkservices\.googleapis\.com/v1/projects/{_SEG}/locations/{_SEG}/"
                           rf"authzExtensions/{_SEG}$")),
+    ("PATCH", re.compile(rf"^https://networkservices\.googleapis\.com/v1/projects/{_SEG}/locations/{_SEG}/"
+                         rf"authzExtensions/{_SEG}\?updateMask=metadata,failOpen$")),
+    ("PATCH", re.compile(rf"^https://networksecurity\.googleapis\.com/v1/projects/{_SEG}/locations/{_SEG}/"
+                         rf"authzPolicies/{_SEG}\?updateMask=customProvider\.authzExtension\.resources$")),
 ]
 # Allowed only through Writer.set_project_iam_policy, which checks the policy change itself.
 GUARDED: list[tuple[str, re.Pattern[str]]] = [
@@ -121,6 +130,22 @@ class Writer:
 
     def delete_authz_extension(self, url: str) -> Any:
         return self._write("DELETE", url)
+
+    def patch_authz_extension(self, url: str, body: dict[str, Any]) -> Any:
+        """Enforcement mode: only metadata and failOpen of an authz extension."""
+        if set(body) - {"metadata", "failOpen"} or not isinstance(body.get("metadata", {}), dict):
+            raise ValueError("policy_studio writer: an authz extension PATCH may only change metadata and failOpen")
+        return self._write("PATCH", url, body)
+
+    def patch_authz_policy(self, url: str, body: dict[str, Any]) -> Any:
+        """Dedicated extension: only customProvider.authzExtension.resources of an authz policy (one extension)."""
+        res = ((body.get("customProvider") or {}).get("authzExtension") or {}).get("resources")
+        if set(body) != {"customProvider"} or set(body["customProvider"]) != {"authzExtension"} or \
+                set(body["customProvider"]["authzExtension"]) != {"resources"} or not isinstance(res, list) or \
+                len(res) != 1:
+            raise ValueError("policy_studio writer: an authz policy PATCH may only set "
+                             "customProvider.authzExtension.resources to one extension")
+        return self._write("PATCH", url, body)
 
     def set_project_iam_policy(self, project_url: str, current: dict[str, Any], policy: dict[str, Any]) -> Any:
         """Project setIamPolicy, only for adding / removing members of the Model Armor roles (see

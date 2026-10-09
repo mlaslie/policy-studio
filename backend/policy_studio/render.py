@@ -20,9 +20,20 @@ Sources of truth (REST shapes, gcloud flags and Terraform resources verified liv
                    Terraform google_network_services_authz_extension
                  service agent roles  project getIamPolicy / setIamPolicy (read-modify-write); gcloud projects
                    add-iam-policy-binding; Terraform google_project_iam_member
+  enforcement    the IAP REQUEST_AUTHZ check's mode lives on its IAP authz extension (service iap.googleapis.com):
+                   ENFORCE = failOpen false, metadata {iapPolicyVersion: V1}; DRY_RUN = failOpen true, metadata
+                   {..., iamEnforcementMode: DRY_RUN}. PATCH .../authzExtensions/N?updateMask=metadata,failOpen
+                   (metadata is replaced wholesale, so every other key is re-sent); gcloud service-extensions
+                   authz-extensions import (full spec); Terraform google_network_services_authz_extension (import
+                   block for the existing extension); Python DepServiceClient.update_authz_extension.
+                 dedicate: create a copy of the extension, then PATCH the gateway's REQUEST_AUTHZ policy
+                   ?updateMask=customProvider.authzExtension.resources (customProvider isn't marked immutable in the
+                   networksecurity v1 discovery doc; policyProfile is). Neither the flip nor the PATCH of an
+                   existing policy has been verified live yet.
 """
 from __future__ import annotations
 
+import copy
 import json
 import re
 from dataclasses import dataclass, field, replace
@@ -49,8 +60,10 @@ KIND_LABEL = {"agent": "A2A agent", "mcp_server": "MCP server", "endpoint": "API
 # Bundle order: gateway bindings, Model Armor setup (template -> extension -> service agent roles), Model Armor
 # on/off, grants. Setup deletes (undo) run after Model Armor off, in reverse.
 ORDER = {"bind_gateway": 0, "unbind_gateway": 0, "model_armor_template": 1, "model_armor_extension": 2,
-         "iam_project_grant": 3, "model_armor_on": 4, "model_armor_off": 4, "grant": 5, "revoke": 5}
-DELETE_ORDER = {"iam_project_grant": 6, "model_armor_extension": 7, "model_armor_template": 8}
+         "iam_project_grant": 3, "dedicate_extension": 4, "set_enforcement": 5, "model_armor_on": 7,
+         "model_armor_off": 7, "grant": 8, "revoke": 8}
+REVERT_ORDER = 6          # dedicate_extension revert: after set_enforcement (so a flip of the copy runs first)
+DELETE_ORDER = {"iam_project_grant": 9, "model_armor_extension": 10, "model_armor_template": 11}
 PLACEHOLDER_EXT = "MODEL_ARMOR_EXTENSION"
 
 
@@ -65,6 +78,8 @@ class RenderEnv:
     staged_extensions: list[str] = field(default_factory=list)  # Model Armor extensions created by staged intents
     staged_templates: list[str] = field(default_factory=list)   # Model Armor templates created by staged intents
     known_extensions: Optional[list[str]] = None   # Model Armor extensions discovery found (None = not looked up)
+    iap: Optional[dict[str, Any]] = None   # gateways.iap_index() + {"names": {gateway tail: name}} (None = not looked up)
+    staged_copies: dict[str, str] = field(default_factory=dict)  # new IAP extension tail -> source (dedicate_extension)
 
     @property
     def project(self) -> str:
@@ -91,6 +106,12 @@ class RenderEnv:
 
 def short(name: str) -> str:
     return (name or "").rstrip("/").split("/")[-1]
+
+
+def _tail(resource: str) -> str:
+    """'projects/X/locations/R/...' -> 'locations/R/...' (project id vs number safe)."""
+    i = (resource or "").find("/locations/")
+    return resource[i + 1:] if i >= 0 else resource
 
 
 def project_of(resource: str) -> Optional[str]:
@@ -419,6 +440,14 @@ def with_staged(env: RenderEnv, intents: list[Intent]) -> RenderEnv:
     """Remember the Model Armor templates / extensions that staged intents create, so later intents in the same
     cart (an extension naming the template, model_armor_on without an extension) refer to them."""
     exts, tmpls = list(env.staged_extensions), list(env.staged_templates)
+    copies = dict(env.staged_copies)
+    for it in intents:
+        if it.kind == "dedicate_extension" and not it.revert and it.gateway:
+            try:
+                src, new = dedicate_names(it, env)
+            except Blocked:
+                continue
+            copies[_tail(new)] = src
     for it in intents:
         if it.is_delete or not it.params:
             continue
@@ -431,7 +460,7 @@ def with_staged(env: RenderEnv, intents: list[Intent]) -> RenderEnv:
             n = f"projects/{project}/locations/{env.region}/templates/{short(it.params.template_id)}"
             if n not in tmpls:
                 tmpls.append(n)
-    return replace(env, staged_extensions=exts, staged_templates=tmpls)
+    return replace(env, staged_extensions=exts, staged_templates=tmpls, staged_copies=copies)
 
 
 # ====================================================================== anatomy
@@ -1235,6 +1264,540 @@ def tf_proj_iam(sp: ProjIamSpec, env: RenderEnv, name: str, bundle: bool) -> str
         "granted outside Terraform, use the gcloud, REST or Python tab.") + "#\n" + hcl.commented(text))
 
 
+# ====================================================================== enforcement (IAP enforce / dry run)
+NETWORKSERVICES_V1 = "https://networkservices.googleapis.com/v1"
+NETWORKSECURITY_V1 = "https://networksecurity.googleapis.com/v1"
+ENF_MASK = "metadata,failOpen"
+POLICY_PROVIDER_MASK = "customProvider.authzExtension.resources"
+DRY_RUN_KEY = "iamEnforcementMode"
+# Fields of an authz extension that a copy keeps (everything that isn't output-only or the name).
+EXT_COPY_FIELDS = ("labels", "service", "timeout", "failOpen", "metadata", "authority", "loadBalancingScheme",
+                   "forwardHeaders", "forwardAttributes", "wireFormat")
+ASSUMED_EXT = {"service": "iap.googleapis.com", "timeout": "1s", "metadata": {"iapPolicyVersion": "V1"}}
+ENF_LEARN = ("the change typically takes effect within a few minutes; not yet measured (flipping an existing "
+             "extension hasn't been verified live)")
+MODE_LABEL = {"ENFORCE": "Enforce", "DRY_RUN": "Dry run"}
+_EXT_NAME_RE = re.compile(r"^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$")
+
+
+def ext_mode(ext: Optional[dict]) -> Optional[str]:
+    if not ext:
+        return None
+    md = ext.get("metadata") or {}
+    return "DRY_RUN" if str(md.get(DRY_RUN_KEY, "")).upper() == "DRY_RUN" else "ENFORCE"
+
+
+def mode_metadata(current: dict, mode: str) -> dict:
+    """The extension's metadata for `mode`: every other key is kept (the PATCH replaces metadata wholesale)."""
+    md = {k: v for k, v in (current or {}).items() if k != DRY_RUN_KEY}
+    if mode == "DRY_RUN":
+        md[DRY_RUN_KEY] = "DRY_RUN"
+    return md
+
+
+def ext_copy(ext: dict) -> dict:
+    return {k: copy.deepcopy(ext[k]) for k in EXT_COPY_FIELDS if k in ext}
+
+
+def _gw_info(env: RenderEnv, gateway: str) -> dict[str, Any]:
+    """{policy, extension, shared_with: [gateway ids], policy_raw, targets} for a gateway from env.iap."""
+    idx = env.iap
+    if not idx:
+        return {}
+    pols = idx["by_gateway"].get(_tail(gateway)) or []
+    if not pols:
+        return {"policy": None}
+    p = pols[0]
+    exts = ((p.get("customProvider") or {}).get("authzExtension") or {}).get("resources") or []
+    ext = exts[0] if exts else ""
+    raw = idx["extensions"].get(_tail(ext))
+    shared = [short(g) for g in idx["by_extension"].get(_tail(ext), []) if g != _tail(gateway)]
+    return {"policy": p.get("name", ""), "extension": (raw or {}).get("name", ext), "shared_with": shared,
+            "policy_raw": p, "targets": list((p.get("target") or {}).get("resources") or [])}
+
+
+def _ext_full(env: RenderEnv, name: str, project: str) -> str:
+    if name.startswith("projects/"):
+        return name
+    return f"projects/{project}/locations/{env.region}/authzExtensions/{name or 'EXTENSION'}"
+
+
+def _ext_raw(env: RenderEnv, ext: str) -> Optional[dict]:
+    return (env.iap or {}).get("extensions", {}).get(_tail(ext)) if env.iap else None
+
+
+def _id_project(env: RenderEnv, resource: str, fallback: str) -> str:
+    """Project id of a resource name (a project number is mapped back to the context's id when it's ours)."""
+    proj = project_of(resource) or fallback
+    if proj.isdigit():
+        if proj == env.ctx.project_number:
+            return env.project
+        if proj == env.ctx.gateway_project_number:
+            return env.gw_project
+    return proj
+
+
+@dataclass
+class EnfSpec:
+    gateway: str                   # full gateway name
+    gateway_id: str
+    project: str                   # the extension's project
+    region: str
+    ext_id: str
+    extension: str                 # projects/P/locations/R/authzExtensions/N
+    mode: str                      # target mode
+    prev_mode: Optional[str]       # current mode (None = unknown)
+    scope: str
+    shared_with: list[str]         # other gateway ids the extension controls (they change too)
+    current: dict[str, Any]        # current extension spec (known, or assumed)
+    known: bool
+    staged: bool                   # the extension is a copy a dedicate_extension in this cart creates
+    metadata: dict[str, Any]       # new metadata
+    fail_open: bool                # new failOpen
+
+    @property
+    def spec(self) -> dict[str, Any]:
+        """The full desired extension spec (for gcloud import / Terraform)."""
+        return {**self.current, "failOpen": self.fail_open, "metadata": self.metadata}
+
+
+@dataclass
+class DedSpec:
+    op: str                        # dedicate | revert
+    gateway: str
+    gateway_id: str
+    project: str                   # the extensions' project
+    region: str
+    source: str                    # full name of the extension the gateway uses today (dedicate) / goes back to
+    new_ext: str                   # full name of the copy
+    new_id: str
+    policy: str                    # projects/P/locations/R/authzPolicies/X
+    policy_id: str
+    policy_project: str
+    body: dict[str, Any]           # the copy's spec (dedicate)
+    policy_raw: dict[str, Any]     # the policy as discovered (for gcloud import / Terraform), may be {}
+    known: bool
+    mode: Optional[str]            # the copy's mode (= the source's)
+
+
+def dedicate_names(intent: Intent, env: RenderEnv) -> tuple[str, str]:
+    """(source extension, new extension) full names of a dedicate_extension intent."""
+    gw = intent.gateway
+    if not gw or not gw.name:
+        raise Blocked("No gateway: pick the gateway that gets its own extension.")
+    gateway = gateway_full(env, gw.name, gw.direction)
+    info = _gw_info(env, gateway)
+    src = intent.source_extension or info.get("extension") or ""
+    if not src:
+        raise Blocked(f"{short(gateway)} has no IAP authz extension to copy (no IAP REQUEST_AUTHZ policy found).")
+    raw = _ext_raw(env, src)
+    src = (raw or {}).get("name") or src
+    proj = _id_project(env, src, project_of(gateway) or env.gw_project) if src.startswith("projects/") else \
+        (project_of(gateway) or env.gw_project)
+    src = _ext_full(env, src, proj)
+    new = _ext_full(env, intent.new_name or f"{short(gateway)}-iap-authz", proj)
+    return src, new
+
+
+def enf_spec(intent: Intent, env: RenderEnv, warnings: list[str]) -> EnfSpec:
+    gw = intent.gateway
+    if not gw or not gw.name:
+        raise Blocked("No gateway: pick the gateway whose enforcement mode changes.")
+    if intent.mode not in ("ENFORCE", "DRY_RUN"):
+        raise Blocked("No mode: choose Enforce or Dry run.")
+    gateway = gateway_full(env, gw.name, gw.direction)
+    info = _gw_info(env, gateway)
+    ext = intent.extension or info.get("extension") or ""
+    if not ext:
+        raise Blocked(f"{short(gateway)} has no IAP REQUEST_AUTHZ policy, so there is no enforcement mode to change. "
+                      "Attach the IAP authz policy to the gateway first.")
+    staged_src = env.staged_copies.get(_tail(ext))
+    raw = _ext_raw(env, staged_src) if staged_src else _ext_raw(env, ext)
+    if not staged_src and raw:
+        ext = raw.get("name") or ext
+    proj = _id_project(env, ext, project_of(gateway) or env.gw_project) if ext.startswith("projects/") else \
+        (project_of(gateway) or env.gw_project)
+    ext = _ext_full(env, ext, proj)
+    known = raw is not None
+    current = ext_copy(raw) if raw else copy.deepcopy(ASSUMED_EXT)
+    if raw is not None and str(raw.get("service", "")) != "iap.googleapis.com":
+        raise Blocked(f"{short(ext)} isn't an IAP authz extension (service {raw.get('service')}); only the IAP "
+                      "extension has an enforcement mode.")
+    if not known and env.iap is not None and not staged_src:
+        warnings.append(f"The extension {short(ext)} wasn't found in {env.region}; its current settings are assumed "
+                        "(service iap.googleapis.com, timeout 1s, metadata iapPolicyVersion V1). Check them before "
+                        "running the gcloud or Terraform version, which send the full spec.")
+    prev = ext_mode(raw) if raw else None
+    if staged_src:
+        shared: list[str] = []
+    else:
+        idx_shared = (env.iap or {}).get("by_extension", {}).get(_tail(ext), [])
+        shared = [short(g) for g in idx_shared if g != _tail(gateway)]
+    scope = intent.scope or ("shared" if shared else "dedicated")
+    if shared and scope == "shared":
+        warnings.append(f"This extension also controls {english_list(shared)}: "
+                        f"{'they switch' if len(shared) > 1 else 'it switches'} to "
+                        f"{MODE_LABEL[intent.mode].lower()} too.")
+    elif shared:
+        warnings.append(f"Staged for {short(gateway)} only, but {short(ext)} also controls {english_list(shared)}, so "
+                        f"{'they change' if len(shared) > 1 else 'it changes'} too. Give {short(gateway)} its own "
+                        "extension first (stage it together with this change).")
+    if intent.mode == "DRY_RUN":
+        warnings.append(f"Dry run: once applied, nothing is blocked on {english_list([short(gateway)] + (shared if scope == 'shared' else []))}; "
+                        "IAP denials are only logged.")
+    md = mode_metadata(current.get("metadata") or {}, intent.mode)
+    return EnfSpec(gateway=gateway, gateway_id=short(gateway), project=proj, region=env.region, ext_id=short(ext),
+                   extension=ext, mode=intent.mode, prev_mode=prev, scope=scope, shared_with=shared,
+                   current=current, known=known, staged=bool(staged_src), metadata=md,
+                   fail_open=intent.mode == "DRY_RUN")
+
+
+def ded_spec(intent: Intent, env: RenderEnv, warnings: list[str]) -> DedSpec:
+    src, new = dedicate_names(intent, env)
+    gateway = gateway_full(env, intent.gateway.name, intent.gateway.direction)
+    info = _gw_info(env, gateway)
+    policy = (intent.gateway.policy if intent.gateway and intent.gateway.policy else "") or info.get("policy") or ""
+    if not policy:
+        if env.iap is not None:
+            raise Blocked(f"{short(gateway)} has no IAP REQUEST_AUTHZ policy, so there is nothing to point at a new "
+                          "extension.")
+        policy = f"{short(gateway)}-iap-policy"
+        warnings.append(f"Policy name assumed to be {policy}; Sync to look up the gateway's IAP policy.")
+    pproj = _id_project(env, policy, project_of(gateway) or env.gw_project) if policy.startswith("projects/") else \
+        (project_of(gateway) or env.gw_project)
+    policy_full = policy if policy.startswith("projects/") else \
+        f"projects/{pproj}/locations/{env.region}/authzPolicies/{policy}"
+    if not _EXT_NAME_RE.match(short(new)):
+        warnings.append(f"Extension name {short(new)!r} should be lowercase letters, digits and hyphens, starting "
+                        "with a letter (at most 63).")
+    raw = _ext_raw(env, src)
+    if not intent.revert:
+        if raw is None and env.iap is not None:
+            warnings.append(f"The extension {short(src)} wasn't found in {env.region}; the copy's settings are assumed "
+                            "(service iap.googleapis.com, timeout 1s, metadata iapPolicyVersion V1).")
+        if short(new) == short(src):
+            raise Blocked(f"The new extension needs a different name than {short(src)}.")
+        if env.iap is not None and _tail(new) in set(env.iap.get("all_extensions") or []) | set(env.iap["extensions"]):
+            warnings.append(f"An authz extension named {short(new)} already exists in {env.region}: pick another name.")
+        targets = info.get("targets") or []
+        others = [short(t) for t in targets if _tail(t) != _tail(gateway)]
+        if others:
+            warnings.append(f"The IAP policy {short(policy_full)} also targets {english_list(others)}: pointing it at "
+                            f"the copy moves {'them' if len(others) > 1 else 'it'} too.")
+        if info.get("extension") and _tail(info["extension"]) != _tail(src):
+            warnings.append(f"{short(gateway)}'s IAP policy uses {short(info['extension'])}, not {short(src)}.")
+    body = ext_copy(raw) if raw else copy.deepcopy(ASSUMED_EXT)
+    pr = info.get("policy_raw") or {}
+    return DedSpec(op="revert" if intent.revert else "dedicate", gateway=gateway, gateway_id=short(gateway),
+                   project=project_of(new) or env.gw_project, region=env.region, source=src, new_ext=new,
+                   new_id=short(new), policy=policy_full, policy_id=short(policy_full),
+                   policy_project=project_of(policy_full) or env.gw_project, body=body,
+                   policy_raw=pr if _tail(pr.get("name", "")) == _tail(policy_full) else {},
+                   known=raw is not None, mode=ext_mode(raw) if raw else None)
+
+
+def english_list(items: list[str]) -> str:
+    items = [x for x in items if x]
+    if len(items) <= 1:
+        return items[0] if items else ""
+    return ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def enf_english(sp: EnfSpec) -> str:
+    gws = [sp.gateway_id] + (sp.shared_with if sp.scope == "shared" else [])
+    where = f"gateway{'s' if len(gws) > 1 else ''} {english_list(gws)}"
+    shared = f" (they share the IAP extension {sp.ext_id})" if len(gws) > 1 else ""
+    if sp.mode == "ENFORCE":
+        return (f"Enforce IAP on {where}{shared}: requests without a matching roles/iap.egressor grant are "
+                "blocked.")
+    return f"Put {where} in dry run{shared}: IAP denials are only logged, nothing is blocked."
+
+
+def ded_english(sp: DedSpec) -> str:
+    if sp.op == "revert":
+        return (f"Point {sp.gateway_id}'s IAP policy back at {short(sp.source)} and delete its own extension "
+                f"{sp.new_id}.")
+    return (f"Give {sp.gateway_id} its own IAP extension {sp.new_id} (a copy of {short(sp.source)}), so its "
+            "enforcement mode can change without affecting other gateways.")
+
+
+def enf_url(sp: EnfSpec) -> str:
+    return f"{NETWORKSERVICES_V1}/{sp.extension}?updateMask={ENF_MASK}"
+
+
+def enf_body(sp: EnfSpec) -> dict[str, Any]:
+    return {"metadata": sp.metadata, "failOpen": sp.fail_open}
+
+
+def ded_ext_url(sp: DedSpec, with_id: bool) -> str:
+    base = f"{NETWORKSERVICES_V1}/projects/{sp.project}/locations/{sp.region}/authzExtensions"
+    return f"{base}?authzExtensionId={sp.new_id}" if with_id else f"{base}/{sp.new_id}"
+
+
+def ded_policy_url(sp: DedSpec) -> str:
+    return f"{NETWORKSECURITY_V1}/{sp.policy}?updateMask={POLICY_PROVIDER_MASK}"
+
+
+def provider_body(ext: str) -> dict[str, Any]:
+    return {"customProvider": {"authzExtension": {"resources": [ext]}}}
+
+
+def enf_anatomy(sp: EnfSpec) -> Anatomy:
+    notes = ["resource: the IAP authz extension (service iap.googleapis.com) that the gateway's REQUEST_AUTHZ policy "
+             "calls; the enforcement mode lives here, not on the gateway",
+             "enforce: failOpen false and no metadata.iamEnforcementMode: requests IAP denies are blocked (403)",
+             "dry run: metadata.iamEnforcementMode DRY_RUN and failOpen true: IAP still decides and logs, but every "
+             "request is let through",
+             "metadata is replaced wholesale by the PATCH, so its other keys (iapPolicyVersion, ...) are re-sent",
+             ENF_LEARN]
+    if sp.shared_with:
+        notes.append(f"shared: the extension also serves {english_list(sp.shared_with)}; changing it changes "
+                     f"{'them' if len(sp.shared_with) > 1 else 'it'} too")
+    if sp.staged:
+        notes.append(f"{sp.ext_id} is created by an earlier item in this cart (a copy for {sp.gateway_id} alone)")
+    return Anatomy(resource=sp.extension, role=f"enforcement: {MODE_LABEL.get(sp.prev_mode or '', 'unknown')} → "
+                   f"{MODE_LABEL[sp.mode]}", member=sp.gateway, notes=notes)
+
+
+def ded_anatomy(sp: DedSpec) -> Anatomy:
+    if sp.op == "revert":
+        notes = [f"PATCH the REQUEST_AUTHZ policy {sp.policy_id} (customProvider.authzExtension.resources) back to "
+                 f"{short(sp.source)}", f"then delete {sp.new_id} (a long-running operation)",
+                 "between the two steps the gateway already uses the original extension, so no request goes "
+                 "unchecked", ENF_LEARN]
+        return Anatomy(resource=sp.policy, role="customProvider.authzExtension", member=sp.source, notes=notes)
+    notes = [f"1. create {sp.new_id}: a copy of {short(sp.source)} (same service, timeout, failOpen and metadata, so "
+             "the same mode for now)",
+             f"2. PATCH the gateway's REQUEST_AUTHZ policy {sp.policy_id} with updateMask customProvider."
+             f"authzExtension.resources, so {sp.gateway_id} uses the copy; other gateways keep the original",
+             "the policy keeps its name, target and profile (policyProfile is immutable; customProvider isn't "
+             "marked immutable in the API, but an in-place update of an existing policy hasn't been verified live)",
+             "if the API refuses the PATCH, the fallback is delete + recreate of the policy, which leaves the gateway "
+             "without an IAP check in between (not done automatically)",
+             "both steps are long-running operations"]
+    return Anatomy(resource=sp.policy, role="customProvider.authzExtension", member=sp.new_ext, notes=notes)
+
+
+def _yaml_scalar(v: Any) -> str:
+    return json.dumps(v) if not isinstance(v, str) or not re.fullmatch(r"[A-Za-z0-9_./:-]+", v) or \
+        v in ("true", "false", "null", "yes", "no", "on", "off") else v
+
+
+def _yaml_map(d: dict[str, Any], ind: int = 0) -> str:
+    pad = "  " * ind
+    out = []
+    for k, v in d.items():
+        if isinstance(v, dict):
+            out.append(f"{pad}{k}:\n" + (_yaml_map(v, ind + 1) if v else "") if v else f"{pad}{k}: {{}}\n")
+        elif isinstance(v, list):
+            out.append(f"{pad}{k}:\n" + "".join(f"{pad}  - {_yaml_scalar(x)}\n" for x in v) if v else f"{pad}{k}: []\n")
+        else:
+            out.append(f"{pad}{k}: {_yaml_scalar(v)}\n")
+    return "".join(out)
+
+
+def ext_spec_yaml(name: str, spec: dict[str, Any]) -> str:
+    return _yaml_map({"name": name, **{k: spec[k] for k in EXT_COPY_FIELDS if k in spec}})
+
+
+def policy_yaml(sp: DedSpec, ext: str) -> str:
+    pr = sp.policy_raw
+    d: dict[str, Any] = {"name": sp.policy_id}
+    if pr.get("labels"):
+        d["labels"] = pr["labels"]
+    if pr.get("description"):
+        d["description"] = pr["description"]
+    d["target"] = {"resources": (pr.get("target") or {}).get("resources") or [sp.gateway]}
+    d["policyProfile"] = pr.get("policyProfile") or "REQUEST_AUTHZ"
+    d["action"] = pr.get("action") or "CUSTOM"
+    d["customProvider"] = {"authzExtension": {"resources": [ext]}}
+    return _yaml_map(d)
+
+
+def gcloud_enf(sp: EnfSpec) -> str:
+    f = f"{sp.ext_id}.yaml"
+    head = ("# gcloud imports the full spec (it replaces the extension), built from the extension as it is now"
+            + ("" if sp.known else " (ASSUMED: it wasn't found; check it)") + ".\n")
+    return (head + f"cat > {f} <<'EOF'\n{ext_spec_yaml(sp.ext_id, sp.spec)}EOF\n"
+            + cont([f"gcloud service-extensions authz-extensions import {sp.ext_id}", f"--source={f}",
+                    f"--location={sp.region}", f"--project={sp.project}"]))
+
+
+def rest_enf(sp: EnfSpec) -> str:
+    return ("# Long-running operation. metadata is replaced wholesale: every key is re-sent.\n"
+            + curl("PATCH", enf_url(sp), body=json.dumps(enf_body(sp), separators=(",", ":"))))
+
+
+def gcloud_ded(sp: DedSpec) -> str:
+    if sp.op == "revert":
+        f = f"{sp.policy_id}.yaml"
+        return (f"# 1. Point {sp.gateway_id}'s IAP policy back at {short(sp.source)} (import updates it in place).\n"
+                + f"cat > {f} <<'EOF'\n{policy_yaml(sp, sp.source)}EOF\n"
+                + cont([f"gcloud network-security authz-policies import {sp.policy_id}", f"--source={f}",
+                        f"--location={sp.region}", f"--project={sp.policy_project}"])
+                + f"\n# 2. Delete the gateway's own extension.\n"
+                + cont([f"gcloud service-extensions authz-extensions delete {sp.new_id}", f"--location={sp.region}",
+                        f"--project={sp.project}", "--quiet"]))
+    f1, f2 = f"{sp.new_id}.yaml", f"{sp.policy_id}.yaml"
+    return (f"# 1. Create {sp.new_id}, a copy of {short(sp.source)}.\n"
+            + f"cat > {f1} <<'EOF'\n{ext_spec_yaml(sp.new_id, sp.body)}EOF\n"
+            + cont([f"gcloud service-extensions authz-extensions import {sp.new_id}", f"--source={f1}",
+                    f"--location={sp.region}", f"--project={sp.project}"])
+            + f"\n# 2. Point {sp.gateway_id}'s IAP policy at it (import updates the existing policy in place).\n"
+            + f"cat > {f2} <<'EOF'\n{policy_yaml(sp, sp.new_ext)}EOF\n"
+            + cont([f"gcloud network-security authz-policies import {sp.policy_id}", f"--source={f2}",
+                    f"--location={sp.region}", f"--project={sp.policy_project}"]))
+
+
+def rest_ded(sp: DedSpec) -> str:
+    patch = curl("PATCH", ded_policy_url(sp), body=json.dumps(provider_body(
+        sp.source if sp.op == "revert" else sp.new_ext), separators=(",", ":")))
+    if sp.op == "revert":
+        return (f"# 1. Point the IAP policy back at {short(sp.source)} (long-running).\n" + patch
+                + f"\n# 2. Delete {sp.new_id} (long-running).\n" + curl("DELETE", ded_ext_url(sp, False)))
+    return (f"# 1. Create {sp.new_id}, a copy of {short(sp.source)} (long-running: poll the operation).\n"
+            + curl("POST", ded_ext_url(sp, True), body=json.dumps(sp.body, separators=(",", ":")))
+            + f"\n# 2. Point {sp.gateway_id}'s IAP policy at it (long-running).\n" + patch)
+
+
+PY_ENF_HELPERS = '''import json
+
+from google.cloud import network_security_v1  # pip install google-cloud-network-security (pre-1.0)
+from google.cloud import network_services_v1  # pip install google-cloud-network-services
+from google.protobuf import field_mask_pb2
+
+dep = network_services_v1.DepServiceClient()
+ns = network_security_v1.NetworkSecurityClient()
+
+
+def set_iap_enforcement(name, metadata, fail_open):
+    """PATCH metadata + failOpen of an IAP authz extension. metadata is replaced wholesale: pass every key."""
+    ext = network_services_v1.AuthzExtension(name=name, metadata=metadata, fail_open=fail_open)
+    op = dep.update_authz_extension(authz_extension=ext,
+                                    update_mask=field_mask_pb2.FieldMask(paths=["metadata", "fail_open"]))
+    return op.result(timeout=900)
+
+
+def copy_authz_extension(project, region, name, body):
+    """Create an authz extension from its REST body (long-running)."""
+    parent = f"projects/{project}/locations/{region}"
+    ext = network_services_v1.AuthzExtension.from_json(
+        json.dumps({"name": f"{parent}/authzExtensions/{name}", **body}))
+    op = dep.create_authz_extension(parent=parent, authz_extension_id=name, authz_extension=ext)
+    return op.result(timeout=900)
+
+
+def delete_iap_extension(project, region, name):
+    op = dep.delete_authz_extension(name=f"projects/{project}/locations/{region}/authzExtensions/{name}")
+    return op.result(timeout=900)
+
+
+def point_policy_at(policy, extension):
+    """PATCH an authz policy's customProvider.authzExtension.resources (long-running)."""
+    AuthzPolicy = network_security_v1.AuthzPolicy
+    p = AuthzPolicy(name=policy, custom_provider=AuthzPolicy.CustomProvider(
+        authz_extension=AuthzPolicy.CustomProvider.AuthzExtension(resources=[extension])))
+    op = ns.update_authz_policy(authz_policy=p, update_mask=field_mask_pb2.FieldMask(
+        paths=["custom_provider.authz_extension.resources"]))
+    return op.result(timeout=900)
+'''
+
+
+def python_enf_call(sp: EnfSpec) -> str:
+    return (f"set_iap_enforcement(\n    {py_str(sp.extension)},\n    {py_obj(sp.metadata, 1)},\n    "
+            f"{'True' if sp.fail_open else 'False'},\n)")
+
+
+def python_ded_call(sp: DedSpec) -> str:
+    if sp.op == "revert":
+        return (f"point_policy_at({py_str(sp.policy)}, {py_str(sp.source)})\n"
+                f"delete_iap_extension({py_str(sp.project)}, {py_str(sp.region)}, {py_str(sp.new_id)})")
+    return (f"copy_authz_extension(\n    {py_str(sp.project)},\n    {py_str(sp.region)},\n    {py_str(sp.new_id)},\n"
+            f"    {py_obj(sp.body, 1)},\n)\npoint_policy_at({py_str(sp.policy)}, {py_str(sp.new_ext)})")
+
+
+def _tf_ext_block(name: str, ext_id: str, project: str, spec: dict[str, Any], env: RenderEnv, bundle: bool,
+                  deps: Optional[list[str]] = None) -> hcl.Block:
+    b = hcl.Block(f'resource "google_network_services_authz_extension" "{name}"')
+    _tf_where(b, project, env, bundle)
+    b.s("name", ext_id)
+    b.s("service", spec.get("service") or "iap.googleapis.com")
+    b.s("timeout", spec.get("timeout") or "1s")
+    b.attr("fail_open", "true" if spec.get("failOpen") else "false")
+    for k, tk in (("authority", "authority"), ("loadBalancingScheme", "load_balancing_scheme"),
+                  ("wireFormat", "wire_format")):
+        if spec.get(k):
+            b.s(tk, spec[k])
+    for k, tk in (("forwardHeaders", "forward_headers"),):
+        if spec.get(k):
+            b.attr(tk, hcl.obj(spec[k], 1))
+    if spec.get("labels"):
+        b.attr("labels", hcl.obj(spec["labels"], 1))
+    md = {k: (v if isinstance(v, str) else json.dumps(v)) for k, v in (spec.get("metadata") or {}).items()}
+    b.attr("metadata", hcl.obj(md, 1))
+    _depends(b, deps)
+    return b
+
+
+def _tf_import(to: str, rid: str) -> str:
+    b = hcl.Block("import")
+    b.attr("to", to)
+    b.s("id", rid)
+    return b.render()
+
+
+def tf_enf(sp: EnfSpec, env: RenderEnv, name: str, bundle: bool) -> str:
+    if sp.staged:
+        return hcl.comment_lines(
+            f"{sp.ext_id} is created by the dedicate item in this cart; in the bundle its "
+            f"google_network_services_authz_extension block already has fail_open = "
+            f"{'true' if sp.fail_open else 'false'} and the {MODE_LABEL[sp.mode].lower()} metadata, so there is "
+            "nothing more to declare here.")
+    head = hcl.comment_lines(
+        f"The extension already exists, so it is imported into Terraform and updated in place (fail_open and "
+        f"metadata). The other attributes repeat its current settings"
+        + ("" if sp.known else " (ASSUMED: it wasn't found; check them)") + ". Terraform >= 1.5 (import block).")
+    b = _tf_ext_block(name, sp.ext_id, sp.project, sp.spec, env, bundle)
+    return head + _tf_import(f"google_network_services_authz_extension.{name}", sp.extension) + "\n" + b.render()
+
+
+def tf_ded(sp: DedSpec, env: RenderEnv, name: str, bundle: bool, final: Optional[dict[str, Any]] = None) -> str:
+    ext_name = f"{name}_extension"
+    pol_name = f"{name}_policy"
+    body = {**sp.body, **(final or {})}
+    ext_b = _tf_ext_block(ext_name, sp.new_id, sp.project, body, env, bundle)
+    pr = sp.policy_raw
+    pb = hcl.Block(f'resource "google_network_security_authz_policy" "{pol_name}"')
+    _tf_where(pb, sp.policy_project, env, bundle)
+    pb.s("name", sp.policy_id)
+    if pr.get("description"):
+        pb.s("description", pr["description"])
+    if pr.get("labels"):
+        pb.attr("labels", hcl.obj(pr["labels"], 1))
+    pb.s("policy_profile", pr.get("policyProfile") or "REQUEST_AUTHZ")
+    pb.s("action", pr.get("action") or "CUSTOM")
+    pb.blank()
+    pb.block("target").attr("resources", hcl.obj((pr.get("target") or {}).get("resources") or [sp.gateway], 2))
+    pb.blank()
+    target_ext = sp.source if sp.op == "revert" else f"google_network_services_authz_extension.{ext_name}.id"
+    res_expr = hcl.obj([sp.source], 3) if sp.op == "revert" else f"[{target_ext}]"
+    pb.block("custom_provider").block("authz_extension").attr("resources", res_expr)
+    if sp.op == "revert":
+        return (hcl.comment_lines(
+            f"Revert: point {sp.policy_id} back at {short(sp.source)}, then remove the {sp.new_id} extension "
+            "block from your configuration and run `terraform apply`. If these were created outside Terraform, use "
+            "the gcloud, REST or Python tab.") + "#\n" + hcl.commented(pb.render()))
+    head = hcl.comment_lines(
+        f"1. The copy {sp.new_id} (same settings as {short(sp.source)}"
+        + (", with the mode staged in this cart" if final else "") + ").")
+    head2 = hcl.comment_lines(
+        f"2. The existing IAP policy {sp.policy_id} is imported and pointed at the copy. Check the plan: it must be "
+        "an in-place update. If it shows a replace (destroy and create), the gateway has no IAP check between the "
+        "two; use the gcloud or REST tab (an in-place PATCH) instead.")
+    return (head + ext_b.render() + "\n" + head2
+            + _tf_import(f"google_network_security_authz_policy.{pol_name}", sp.policy) + "\n" + pb.render())
+
+
 # ====================================================================== per intent
 @dataclass
 class _Rendered:
@@ -1259,6 +1822,10 @@ def _tf_name(intent: Intent, spec: Any) -> str:
         base = f"ma_extension_{spec.ext_id}"
     elif isinstance(spec, ProjIamSpec):
         base = f"ma_roles_{spec.member.split(':', 1)[-1].split('@', 1)[0]}"
+    elif isinstance(spec, EnfSpec):
+        base = f"iap_{spec.ext_id}"
+    elif isinstance(spec, DedSpec):
+        base = f"{'revert' if spec.op == 'revert' else 'dedicated'}_{spec.new_id}"
     else:
         base = f"model_armor_{short(spec.gateway)}"
     return hcl.ident(base)
@@ -1321,6 +1888,16 @@ def render_one(intent: Intent, env: RenderEnv, tf_name: Optional[str] = None) ->
         return _assemble(intent.id, k, intent_english(intent), proj_iam_anatomy(sp), sp, gcloud_proj_iam(sp),
                          rest_proj_iam(sp), PY_PROJECT_IAM_HELPERS, python_proj_iam_call(sp),
                          tf_proj_iam(sp, env, name, bundle=False), name, warnings)
+    if k == "set_enforcement":
+        sp = enf_spec(intent, env, warnings)
+        name = tf_name or _tf_name(intent, sp)
+        return _assemble(intent.id, k, enf_english(sp), enf_anatomy(sp), sp, gcloud_enf(sp), rest_enf(sp),
+                         PY_ENF_HELPERS, python_enf_call(sp), tf_enf(sp, env, name, bundle=False), name, warnings)
+    if k == "dedicate_extension":
+        sp = ded_spec(intent, env, warnings)
+        name = tf_name or _tf_name(intent, sp)
+        return _assemble(intent.id, k, ded_english(sp), ded_anatomy(sp), sp, gcloud_ded(sp), rest_ded(sp),
+                         PY_ENF_HELPERS, python_ded_call(sp), tf_ded(sp, env, name, bundle=False), name, warnings)
     sp = ma_spec(intent, env, warnings)
     name = tf_name or _tf_name(intent, sp)
     return _assemble(intent.id, k, intent_english(intent), ma_anatomy(sp, env), sp, gcloud_ma(sp, env),
@@ -1388,9 +1965,19 @@ def _main_tf(env: RenderEnv, rendered: list[_Rendered]) -> str:
     for r in rendered:
         if isinstance(r.spec, ProjIamSpec) and r.spec.op == "add":
             iam_refs[r.spec.project].append(f"google_project_iam_member.{r.tf_name}")
+    # A set_enforcement of a copy that a dedicate item creates is folded into that copy's resource.
+    final_mode = {_tail(r.spec.extension): {"failOpen": r.spec.fail_open, "metadata": r.spec.metadata}
+                  for r in rendered if isinstance(r.spec, EnfSpec) and r.spec.staged}
     for r in rendered:
         out.append("\n")
         out.append(f"# {r.item.english}\n")
+        if isinstance(r.spec, EnfSpec):
+            out.append(tf_enf(r.spec, env, r.tf_name, bundle=True))
+            continue
+        if isinstance(r.spec, DedSpec):
+            out.append(tf_ded(r.spec, env, r.tf_name, bundle=True, final=final_mode.get(_tail(r.spec.new_ext))
+                              if r.spec.op == "dedicate" else None))
+            continue
         if isinstance(r.spec, IamSpec):
             out.append(tf_iam(r.spec, env, r.tf_name, bundle=True))
         elif isinstance(r.spec, BindSpec):
@@ -1415,7 +2002,7 @@ def _shell_header(env: RenderEnv, what: str) -> str:
             f"# {what} generated by Policy Studio for project {env.project} ({env.number}), region {env.region}"
             + (f", gateway project {env.gw_project}" if env.gw_project != env.project else "") + ".\n"
             "# Review before running. Order: gateway bindings, Model Armor setup (template, extension, service\n"
-            "# agent roles), Model Armor on/off, then grants.\n"
+            "# agent roles), dedicated IAP extensions, enforcement mode, Model Armor on/off, then grants.\n"
             "set -euo pipefail\n")
 
 
@@ -1424,6 +2011,8 @@ def _section(n: int, total: int, english: str) -> str:
 
 
 def order_key(r: _Rendered) -> int:
+    if isinstance(r.spec, DedSpec) and r.spec.op == "revert":
+        return REVERT_ORDER
     if getattr(r.spec, "op", "") in ("delete", "remove") and r.kind in DELETE_ORDER:
         return DELETE_ORDER[r.kind]
     return ORDER.get(r.kind, 9)

@@ -32,6 +32,8 @@ const KIND_TONE: Record<Intent["kind"], "green" | "red" | "blue" | "amber" | "pu
   model_armor_template: "purple",
   model_armor_extension: "purple",
   iam_project_grant: "purple",
+  set_enforcement: "amber",
+  dedicate_extension: "blue",
 };
 
 function useNow(active: boolean) {
@@ -99,6 +101,11 @@ function PlanRow({ intent, n, d, p }: { intent: Intent; n: number; d: DiffItem |
           {p?.status === "duplicate" && <span className="badge badge-neutral">Duplicate</span>}
         </div>
         <div className="plan-text">{intentEnglish(intent)}</div>
+        {p?.status === "ok" && p.warning && (
+          <div className="small warn-text">
+            <WarnIcon size={12} /> {p.warning}
+          </div>
+        )}
         {blocked && (
           <div className="plan-blocked">
             <span className="small field-error">

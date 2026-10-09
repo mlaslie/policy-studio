@@ -14,9 +14,10 @@ from .diff import diff as diff_intents
 from .gcp import gateways as gw_mod
 from .gcp.discovery import defaults as discovery_defaults
 from .gcp.engines import tail
+from .gcp.logs import parse_since
 from .gcp.rest import err_text
-from .model import (SETUP_KINDS, ApplyRequest, Context, DiffItem, Intent, IntentsRequest, Inventory, RenderItem,
-                    RenderResult)
+from .model import (ENFORCEMENT_KINDS, SETUP_KINDS, ApplyRequest, Context, DiffItem, Intent, IntentsRequest,
+                    Inventory, RenderItem, RenderResult)
 from .render import RenderEnv, gateway_full, render as render_intents, with_staged
 
 router = APIRouter(prefix="/api/studio", tags=["policy-studio"])
@@ -114,6 +115,21 @@ def audit(project: str = "", region: str = "", gateway_project: str = "", ge_app
     return _guard(service.audit_view, ctx, bool(refresh))
 
 
+@router.get("/gateway-logs")
+def gateway_logs(gateway: str, project: str = "", region: str = "", gateway_project: str = "", since: str = "24h",
+                 limit: int = 200, ge_app: str = "", ge_location: str = "us", refresh: int = 0) -> dict[str, Any]:
+    """Read-only: recent Agent Gateway request log entries of one gateway, each classified allowed / denied /
+    would_deny (dry run: IAP denied it but the request went through)."""
+    ctx = _ctx(project, region, gateway_project, ge_app, ge_location)
+    if not gateway.strip():
+        raise HTTPException(400, "gateway is required")
+    try:
+        parse_since(since or "24h")
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return _guard(service.gateway_logs_view, ctx, gateway.strip(), since or "24h", limit, bool(refresh))
+
+
 # ------------------------------------------------------------------ render / diff
 def _request_context(c: Context) -> Context:
     return make_context(c.project, c.region, c.gateway_project, c.ge_app, c.ge_location).model_copy(
@@ -162,6 +178,14 @@ def build_env(ctx: Context, intents: list[Intent], notes: Optional[list[str]] = 
                         it.gateway.policy = ma.name.rsplit("/", 1)[-1]
         except Exception as e:  # noqa: BLE001
             notes.append(f"Model Armor lookup failed: {err_text(e)}")
+    if kinds & set(ENFORCEMENT_KINDS):
+        try:
+            raw = service.gateway_raw(ctx)
+            idx = gw_mod.iap_index(raw)
+            idx["names"] = {tail(g.get("name", "")): g.get("name", "") for g in raw["gateways"]}
+            env.iap = idx
+        except Exception as e:  # noqa: BLE001
+            notes.append(f"IAP extension lookup failed: {err_text(e)}")
     return with_staged(env, intents)
 
 
@@ -256,6 +280,7 @@ def preflight(req: IntentsRequest) -> dict[str, Any]:
             writable = None
     dups = pf.duplicates(intents)
     blocked = pf.blockers([i for i in intents if i.id not in dups], env, writable)
+    advice = pf.advisories([i for i in intents if i.id not in dups and i.id not in blocked], env)
     items: list[dict[str, Any]] = []
     for it in intents:
         if it.id in dups:
@@ -264,6 +289,7 @@ def preflight(req: IntentsRequest) -> dict[str, Any]:
         elif it.id in blocked:
             items.append({"intent_id": it.id, "status": "blocked", **blocked[it.id]})
         else:
-            items.append({"intent_id": it.id, "status": "ok"})
+            items.append({"intent_id": it.id, "status": "ok", **({"warning": advice[it.id]} if it.id in advice
+                                                                 else {})})
     errs = [{"intent_id": i, "status": "invalid", "reason": e} for i, e in bad.values()]
     return {"items": _merge(items, dict(zip(bad.keys(), errs)), len(req.intents))}

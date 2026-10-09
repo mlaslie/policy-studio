@@ -2,7 +2,10 @@
 // region edits show up everywhere. Defaults: my-demo-project / us-east4.
 // Region us-central1 has no Model Armor set up (no template, no extension, service agents without the roles), to
 // exercise the "Set up Model Armor in this region" wizard.
-import type { AuditResp, Binding, ContextInfo, Ctx, Finding, Gateway, Grant, Inventory, MaSetup, McpTool, ModelArmorResp, ServiceAgent, Template, TemplateFilters } from "./types";
+// Enforcement: in us-east4 corp-egress and corp-ingress share one IAP authz extension in DRY_RUN (shared case + dry
+// run with "would have been denied" log entries); in us-central1 corp-egress enforces on its own extension and
+// corp-ingress has no IAP policy (switch disabled).
+import type { AuditResp, Binding, ContextInfo, Ctx, EnforcementMode, Finding, Gateway, Grant, Inventory, MaSetup, McpTool, ModelArmorResp, ServiceAgent, Template, TemplateFilters } from "./types";
 import { READ_ONLY_EXPR, ROLE, toolsExpr } from "../lib/policy";
 import { NO_IDENTITY_REASON, REDEPLOY_SNIPPET } from "../components/Redeploy";
 
@@ -80,6 +83,24 @@ export function templateFrom(name: string, f: TemplateFilters, block?: string): 
 }
 export const levelText = (l: string) => LEVEL_TEXT[l] ?? l;
 
+/** An IAP authz extension: its mode and the gateways whose REQUEST_AUTHZ policy calls it. */
+export type IapExt = { name: string; mode: EnforcementMode; gateways: string[]; policies: Record<string, string> };
+
+/** Recompute every gateway's `enforcement` (and its IAP policy chip) from the IAP extensions. */
+export function refreshEnforcement(gateways: Gateway[], exts: IapExt[]) {
+  for (const g of gateways) {
+    const x = exts.find((e) => e.gateways.includes(g.name));
+    g.authz_policies = g.authz_policies.filter((p) => p.provider !== "iap");
+    if (!x) {
+      g.enforcement = { mode: null, extension: "", policy: "", failOpen: false, shared_with: [], editable: false, reason: "No IAP REQUEST_AUTHZ policy on this gateway, so nothing is checked against roles/iap.egressor grants." };
+      continue;
+    }
+    const policy = x.policies[g.name];
+    g.authz_policies.unshift({ name: policy, profile: "REQUEST_AUTHZ", provider: "iap", extension: x.name, enforcement: x.mode });
+    g.enforcement = { mode: x.mode, extension: x.name, policy, failOpen: x.mode === "DRY_RUN", shared_with: x.gateways.filter((n) => n !== g.name), editable: true, reason: null };
+  }
+}
+
 export function buildWorld(ctx: Ctx) {
   const P = ctx.project || "my-demo-project";
   const R = ctx.region || "us-east4";
@@ -146,7 +167,6 @@ export function buildWorld(ctx: Ctx) {
       governed_access_path: "AGENT_TO_ANYWHERE",
       registries: [`//agentregistry.googleapis.com/${reg}`],
       authz_policies: [
-        { name: `projects/${GP}/locations/${R}/authzPolicies/corp-egress-iap-policy`, profile: "REQUEST_AUTHZ", provider: "iap", extension: `projects/${GP}/locations/${R}/authzExtensions/corp-egress-iap-authz`, enforcement: "ENFORCE" },
         ...(noMA
           ? []
           : [{ name: `projects/${GP}/locations/${R}/authzPolicies/corp-egress-ma-policy`, profile: "CONTENT_AUTHZ" as const, provider: "model_armor" as const, extension: `projects/${GP}/locations/${R}/authzExtensions/corp-ma-authz`, enforcement: "ENFORCE" as const }]),
@@ -168,6 +188,19 @@ export function buildWorld(ctx: Ctx) {
       create_time: "2026-05-04T10:31:00Z",
     },
   ];
+
+  // IAP authz extensions (the enforcement mode lives here, not on the gateway).
+  const iapExts: IapExt[] = noMA
+    ? [{ name: `projects/${GP}/locations/${R}/authzExtensions/corp-egress-iap-authz`, mode: "ENFORCE", gateways: [egress], policies: { [egress]: `projects/${GP}/locations/${R}/authzPolicies/corp-egress-iap-policy` } }]
+    : [
+        {
+          name: `projects/${GP}/locations/${R}/authzExtensions/corp-iap-authz`,
+          mode: "DRY_RUN",
+          gateways: [egress, ingress],
+          policies: { [egress]: `projects/${GP}/locations/${R}/authzPolicies/corp-egress-iap-policy`, [ingress]: `${loc}/authzPolicies/corp-ingress-iap-policy` },
+        },
+      ];
+  refreshEnforcement(gateways, iapExts);
 
   const template: Template = {
     name: `${loc}/templates/corp-agent-shield`,
@@ -383,6 +416,19 @@ export function buildWorld(ctx: Ctx) {
     Object.entries(inventory.access).flatMap(([res, bs]) => bs.map((x) => ({ ...x, resource: res, resource_kind: kindOf(res), resource_label: labelOf(res) })));
 
   const findings = (): Finding[] => [
+    ...iapExts
+      .filter((x) => x.mode === "DRY_RUN")
+      .map((x): Finding => {
+        const ids = x.gateways.map((n) => n.split("/").pop()!);
+        const names = ids.length > 1 ? `${ids.slice(0, -1).join(", ")} and ${ids[ids.length - 1]}` : ids[0];
+        return {
+          severity: "high",
+          title: ids.length > 1 ? `Gateways ${names} are in dry run: nothing is blocked` : `Gateway ${names} is in dry run: nothing is blocked`,
+          detail: `The IAP authz extension ${x.name.split("/").pop()} runs in dry run (metadata.iamEnforcementMode DRY_RUN, failOpen true): IAP still decides, but denials are only logged and every request goes through. Switch it to enforce${ids.length > 1 ? ` (the extension is shared, so the fix switches ${names} together; to change one gateway only, give it its own extension on the Gateways step)` : ""}. Check the “would have been denied” log on the Gateways step first.`,
+          resource: x.name,
+          fix: { id: `fix-enforce-${x.name.split("/").pop()}`, kind: "set_enforcement", gateway: { name: x.gateways[0], direction: x.gateways[0] === ingress ? "ingress" : "egress" }, extension: x.name, mode: "ENFORCE", scope: x.gateways.length > 1 ? "shared" : "dedicated" },
+        };
+      }),
     {
       severity: "high",
       title: "Travel Planner is not behind an egress gateway",
@@ -462,5 +508,5 @@ export function buildWorld(ctx: Ctx) {
 
   const audit = (): AuditResp => ({ grants: grants(), findings: findings(), synced_at: new Date().toISOString() });
 
-  return { P, R, GP, gateways, modelArmor, maExtensions, serviceAgents, setup, inventory, context, audit, projectSet };
+  return { P, R, GP, gateways, iapExts, modelArmor, maExtensions, serviceAgents, setup, inventory, context, audit, projectSet };
 }

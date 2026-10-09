@@ -45,6 +45,20 @@ export type AuthzPolicy = {
   enforcement?: "ENFORCE" | "DRY_RUN";
 };
 export type BoundEngine = { engine: string; display_name: string; direction: Direction };
+export type EnforcementMode = "ENFORCE" | "DRY_RUN";
+/** How the gateway's IAP REQUEST_AUTHZ check runs. The mode lives on the IAP authz extension, which can serve
+ *  several gateways (`shared_with`). */
+export type GatewayEnforcement = {
+  mode: EnforcementMode | null;
+  extension: string;
+  policy: string;
+  failOpen: boolean;
+  /** Other gateways (full names) whose IAP policy uses the same extension: they change together. */
+  shared_with: string[];
+  editable: boolean;
+  /** Why it can't be changed here (no IAP policy, extension unreadable, ...). */
+  reason?: string | null;
+};
 export type Gateway = {
   name: string;
   id: string;
@@ -54,6 +68,7 @@ export type Gateway = {
   authz_policies: AuthzPolicy[];
   bound_engines: BoundEngine[];
   create_time: string;
+  enforcement?: GatewayEnforcement;
   error?: string;
 };
 export type GatewaysResp = { gateways: Gateway[]; notes: string[] };
@@ -173,7 +188,9 @@ export type IntentKind =
   | "model_armor_off"
   | "model_armor_template"
   | "model_armor_extension"
-  | "iam_project_grant";
+  | "iam_project_grant"
+  | "set_enforcement"
+  | "dedicate_extension";
 export type MaLevel = "LOW_AND_ABOVE" | "MEDIUM_AND_ABOVE" | "HIGH" | "off";
 export type TemplateFilters = {
   pi_jailbreak: MaLevel;
@@ -207,6 +224,16 @@ export type Intent = {
   gateway?: { name: string; direction: Direction; extension?: string; policy?: string };
   engine?: string;
   params?: SetupParams;
+  /** set_enforcement: the IAP authz extension, the target mode, and "shared" (every gateway on the extension
+   *  changes) or "dedicated" (the extension is, or is about to be, this gateway's own). */
+  extension?: string;
+  mode?: EnforcementMode;
+  scope?: "shared" | "dedicated";
+  /** dedicate_extension: copy source_extension to new_name and point this gateway's IAP policy at the copy;
+   *  revert = the undo (point back, delete the copy). */
+  source_extension?: string;
+  new_name?: string;
+  revert?: boolean;
   /** Client-only: display label for the engine (bind/unbind). Ignored by the backend. */
   engine_label?: string;
 };
@@ -220,7 +247,7 @@ export type RenderResult = {
 };
 
 export type DiffStatus = "add" | "present" | "replace" | "remove" | "absent";
-export type DiffItem = { intent_id: string; status: DiffStatus; current: Binding[] | null; after?: Binding[] | null; detail: string; error?: string };
+export type DiffItem = { intent_id: string; status: DiffStatus; current: Binding[] | null; after?: Binding[] | null; detail: string; error?: string; /** set_enforcement */ current_mode?: EnforcementMode | null; target_mode?: EnforcementMode };
 export type DiffResult = { items: DiffItem[] };
 
 // ---- P3: run modes, credentials and apply (API.md "Run modes and credentials") ----
@@ -251,7 +278,7 @@ export type AuthInfo = {
 };
 export type ApplyState = "running" | "done" | "verified" | "failed" | "skipped";
 /** `progress: true` with state "done" = a long-running operation is still being polled (not final). */
-export type PreflightFix = "ma_setup" | "redeploy" | "permission";
+export type PreflightFix = "ma_setup" | "redeploy" | "permission" | "already" | "";
 export type ApplyItemEvent = {
   intent_id: string;
   state: ApplyState;
@@ -265,7 +292,40 @@ export type ApplyItemEvent = {
   blocked?: boolean;
   fix?: PreflightFix;
 };
-export type PreflightItem = { intent_id: string; status: "ok" | "blocked" | "duplicate" | "invalid"; reason?: string; fix?: PreflightFix; duplicate_of?: string };
+export type PreflightItem = { intent_id: string; status: "ok" | "blocked" | "duplicate" | "invalid"; reason?: string; fix?: PreflightFix; duplicate_of?: string; /** ok, but it affects more than it names (a shared IAP extension). */ warning?: string };
+
+// ---- Gateway request logs (GET /gateway-logs) ----
+export type LogDecision = "allowed" | "denied" | "would_deny";
+export type GatewayLogEntry = {
+  decision: LogDecision;
+  status: number | null;
+  host: string;
+  mcp_tool: string | null;
+  mcp_method: string | null;
+  registry_resource: string | null;
+  destination: string;
+  policies: { name: string; result: string }[];
+  authz_result?: string | null;
+  timestamp: string;
+  method?: string | null;
+  url?: string;
+  insert_id?: string | null;
+  console_url: string | null;
+  /** Not in the log entry: inferred when exactly one agent is bound to the gateway. */
+  agent: string | null;
+  agent_inferred: boolean;
+};
+export type GatewayLogsResp = {
+  gateway: string;
+  since: string;
+  filter: string;
+  entries: GatewayLogEntry[];
+  counts: Record<LogDecision, number>;
+  truncated: boolean;
+  console_url: string;
+  notes: string[];
+  errors: string[];
+};
 export type PreflightResult = { items: PreflightItem[] };
 export type ApplyDoneEvent = { type: "done"; summary?: unknown };
 export type ApplyEvent = ApplyItemEvent | ApplyDoneEvent;

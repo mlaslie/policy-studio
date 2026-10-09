@@ -7,8 +7,8 @@
 //   ?fast=1                     long-running operations finish in about a second
 //   ?writable=partial           you can apply grants/revokes but not gateway or Model Armor changes
 // Applied changes are kept in memory (until reload), so Sync shows them.
-import type { ApplyConfirm, ApplyEvent, AuthInfo, Binding, Ctx, GatewaysResp, Intent, PreflightItem, PreflightResult } from "./types";
-import { buildWorld, templateFrom, type World } from "./mockData";
+import type { ApplyConfirm, ApplyEvent, AuthInfo, Binding, Ctx, GatewayLogEntry, GatewayLogsResp, GatewaysResp, Intent, PreflightItem, PreflightResult } from "./types";
+import { buildWorld, MOCK_NUMBER, refreshEnforcement, templateFrom, type World } from "./mockData";
 import { mockDiff, mockRender } from "./mockRender";
 import { ROLE, conditionFor, intentEnglish, intentKey, newId } from "../lib/policy";
 import { NO_IDENTITY_REASON } from "../components/Redeploy";
@@ -31,7 +31,31 @@ const applied: Intent[] = [];
 
 const sameCond = (a: Binding["condition"], b: Binding["condition"]) => (a?.expression ?? "") === (b?.expression ?? "");
 
+const short = (n: string | undefined) => (n ?? "").split("/").pop() ?? "";
+const extFull = (source: string, name: string) => source.replace(/\/authzExtensions\/[^/]+$/, `/authzExtensions/${name}`);
+
 function mutate(w: World, i: Intent) {
+  if (i.kind === "set_enforcement") {
+    const x = w.iapExts.find((e) => short(e.name) === short(i.extension) || (!i.extension && e.gateways.includes(i.gateway?.name ?? "")));
+    if (x && i.mode) x.mode = i.mode;
+    refreshEnforcement(w.gateways, w.iapExts);
+    return;
+  }
+  if (i.kind === "dedicate_extension") {
+    const gw = i.gateway?.name ?? "";
+    const src = w.iapExts.find((e) => short(e.name) === short(i.source_extension)) ?? w.iapExts.find((e) => e.gateways.includes(gw));
+    const copy = w.iapExts.find((e) => short(e.name) === short(i.new_name));
+    if (!i.revert && src && !copy) {
+      w.iapExts.push({ name: extFull(src.name, i.new_name ?? "copy"), mode: src.mode, gateways: [gw], policies: { [gw]: src.policies[gw] } });
+      src.gateways = src.gateways.filter((g) => g !== gw);
+    } else if (i.revert && src && copy) {
+      src.gateways.push(gw);
+      src.policies[gw] = copy.policies[gw];
+      w.iapExts.splice(w.iapExts.indexOf(copy), 1);
+    }
+    refreshEnforcement(w.gateways, w.iapExts);
+    return;
+  }
   if (i.kind === "grant" || i.kind === "revoke") {
     const res = i.destination?.name ?? "";
     const cur = (w.inventory.access[res] ??= []);
@@ -131,6 +155,65 @@ export const gateways = (ctx: Ctx): GatewaysResp => ({
     "Agent Runtime agents created before 2026-04-29 can't be bound to a gateway.",
   ],
 });
+/** Mirrors GET /gateway-logs: a few would-be-denied calls on a dry-run gateway, denials on an enforcing one. */
+export function gatewayLogs(ctx: Ctx, gateway: string, since: string): GatewayLogsResp {
+  const w = world(ctx);
+  const g = w.gateways.find((x) => x.name === gateway || x.id === short(gateway));
+  const dry = g?.enforcement?.mode === "DRY_RUN";
+  const bound = (g?.bound_engines ?? []).filter((b) => b.direction === g?.type);
+  const agent = bound.length === 1 ? bound[0].display_name : null;
+  const reg = (kind: string, id: string) => `projects/${MOCK_NUMBER}/locations/${w.R}/${kind}/${id}`;
+  const now = Date.now();
+  const mk = (min: number, decision: GatewayLogEntry["decision"], kind: string, id: string, host: string, tool: string | null): GatewayLogEntry => {
+    const ts = new Date(now - min * 60_000).toISOString();
+    const insert = `mock${min}${decision}`;
+    return {
+      decision,
+      status: decision === "denied" ? 403 : 200,
+      host,
+      mcp_tool: tool,
+      mcp_method: tool ? "tools/call" : null,
+      registry_resource: reg(kind, id),
+      destination: id,
+      policies: [{ name: g?.enforcement?.policy ?? "", result: decision === "allowed" ? "ALLOWED" : "DENIED" }],
+      authz_result: decision === "allowed" ? "ALLOWED" : "DENIED",
+      timestamp: ts,
+      method: "POST",
+      url: `https://${host}/mcp`,
+      insert_id: insert,
+      console_url: `https://console.cloud.google.com/logs/query;query=insertId%3D%22${insert}%22?project=${encodeURIComponent(w.GP)}`,
+      agent,
+      agent_inferred: agent !== null,
+    };
+  };
+  const deny: GatewayLogEntry["decision"] = dry ? "would_deny" : "denied";
+  const entries: GatewayLogEntry[] = g
+    ? [
+        mk(4, deny, "mcpServers", "hr-directory-mcp-0f3c", "hr-directory-mcp-a1b2c3-uk.a.run.app", "delete_employee_record"),
+        mk(9, "allowed", "mcpServers", "tickets-mcp-6a21", "tickets-mcp-a1b2c3-uk.a.run.app", "list_tickets"),
+        mk(17, deny, "mcpServers", "tickets-mcp-6a21", "tickets-mcp-a1b2c3-uk.a.run.app", "close_ticket"),
+        mk(26, "allowed", "endpoints", "aiplatform-googleapis", `${w.R}-aiplatform.googleapis.com`, null),
+        mk(48, deny, "agents", "billing-agent-91d0", "billing-agent-d4e5f6-uk.a.run.app", null),
+        mk(95, deny, "mcpServers", "hr-directory-mcp-0f3c", "hr-directory-mcp-a1b2c3-uk.a.run.app", "update_employee_record"),
+        mk(240, "allowed", "agents", "kb-agent-4c1e", "kb-agent-a1b2c3-uk.a.run.app", null),
+      ]
+    : [];
+  const counts = { allowed: 0, denied: 0, would_deny: 0 };
+  for (const e of entries) counts[e.decision]++;
+  const filter = `logName="projects/${w.GP}/logs/networkservices.googleapis.com%2Fgateway_requests" AND resource.labels.gateway_name="${short(gateway)}"`;
+  return {
+    gateway: short(gateway),
+    since: new Date(now - 24 * 3600_000).toISOString(),
+    filter,
+    entries,
+    counts,
+    truncated: false,
+    console_url: `https://console.cloud.google.com/logs/query;query=${encodeURIComponent(filter)}?project=${encodeURIComponent(w.GP)}`,
+    notes: [`Mock log entries (since ${since}).`],
+    errors: [],
+  };
+}
+
 export const modelArmor = (ctx: Ctx) => {
   const w = world(ctx);
   return clone({ ...w.modelArmor, extensions: w.maExtensions, setup: w.setup() });
@@ -173,6 +256,20 @@ export function preflight(ctx: Ctx, intents: Intent[]): PreflightResult {
     if (a.writable?.[i.kind] === false) return { intent_id: i.id, status: "blocked", fix: "permission", reason: `You don't have permission for this kind of change in ${ctx.project} (see the “can write” check on Context for the role to ask for).` };
     const e = w.inventory.engines.find((x) => x.name === i.engine);
     if (i.kind === "bind_gateway" && e && !e.bindable) return { intent_id: i.id, status: "blocked", fix: "redeploy", reason: `${e.display_name} can't be bound to Agent Gateway. ${e.bindable_reason ?? ""}` };
+    if (i.kind === "set_enforcement" || i.kind === "dedicate_extension") {
+      const g = w.gateways.find((x) => x.name === i.gateway?.name);
+      const enf = g?.enforcement;
+      const stagedCopy = intents.some((x) => x.kind === "dedicate_extension" && !x.revert && x.new_name && short(i.extension) === x.new_name);
+      if (i.kind === "set_enforcement" && stagedCopy) return { intent_id: i.id, status: "ok" };
+      if (!enf?.editable) return { intent_id: i.id, status: "blocked", fix: "", reason: `${g?.id ?? short(i.gateway?.name)} has no IAP REQUEST_AUTHZ policy, so it has no enforcement mode to change.` };
+      if (i.kind === "set_enforcement" && enf.mode === i.mode)
+        return { intent_id: i.id, status: "blocked", fix: "already", reason: `Already ${i.mode === "ENFORCE" ? "enforcing" : "in dry run"}: ${short(enf.extension)} on ${g!.id} is in that mode, so there is nothing to change.` };
+      if (i.kind === "dedicate_extension" && !i.revert && w.iapExts.some((x) => short(x.name) === i.new_name))
+        return { intent_id: i.id, status: "blocked", fix: "", reason: `An authz extension named ${i.new_name} already exists in ${ctx.region}; pick another name.` };
+      if (i.kind === "set_enforcement" && i.scope === "shared" && enf.shared_with.length)
+        return { intent_id: i.id, status: "ok", warning: `${short(enf.extension)} also controls ${enf.shared_with.map(short).join(", ")}: they switch to ${i.mode === "ENFORCE" ? "enforce" : "dry run"} too.` };
+      return { intent_id: i.id, status: "ok" };
+    }
     const ext = i.gateway?.extension;
     const extOk = ext ? w.maExtensions.some((x) => x.name === ext) || staged.includes(ext) : extStaged || w.maExtensions.length > 0;
     if (i.kind === "model_armor_on" && !extOk)
@@ -282,10 +379,15 @@ const sleep = (ms: number, signal?: AbortSignal) =>
 
 const DESTRUCTIVE = new Set<Intent["kind"]>(["revoke", "unbind_gateway", "model_armor_off"]);
 const SETUP = new Set<Intent["kind"]>(["model_armor_template", "model_armor_extension", "iam_project_grant"]);
-const destructive = (i: Intent) => DESTRUCTIVE.has(i.kind) || (SETUP.has(i.kind) && !!i.params?.delete);
-// Like the backend: setup creates first, then the cart order, then setup deletes in reverse.
+const destructive = (i: Intent) =>
+  DESTRUCTIVE.has(i.kind) || (SETUP.has(i.kind) && !!i.params?.delete) || (i.kind === "set_enforcement" && i.mode === "DRY_RUN") || (i.kind === "dedicate_extension" && !!i.revert);
+// Like the backend: setup creates first, then dedicated IAP extensions, then the cart order, then reverts, then setup deletes in reverse.
 const runOrder = (i: Intent) =>
-  i.params?.delete ? ({ iam_project_grant: 4, model_armor_extension: 5, model_armor_template: 6 } as Record<string, number>)[i.kind] ?? 3 : ({ model_armor_template: 0, model_armor_extension: 1, iam_project_grant: 2 } as Record<string, number>)[i.kind] ?? 3;
+  i.params?.delete
+    ? ({ iam_project_grant: 6, model_armor_extension: 7, model_armor_template: 8 } as Record<string, number>)[i.kind] ?? 4
+    : i.kind === "dedicate_extension" && i.revert
+      ? 5
+      : ({ model_armor_template: 0, model_armor_extension: 1, iam_project_grant: 2, dedicate_extension: 3 } as Record<string, number>)[i.kind] ?? 4;
 
 /** The inverse of an intent, given the world before it was applied. */
 function inverse(w: World, i: Intent): Intent | Intent[] | null {
@@ -327,6 +429,12 @@ function inverse(w: World, i: Intent): Intent | Intent[] | null {
       const changed = (i.params?.roles ?? []).filter((r) => (a?.roles[r] ?? false) === !!i.params?.delete);
       return { ...i, id: id(), params: { ...i.params, roles: changed, delete: !i.params?.delete } };
     }
+    case "set_enforcement": {
+      const x = w.iapExts.find((e) => short(e.name) === short(i.extension));
+      return { ...i, id: id(), mode: x?.mode ?? (i.mode === "ENFORCE" ? "DRY_RUN" : "ENFORCE") };
+    }
+    case "dedicate_extension":
+      return { ...i, id: id(), revert: !i.revert };
   }
 }
 
@@ -374,7 +482,7 @@ export async function* applyStream(ctx: Ctx, intents: Intent[], confirm: ApplyCo
       yield {
         intent_id: i.id,
         state: "running",
-        detail: i.kind === "model_armor_extension" ? "Waiting for the authz extension operation…" : i.kind.startsWith("model_armor") ? "Waiting for the authz policy operation…" : "Waiting for the agent update operation…",
+        detail: i.kind === "set_enforcement" || i.kind === "dedicate_extension" ? "Waiting for the authz extension / policy operation…" : i.kind === "model_armor_extension" ? "Waiting for the authz extension operation…" : i.kind.startsWith("model_armor") ? "Waiting for the authz policy operation…" : "Waiting for the agent update operation…",
         operation: op,
       };
     if (lro) {
@@ -416,6 +524,12 @@ export async function* applyStream(ctx: Ctx, intents: Intent[], confirm: ApplyCo
             ? "Read back: the binding is gone."
             : i.kind.endsWith("gateway")
               ? "Read back: agentGatewayConfig matches."
+              : i.kind === "set_enforcement"
+                ? `Read back: ${short(i.extension)} is in ${i.mode === "DRY_RUN" ? "dry run (failOpen true)" : "enforce (failOpen false)"}. Typically takes effect within a few minutes; not yet measured.`
+                : i.kind === "dedicate_extension"
+                  ? i.revert
+                    ? `Read back: ${short(i.gateway?.name)} uses ${short(i.source_extension)} again and ${i.new_name} is gone.`
+                    : `Read back: ${short(i.gateway?.name)}'s IAP policy uses ${i.new_name}.`
               : i.kind === "model_armor_template"
                 ? `Read back: template ${i.params?.template_id} ${i.params?.delete ? "is gone" : "exists"}.`
                 : i.kind === "model_armor_extension"

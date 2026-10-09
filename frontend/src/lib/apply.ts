@@ -29,8 +29,13 @@ export type ApplyRun = {
 
 export const DESTRUCTIVE_KINDS = new Set<Intent["kind"]>(["revoke", "unbind_gateway", "model_armor_off"]);
 export const SETUP_KINDS = new Set<Intent["kind"]>(["model_armor_template", "model_armor_extension", "iam_project_grant"]);
-/** Revokes, unbinds, Model Armor off, and the delete (undo) form of the Model Armor setup kinds. */
-export const isDestructive = (i: Intent) => DESTRUCTIVE_KINDS.has(i.kind) || (SETUP_KINDS.has(i.kind) && !!i.params?.delete);
+/** Revokes, unbinds, Model Armor off, the delete (undo) form of the Model Armor setup kinds, dry run (stops
+ *  blocking) and reverting a dedicated IAP extension (deletes it). */
+export const isDestructive = (i: Intent) =>
+  DESTRUCTIVE_KINDS.has(i.kind) ||
+  (SETUP_KINDS.has(i.kind) && !!i.params?.delete) ||
+  (i.kind === "set_enforcement" && i.mode === "DRY_RUN") ||
+  (i.kind === "dedicate_extension" && !!i.revert);
 
 /** What a destructive kind does, for the acknowledgement checkbox. */
 export const DESTRUCTIVE_PHRASE: Partial<Record<Intent["kind"], string>> = {
@@ -41,6 +46,9 @@ export const DESTRUCTIVE_PHRASE: Partial<Record<Intent["kind"], string>> = {
   model_armor_template: "deletes a Model Armor template",
   model_armor_extension: "deletes a Model Armor extension",
   iam_project_grant: "removes a service agent's Model Armor roles",
+  // Destructive only in these forms.
+  set_enforcement: "puts a gateway in dry run: nothing is blocked",
+  dedicate_extension: "deletes a gateway's own IAP extension",
 };
 
 /** Typical time per kind, shown next to the elapsed timer. */
@@ -54,6 +62,8 @@ export const TYPICAL: Record<Intent["kind"], { label: string; seconds: number }>
   model_armor_template: { label: "a few seconds", seconds: 5 },
   model_armor_extension: { label: "about 1 min", seconds: 60 },
   iam_project_grant: { label: "a few seconds", seconds: 5 },
+  set_enforcement: { label: "about 1 min (+ propagation)", seconds: 60 },
+  dedicate_extension: { label: "a few minutes", seconds: 180 },
 };
 export const isLongRunning = (i: Intent) => TYPICAL[i.kind].seconds >= 60;
 
@@ -67,6 +77,8 @@ export const CHANGE_KIND: Record<Intent["kind"], string> = {
   model_armor_template: "Model Armor template (setup)",
   model_armor_extension: "Authz extension (setup, long-running)",
   iam_project_grant: "Project IAM for the gateway's service agent (setup)",
+  set_enforcement: "Update the IAP authz extension (long-running)",
+  dedicate_extension: "Copy the IAP extension + update the gateway's IAP policy (long-running)",
 };
 
 export function fmtElapsed(ms: number): string {
@@ -94,6 +106,8 @@ const KIND_NOUN: Record<Intent["kind"], string> = {
   model_armor_template: "creating Model Armor templates",
   model_armor_extension: "creating Model Armor extensions",
   iam_project_grant: "granting the service agent roles",
+  set_enforcement: "changing a gateway's enforcement mode",
+  dedicate_extension: "giving a gateway its own IAP extension",
 };
 /** Why this kind can't be applied by the signed-in user (null when it can, or when /auth doesn't say). */
 export function kindBlockedReason(a: AuthInfo | null, kind: Intent["kind"]): string | null {

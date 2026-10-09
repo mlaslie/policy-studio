@@ -36,28 +36,40 @@ from .gcp import model_armor as ma_mod
 from .preflight import blockers, duplicates, friendly
 from .gcp.rest import CRM, IAP, NETWORKSECURITY, NETWORKSERVICES, GcpError, aiplatform, err_text
 from .model import Access, Context, GatewayRef, Intent, SetupParams
-from .render import (PLACEHOLDER_EXT, RenderEnv, bind_spec, engine_body, engine_full, engine_url, ext_spec, ext_url,
-                     iam_spec, ma_body, ma_spec, ma_template_url, ma_url, proj_iam_spec, short, template_spec)
+from .render import (PLACEHOLDER_EXT, ENF_LEARN, MODE_LABEL, RenderEnv, bind_spec, ded_ext_url, ded_policy_url,
+                     ded_spec, enf_spec, engine_body, engine_full, engine_url, ext_copy, ext_mode, ext_spec, ext_url,
+                     iam_spec, ma_body, ma_spec, ma_template_url, ma_url, mode_metadata, proj_iam_spec, provider_body,
+                     short, template_spec)
 
 DESTRUCTIVE = {"revoke", "unbind_gateway", "model_armor_off"}
 SETUP_KINDS = ("model_armor_template", "model_armor_extension", "iam_project_grant")
-# Run order: setup creates first (template -> extension -> roles), then everything else in cart order, then setup
-# deletes (roles -> extension -> template), so Model Armor off runs before its extension is deleted.
-RUN_ORDER = {"model_armor_template": 0, "model_armor_extension": 1, "iam_project_grant": 2}
-DELETE_RUN_ORDER = {"iam_project_grant": 4, "model_armor_extension": 5, "model_armor_template": 6}
+# Run order: setup creates first (template -> extension -> roles), then dedicated IAP extensions (so a
+# set_enforcement of the copy finds it), then everything else in cart order, then reverts of dedicated extensions,
+# then setup deletes (roles -> extension -> template), so Model Armor off runs before its extension is deleted.
+RUN_ORDER = {"model_armor_template": 0, "model_armor_extension": 1, "iam_project_grant": 2, "dedicate_extension": 3}
+REVERT_RUN_ORDER = 5
+DELETE_RUN_ORDER = {"iam_project_grant": 6, "model_armor_extension": 7, "model_armor_template": 8}
 
 
 def run_order(it: Intent) -> int:
     if it.is_delete:
         return DELETE_RUN_ORDER[it.kind]
-    return RUN_ORDER.get(it.kind, 3)
+    if it.kind == "dedicate_extension" and it.revert:
+        return REVERT_RUN_ORDER
+    return RUN_ORDER.get(it.kind, 4)
 
 
 def is_destructive(raw: Any) -> bool:
+    """Revokes, unbinds, Model Armor off, setup deletes, dry run (stops blocking) and reverting a dedicated IAP
+    extension (deletes it)."""
     if not isinstance(raw, dict):
         return False
     if raw.get("kind") in DESTRUCTIVE:
         return True
+    if raw.get("kind") == "set_enforcement":
+        return raw.get("mode") == "DRY_RUN"
+    if raw.get("kind") == "dedicate_extension":
+        return bool(raw.get("revert"))
     return raw.get("kind") in SETUP_KINDS and bool((raw.get("params") or {}).get("delete"))
 MAX_ETAG_RETRIES = 3
 FINAL = {"done", "verified", "failed", "skipped"}
@@ -71,7 +83,8 @@ def check_confirm(ctx: Context, raw_intents: list[Any], confirm: dict[str, Any] 
         return f"confirm.project must equal the context project ({ctx.project})"
     destructive = [str(i.get("id", "?")) for i in raw_intents if is_destructive(i)]
     if destructive and confirm.get("acknowledge_destructive") is not True:
-        return ("revokes, unbinds, Model Armor off and setup deletes need confirm.acknowledge_destructive = true: "
+        return ("revokes, unbinds, Model Armor off, setup deletes, dry run and reverting a dedicated extension need "
+                "confirm.acknowledge_destructive = true: "
                 + ", ".join(destructive))
     return None
 
@@ -222,7 +235,9 @@ class Applier:
                                "unbind_gateway": self._bind, "model_armor_on": self._ma_on,
                                "model_armor_off": self._ma_off, "model_armor_template": self._template,
                                "model_armor_extension": self._extension,
-                               "iam_project_grant": self._project_iam}[it.kind]
+                               "iam_project_grant": self._project_iam,
+                               "set_enforcement": self._set_enforcement,
+                               "dedicate_extension": self._dedicate}[it.kind]
                     handler(it)
                 except Exception as e:  # noqa: BLE001  one failure never stops the others
                     self.emit(it.id, "failed", err_text(e))
@@ -589,6 +604,183 @@ class Applier:
                              undo=undo)
         self.emit(it.id, "verified", f"Read back: {sp.member.split(':', 1)[-1]} "
                   + ("holds " if add else "no longer holds ") + ", ".join(changed), undo=undo)
+
+
+    # ---------------------------------------------------------- IAP enforcement mode
+    def _wait(self, intent_id: str, op: dict, base: str, what: str) -> tuple[Optional[bool], str]:
+        name = op.get("name") or ""
+        if not name and not op.get("done"):
+            return True, ""
+        return self._poll(intent_id, op, f"{base}/{name}", what)
+
+    def _set_enforcement(self, it: Intent) -> None:
+        sp = enf_spec(it, self.env, [])
+        label = MODE_LABEL[sp.mode].lower()
+        if sp.staged and tail(sp.extension) in {tail(x) for x in self.failed_extensions}:
+            return self.emit(it.id, "skipped", f"Not attempted: {sp.ext_id} (the copy for {sp.gateway_id}) wasn't "
+                                               "created")
+        key = tail(sp.extension)
+        self._serialize(key, it.id)
+        url = f"{NETWORKSERVICES}/{sp.extension}"
+        self.emit(it.id, "running", f"Reading {sp.ext_id}")
+        live = self.rest.get(url, ok404=True)
+        if not live:
+            return self.emit(it.id, "failed", f"The IAP authz extension {sp.ext_id} doesn't exist in {sp.region}")
+        if str(live.get("service", "")) != "iap.googleapis.com":
+            return self.emit(it.id, "failed", f"{sp.ext_id} isn't an IAP authz extension; not changing it")
+        cur = ext_mode(live)
+        if cur == sp.mode:
+            return self.emit(it.id, "skipped", f"Already {'enforcing' if sp.mode == 'ENFORCE' else 'in dry run'} "
+                                               f"({sp.ext_id})")
+        body = {"metadata": mode_metadata(live.get("metadata") or {}, sp.mode), "failOpen": sp.mode == "DRY_RUN"}
+        others = f" (also {', '.join(sp.shared_with)})" if sp.shared_with else ""
+        self.emit(it.id, "running", f"PATCH {sp.ext_id} metadata + failOpen → {label}{others}")
+        op = self.writer.patch_authz_extension(f"{url}?updateMask=metadata,failOpen", body) or {}
+        undo = it.model_copy(update={"id": f"undo-{it.id}", "mode": cur, "extension": sp.extension})
+        self.emit(it.id, "done", f"Update of {sp.ext_id} started", operation=op.get("name"), undo=undo)
+        self._background(key, self._finish_enf, it.id, op, url, sp.mode, body["failOpen"], sp.ext_id, undo)
+
+    def _finish_enf(self, intent_id: str, op: dict, url: str, mode: str, fail_open: bool, ext_id: str,
+                    undo: Intent) -> None:
+        name = op.get("name") or None
+        ok, msg = self._wait(intent_id, op, NETWORKSERVICES, "Extension update")
+        if ok is None:
+            return self.emit(intent_id, "done", msg, operation=name, undo=undo)
+        if ok is False:
+            return self.emit(intent_id, "failed", msg, operation=name, undo=undo)
+        back = self.rest.get(url, ok404=True) or {}
+        if ext_mode(back) == mode and bool(back.get("failOpen")) == fail_open:
+            return self.emit(intent_id, "verified", f"Read back: {ext_id} is in {MODE_LABEL[mode].lower()} (failOpen "
+                             f"{str(fail_open).lower()}); {ENF_LEARN}", operation=name, undo=undo)
+        self.emit(intent_id, "failed", f"Read back: {ext_id} is in {MODE_LABEL.get(ext_mode(back) or '', '?')} "
+                  f"(failOpen {str(bool(back.get('failOpen'))).lower()}), expected {MODE_LABEL[mode].lower()}",
+                  operation=name, undo=undo)
+
+    def _policy_ext(self, pol: dict) -> str:
+        return (((pol.get("customProvider") or {}).get("authzExtension") or {}).get("resources") or [""])[0]
+
+    def _dedicate(self, it: Intent) -> None:
+        sp = ded_spec(it, self.env, [])
+        pol_url = f"{NETWORKSECURITY}/{sp.policy}"
+        new_url = ded_ext_url(sp, False)
+        if sp.op == "revert":
+            return self._revert(it, sp, pol_url, new_url)
+        fail = self.failed_extensions.add
+        self._serialize(tail(sp.gateway), it.id)
+        self.emit(it.id, "running", f"Reading {short(sp.source)} and {sp.policy_id}")
+        src = self.rest.get(f"{NETWORKSERVICES}/{sp.source}", ok404=True)
+        pol = self.rest.get(pol_url, ok404=True)
+        problem = None
+        if not src:
+            problem = f"The extension {short(sp.source)} doesn't exist in {sp.region}"
+        elif str(src.get("service", "")) != "iap.googleapis.com":
+            problem = f"{short(sp.source)} isn't an IAP authz extension"
+        elif not pol:
+            problem = f"The IAP policy {sp.policy_id} doesn't exist"
+        elif (pol.get("policyProfile") or "REQUEST_AUTHZ") != "REQUEST_AUTHZ":
+            problem = f"{sp.policy_id} is a {pol.get('policyProfile')} policy, not REQUEST_AUTHZ; not changing it"
+        elif any(tail(t) != tail(sp.gateway) for t in (pol.get("target") or {}).get("resources") or []):
+            problem = f"{sp.policy_id} also targets other gateways; pointing it at a copy would move them too"
+        if problem:
+            fail(sp.new_ext)
+            return self.emit(it.id, "failed", problem)
+        cur = self._policy_ext(pol)
+        undo = it.model_copy(update={"id": f"undo-{it.id}", "revert": True, "source_extension": sp.source,
+                                     "new_name": sp.new_id})
+        if tail(cur) == tail(sp.new_ext):
+            return self.emit(it.id, "skipped", f"{sp.gateway_id} already uses its own extension {sp.new_id}")
+        if tail(cur) != tail(sp.source):
+            fail(sp.new_ext)
+            return self.emit(it.id, "failed", f"{sp.policy_id} uses {short(cur)}, not {short(sp.source)}; Sync and "
+                                              "stage again")
+        if self.rest.get(new_url, ok404=True):
+            fail(sp.new_ext)
+            return self.emit(it.id, "failed", f"An authz extension named {sp.new_id} already exists; pick another "
+                                              "name")
+        body = ext_copy(src)
+        self.emit(it.id, "running", f"Creating {sp.new_id} (a copy of {short(sp.source)})")
+        try:
+            op = self.writer.create_authz_extension(ded_ext_url(sp, True), body) or {}
+        except Exception:
+            fail(sp.new_ext)
+            raise
+        ok, msg = self._wait(it.id, op, NETWORKSERVICES, "Extension creation")
+        if ok is not True or not self.rest.get(new_url, ok404=True):
+            fail(sp.new_ext)
+            return self.emit(it.id, "failed" if ok is not None else "done",
+                             msg or f"Read back: {sp.new_id} is missing", operation=op.get("name"),
+                             undo=undo if ok is None else None)
+        self.emit(it.id, "running", f"Pointing {sp.policy_id} at {sp.new_id}", operation=op.get("name"))
+        try:
+            op2 = self.writer.patch_authz_policy(ded_policy_url(sp), provider_body(sp.new_ext)) or {}
+        except Exception as e:
+            fail(sp.new_ext)
+            return self.emit(it.id, "failed", f"{sp.new_id} was created, but pointing {sp.policy_id} at it failed: "
+                                              f"{err_text(e)}. Undo deletes the copy.", undo=undo)
+        ok, msg = self._wait(it.id, op2, NETWORKSECURITY, "Policy update")
+        if ok is None:
+            return self.emit(it.id, "done", msg, operation=op2.get("name"), undo=undo)
+        if ok is False:
+            fail(sp.new_ext)
+            return self.emit(it.id, "failed", msg, operation=op2.get("name"), undo=undo)
+        back = self.rest.get(pol_url, ok404=True) or {}
+        if tail(self._policy_ext(back)) == tail(sp.new_ext):
+            return self.emit(it.id, "verified", f"Read back: {sp.gateway_id}'s IAP policy uses {sp.new_id}",
+                             operation=op2.get("name"), undo=undo)
+        fail(sp.new_ext)
+        self.emit(it.id, "failed", f"Read back: {sp.policy_id} uses {short(self._policy_ext(back))}, expected "
+                                   f"{sp.new_id}", operation=op2.get("name"), undo=undo)
+
+    def _revert(self, it: Intent, sp: Any, pol_url: str, new_url: str) -> None:
+        self._serialize(tail(sp.new_ext), it.id)
+        self._serialize(tail(sp.gateway), it.id)
+        undo = it.model_copy(update={"id": f"undo-{it.id}", "revert": False, "source_extension": sp.source,
+                                     "new_name": sp.new_id})
+        pol = self.rest.get(pol_url, ok404=True)
+        if not pol:
+            return self.emit(it.id, "failed", f"The IAP policy {sp.policy_id} doesn't exist")
+        if not self.rest.get(f"{NETWORKSERVICES}/{sp.source}", ok404=True):
+            return self.emit(it.id, "failed", f"{short(sp.source)} doesn't exist any more; not reverting")
+        cur = self._policy_ext(pol)
+        if tail(cur) == tail(sp.new_ext):
+            self.emit(it.id, "running", f"Pointing {sp.policy_id} back at {short(sp.source)}")
+            op = self.writer.patch_authz_policy(ded_policy_url(sp), provider_body(sp.source)) or {}
+            ok, msg = self._wait(it.id, op, NETWORKSECURITY, "Policy update")
+            if ok is not True:
+                return self.emit(it.id, "failed" if ok is False else "done", msg, operation=op.get("name"))
+        elif tail(cur) != tail(sp.source):
+            return self.emit(it.id, "failed", f"{sp.policy_id} uses {short(cur)}, neither {sp.new_id} nor "
+                                              f"{short(sp.source)}; not changing it")
+        copy_ = self.rest.get(new_url, ok404=True)
+        if copy_:
+            if str(copy_.get("service", "")) != "iap.googleapis.com":
+                return self.emit(it.id, "failed", f"{sp.new_id} isn't an IAP authz extension; not deleting it")
+            users = self._extension_users(sp, sp.new_ext)
+            if users:
+                return self.emit(it.id, "done", f"{sp.policy_id} points at {short(sp.source)} again; {sp.new_id} is "
+                                                f"kept because {', '.join(users)} still use{'s' if len(users) == 1 else ''} it")
+            self.emit(it.id, "running", f"Deleting {sp.new_id}")
+            op = self.writer.delete_authz_extension(new_url) or {}
+            ok, msg = self._wait(it.id, op, NETWORKSERVICES, "Extension deletion")
+            if ok is not True:
+                return self.emit(it.id, "failed" if ok is False else "done", msg, operation=op.get("name"))
+        back = self.rest.get(pol_url, ok404=True) or {}
+        gone = not self.rest.get(new_url, ok404=True)
+        if tail(self._policy_ext(back)) == tail(sp.source) and gone:
+            return self.emit(it.id, "verified", f"Read back: {sp.gateway_id} uses {short(sp.source)} again and "
+                                                f"{sp.new_id} is gone", undo=undo)
+        self.emit(it.id, "failed", "Read back: " + ("the policy doesn't use the original extension"
+                                                     if gone else f"{sp.new_id} is still there"), undo=undo)
+
+    def _extension_users(self, sp: Any, ext: str) -> list[str]:
+        """Authz policies (other than the gateway's) that still reference `ext`."""
+        try:
+            pols = self.rest.list_all(f"{NETWORKSECURITY}/projects/{sp.policy_project}/locations/{sp.region}/"
+                                      "authzPolicies", "authzPolicies")
+        except Exception:  # noqa: BLE001  (the delete then fails cleanly if it's in use)
+            return []
+        return [short(p.get("name", "")) for p in pols
+                if tail(self._policy_ext(p)) == tail(ext) and tail(p.get("name", "")) != tail(sp.policy)]
 
 
 def _filters_of(template: dict) -> Any:

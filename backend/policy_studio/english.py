@@ -121,6 +121,16 @@ def intent_english(intent: Intent) -> str:
         return f"Screen traffic on Agent Gateway {_short(gw.name) if gw else '?'} with Model Armor."
     if k == "model_armor_off":
         return f"Stop screening traffic on Agent Gateway {_short(gw.name) if gw else '?'} with Model Armor."
+    if k == "set_enforcement":
+        g = _short(gw.name) if gw else "?"
+        return (f"Enforce IAP on gateway {g}." if intent.mode == "ENFORCE" else
+                f"Put gateway {g} in dry run: IAP denials are only logged, nothing is blocked.")
+    if k == "dedicate_extension":
+        g = _short(gw.name) if gw else "?"
+        new = _short(intent.new_name or "") or "a new extension"
+        if intent.revert:
+            return f"Point {g}'s IAP policy back at {_short(intent.source_extension or '')} and delete {new}."
+        return f"Give gateway {g} its own IAP extension {new}."
     p = intent.params
     delete = bool(p and p.delete)
     if k == "model_armor_template":

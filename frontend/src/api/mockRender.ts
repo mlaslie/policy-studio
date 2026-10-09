@@ -363,6 +363,70 @@ function setupOutputs(ctx: Ctx, w: World, i: Intent): { outputs: Outputs; warnin
   };
 }
 
+function enforcementOutputs(ctx: Ctx, w: World, i: Intent, all: Intent[]): { outputs: Outputs; warnings: string[]; notes: string[]; resource: string } {
+  const g = w.gateways.find((x) => x.name === i.gateway?.name);
+  const enf = g?.enforcement;
+  const head = `# ${intentEnglish(i)}\n`;
+  const warnings: string[] = [];
+  const notes = ["The enforcement mode lives on the IAP authz extension, not on the gateway.", "Typically takes effect within a few minutes; not yet measured."];
+  const api = "https://networkservices.googleapis.com/v1";
+  if (i.kind === "set_enforcement") {
+    const ext = i.extension ?? enf?.extension ?? "EXTENSION";
+    const id = shortName(ext);
+    const staged = all.some((x) => x.kind === "dedicate_extension" && !x.revert && x.new_name === id);
+    const shared = staged ? [] : (enf?.shared_with ?? []).map(shortName);
+    const dry = i.mode === "DRY_RUN";
+    const md = dry ? { iapPolicyVersion: "V1", iamEnforcementMode: "DRY_RUN" } : { iapPolicyVersion: "V1" };
+    const body = JSON.stringify({ metadata: md, failOpen: dry });
+    if (shared.length && i.scope === "shared") warnings.push(`This extension also controls ${shared.join(", ")}: they switch to ${dry ? "dry run" : "enforce"} too.`);
+    if (shared.length && i.scope !== "shared") warnings.push(`${id} also controls ${shared.join(", ")}, so they change too. Give ${g?.id} its own extension first.`);
+    if (dry) warnings.push(`Dry run: once applied, nothing is blocked on ${[g?.id, ...(i.scope === "shared" ? shared : [])].join(", ")}; IAP denials are only logged.`);
+    const proj = ext.split("/")[1] ?? w.GP;
+    const yaml = [`name: ${id}`, `service: iap.googleapis.com`, `timeout: 1s`, `failOpen: ${dry}`, `metadata:`, `  iapPolicyVersion: V1`, ...(dry ? [`  iamEnforcementMode: DRY_RUN`] : [])].join("\n");
+    return {
+      resource: ext,
+      notes,
+      warnings,
+      outputs: {
+        terraform: head + (staged ? `# ${id} is created by the dedicate item in this cart; its block already has the ${dry ? "dry-run" : "enforce"} settings.` : `import {\n  to = google_network_services_authz_extension.iap_${ident(id)}\n  id = ${hcl(ext)}\n}\n\nresource "google_network_services_authz_extension" "iap_${ident(id)}" {\n  project   = ${hcl(proj)}\n  location  = ${hcl(ctx.region)}\n  name      = ${hcl(id)}\n  service   = "iap.googleapis.com"\n  timeout   = "1s"\n  fail_open = ${dry}\n  metadata = {\n    iapPolicyVersion = "V1"${dry ? '\n    iamEnforcementMode = "DRY_RUN"' : ""}\n  }\n}`),
+        gcloud: head + `cat > ${id}.yaml <<'EOF'\n${yaml}\nEOF\ngcloud service-extensions authz-extensions import ${id} \\\n  --source=${id}.yaml --location=${ctx.region} --project=${proj}`,
+        rest: head + `curl -sS --fail-with-body -X PATCH '${api}/${ext}?updateMask=metadata,failOpen' \\\n  -H "Authorization: Bearer $(gcloud auth print-access-token)" -H "Content-Type: application/json" \\\n  -d ${sq(body)}`,
+        python: head + `# pip install google-cloud-network-services\nset_iap_enforcement(${JSON.stringify(ext)}, ${JSON.stringify(md)}, ${dry ? "True" : "False"})`,
+      },
+    };
+  }
+  const src = i.source_extension ?? enf?.extension ?? "EXTENSION";
+  const name = i.new_name ?? "NEW_EXTENSION";
+  const copy = src.replace(/\/authzExtensions\/[^/]+$/, `/authzExtensions/${name}`);
+  const policy = enf?.policy ?? "POLICY";
+  const proj = src.split("/")[1] ?? w.GP;
+  const patch = `curl -sS --fail-with-body -X PATCH 'https://networksecurity.googleapis.com/v1/${policy}?updateMask=customProvider.authzExtension.resources' \\\n  -H "Authorization: Bearer $(gcloud auth print-access-token)" -H "Content-Type: application/json" \\\n  -d '{"customProvider":{"authzExtension":{"resources":["${i.revert ? src : copy}"]}}}'`;
+  if (i.revert)
+    return {
+      resource: policy,
+      notes,
+      warnings,
+      outputs: {
+        terraform: head + `# Point ${shortName(policy)} back at ${shortName(src)}, then remove the ${name} block and run terraform apply.`,
+        gcloud: head + `# (authz-policies import with ${shortName(src)})\ngcloud service-extensions authz-extensions delete ${name} --location=${ctx.region} --project=${proj} --quiet`,
+        rest: head + patch + `\ncurl -sS --fail-with-body -X DELETE '${api}/${copy}' -H "Authorization: Bearer $(gcloud auth print-access-token)"`,
+        python: head + `point_policy_at(${JSON.stringify(policy)}, ${JSON.stringify(src)})\ndelete_iap_extension(${JSON.stringify(proj)}, ${JSON.stringify(ctx.region)}, ${JSON.stringify(name)})`,
+      },
+    };
+  notes.push(`1. create ${name}, a copy of ${shortName(src)}; 2. PATCH ${shortName(policy)} so ${g?.id} uses it. Other gateways keep ${shortName(src)}.`);
+  return {
+    resource: policy,
+    notes,
+    warnings,
+    outputs: {
+      terraform: head + `resource "google_network_services_authz_extension" "${ident(name)}" {\n  project   = ${hcl(proj)}\n  location  = ${hcl(ctx.region)}\n  name      = ${hcl(name)}\n  service   = "iap.googleapis.com"\n  timeout   = "1s"\n}\n\n# + import and update google_network_security_authz_policy ${shortName(policy)} (custom_provider -> ${name})`,
+      gcloud: head + `gcloud service-extensions authz-extensions import ${name} --source=${name}.yaml --location=${ctx.region} --project=${proj}\ngcloud network-security authz-policies import ${shortName(policy)} --source=${shortName(policy)}.yaml --location=${ctx.region} --project=${proj}`,
+      rest: head + `curl -sS --fail-with-body -X POST '${api}/projects/${proj}/locations/${ctx.region}/authzExtensions?authzExtensionId=${name}' \\\n  -H "Authorization: Bearer $(gcloud auth print-access-token)" -H "Content-Type: application/json" -d '{"service":"iap.googleapis.com", ...}'\n` + patch,
+      python: head + `copy_authz_extension(${JSON.stringify(proj)}, ${JSON.stringify(ctx.region)}, ${JSON.stringify(name)}, body)\npoint_policy_at(${JSON.stringify(policy)}, ${JSON.stringify(copy)})`,
+    },
+  };
+}
+
 export function mockRender(ctx: Ctx, w: World, intents: Intent[]): RenderResult {
   const items: RenderItem[] = intents.map((i) => {
     let r: { outputs: Outputs; warnings: string[]; notes: string[] };
@@ -384,6 +448,10 @@ export function mockRender(ctx: Ctx, w: World, intents: Intent[]): RenderResult 
     } else if (i.kind === "bind_gateway" || i.kind === "unbind_gateway") {
       r = bindOutputs(ctx, w, i, i.kind === "unbind_gateway");
       anatomy = { resource: i.engine ?? "", role: "", member: "", condition: null, notes: r.notes };
+    } else if (i.kind === "set_enforcement" || i.kind === "dedicate_extension") {
+      const s = enforcementOutputs(ctx, w, i, intents);
+      r = s;
+      anatomy = { resource: s.resource, role: i.kind === "set_enforcement" ? `enforcement → ${i.mode === "DRY_RUN" ? "Dry run" : "Enforce"}` : "customProvider.authzExtension", member: i.gateway?.name ?? "", condition: null, notes: s.notes };
     } else if (i.kind === "model_armor_template" || i.kind === "model_armor_extension" || i.kind === "iam_project_grant") {
       const s = setupOutputs(ctx, w, i);
       r = s;
@@ -468,6 +536,22 @@ export function mockDiff(w: World, intents: Intent[]): DiffResult {
       }
       if (del) return { intent_id: i.id, status: have ? "remove" : "absent", current: null, detail: have ? `Deletes ${what}.` : `${what} doesn't exist.` };
       return { intent_id: i.id, status: have ? "present" : "add", current: null, detail: have ? `${what} already exists.` : `Creates ${what}.` };
+    }
+    if (i.kind === "set_enforcement" || i.kind === "dedicate_extension") {
+      const gw = w.gateways.find((x) => x.name === i.gateway?.name);
+      const enf = gw?.enforcement;
+      const label = (m?: string | null) => (m === "DRY_RUN" ? "Dry run" : m === "ENFORCE" ? "Enforce" : "unknown");
+      if (!enf?.mode) return { intent_id: i.id, status: "absent", current: null, detail: enf?.reason ?? "No IAP enforcement mode on this gateway." };
+      if (i.kind === "set_enforcement") {
+        const staged = intents.some((x) => x.kind === "dedicate_extension" && !x.revert && x.new_name === shortName(i.extension ?? ""));
+        if (staged) return { intent_id: i.id, status: "replace", current: null, current_mode: enf.mode, target_mode: i.mode, detail: `${gw!.id}: ${label(enf.mode)} → ${label(i.mode)} (on its own extension ${shortName(i.extension ?? "")}); other gateways keep their mode` };
+        if (enf.mode === i.mode) return { intent_id: i.id, status: "present", current: null, current_mode: enf.mode, target_mode: i.mode, detail: `already ${label(i.mode).toLowerCase()}` };
+        const also = enf.shared_with.length && shortName(i.extension ?? "") === shortName(enf.extension) ? `; also ${enf.shared_with.map(shortName).join(", ")} (shared extension)` : "";
+        return { intent_id: i.id, status: "replace", current: null, current_mode: enf.mode, target_mode: i.mode, detail: `${gw!.id}: ${label(enf.mode)} → ${label(i.mode)}${also}` };
+      }
+      if (i.revert) return { intent_id: i.id, status: shortName(enf.extension) === i.new_name ? "remove" : "absent", current: null, detail: shortName(enf.extension) === i.new_name ? `${gw!.id} goes back to ${shortName(i.source_extension ?? "")}; ${i.new_name} is deleted` : `${gw!.id} doesn't use ${i.new_name}` };
+      if (shortName(enf.extension) === i.new_name) return { intent_id: i.id, status: "present", current: null, detail: `${gw!.id} already uses ${i.new_name}` };
+      return { intent_id: i.id, status: "add", current: null, detail: `creates ${i.new_name} (copy of ${shortName(enf.extension)}, ${label(enf.mode).toLowerCase()}) and points ${gw!.id}'s IAP policy at it${enf.shared_with.length ? `; ${enf.shared_with.map(shortName).join(", ")} keep ${shortName(enf.extension)}` : ""}` };
     }
     const g = w.modelArmor.gateways.find((x) => x.gateway === i.gateway?.name);
     if (i.kind === "model_armor_on") return { intent_id: i.id, status: g?.enabled ? "present" : "add", current: null, detail: g?.enabled ? "Model Armor is already on." : "Creates a CONTENT_AUTHZ policy on the gateway." };

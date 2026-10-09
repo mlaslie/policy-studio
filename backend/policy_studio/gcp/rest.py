@@ -21,9 +21,10 @@ IAP = "https://iap.googleapis.com/v1"
 CRM = "https://cloudresourcemanager.googleapis.com/v1"
 SERVICEUSAGE = "https://serviceusage.googleapis.com/v1"
 TOKENINFO = "https://oauth2.googleapis.com/tokeninfo"
+LOGGING = "https://logging.googleapis.com/v2"
 
-# POST is only used for these read-only RPCs.
-READ_ONLY_POSTS = (":getIamPolicy", ":testIamPermissions", ":getAncestry")
+# POST is only used for these read-only RPCs (Cloud Logging's entries:list is a read that uses POST).
+READ_ONLY_POSTS = (":getIamPolicy", ":testIamPermissions", ":getAncestry", "/v2/entries:list")
 
 
 def aiplatform(region: str) -> str:

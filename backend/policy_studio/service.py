@@ -9,7 +9,8 @@ from typing import Any, Callable
 
 from . import audit as audit_mod
 from .english import make_binding
-from .gcp import discovery, engines as eng_mod, gateways as gw_mod, model_armor as ma_mod, registry as reg_mod
+from .gcp import discovery, engines as eng_mod, gateways as gw_mod, logs as logs_mod, model_armor as ma_mod, \
+    registry as reg_mod
 from .gcp.rest import Rest, client, err_text
 from .model import Context, Engine, Gateway, Inventory, Template
 
@@ -275,6 +276,43 @@ def audit_view(ctx: Context, refresh: bool = False) -> dict[str, Any]:
         res["synced_at"] = now_iso()
         return res
     return cache.get((ctx.key(), "audit"), build, refresh)
+
+
+# ------------------------------------------------------------------ gateway request logs
+def gateway_logs_view(ctx: Context, gateway: str, since: str = "24h", limit: int = 200,
+                      refresh: bool = False) -> dict[str, Any]:
+    """GET /gateway-logs: recent request log entries of one gateway, classified allowed / denied / would_deny.
+    `gateway` is an id or a full name (its project is then where the logs are read)."""
+    gid = gateway.rstrip("/").split("/")[-1]
+    projects = [gateway.split("/")[1]] if gateway.startswith("projects/") else \
+        list(dict.fromkeys([ctx.gw_project, ctx.project]))
+
+    def build() -> dict[str, Any]:
+        r = rest_for(ctx)
+        labels: dict[str, str] = {}
+        inv = cache.peek((ctx.key(), "inventory"))
+        if inv is not None:
+            for coll in (inv.agents, inv.mcp_servers, inv.endpoints):
+                for x in coll:
+                    labels[eng_mod.tail(x.name)] = x.display_name
+        out = logs_mod.fetch(r, projects, gid, since, limit, labels)
+        notes = ["The caller's identity isn't in Agent Gateway request logs; the agent is shown only when exactly "
+                 "one agent is bound to this gateway (inferred).",
+                 "Dry-run entries are recognized by an IAP DENIED result on a request that went through (2xx); this "
+                 "classification hasn't been checked against real dry-run entries yet."]
+        gv = cache.peek((ctx.key(), "gateways"))
+        agent = None
+        if gv is not None:
+            g = next((x for x in gv["gateways"] if x.id == gid), None)
+            bound = [b for b in (g.bound_engines if g else []) if b.direction == (g.type if g else "egress")]
+            if len(bound) == 1:
+                agent = bound[0].display_name
+        for e in out["entries"]:
+            e["agent"] = agent
+            e["agent_inferred"] = agent is not None
+        out.update(notes=notes, errors=[], synced_at=now_iso(), projects=projects)
+        return out
+    return cache.get((ctx.key(), "gateway_logs", gid, since, int(limit)), build, refresh)
 
 
 # ------------------------------------------------------------------ credentials (P3)

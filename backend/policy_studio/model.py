@@ -66,6 +66,19 @@ class AuthzPolicyRef(_M):
     enforcement: Optional[Literal["ENFORCE", "DRY_RUN"]] = None
 
 
+class GatewayEnforcement(_M):
+    """How the gateway's IAP REQUEST_AUTHZ check runs. The mode lives on the IAP authz extension (not the gateway):
+    ENFORCE = failOpen false, no metadata.iamEnforcementMode; DRY_RUN = metadata.iamEnforcementMode DRY_RUN (and
+    usually failOpen true). An extension can serve several gateways (`shared_with`)."""
+    mode: Optional[Literal["ENFORCE", "DRY_RUN"]] = None
+    extension: str = ""                # full name of the IAP authz extension (project id form when listed)
+    policy: str = ""                   # the REQUEST_AUTHZ authz policy that points at it
+    failOpen: bool = False
+    shared_with: list[str] = Field(default_factory=list)   # other gateways whose IAP policy uses the same extension
+    editable: bool = False
+    reason: Optional[str] = None       # why it can't be changed here (no IAP policy, extension unreadable, ...)
+
+
 class BoundEngine(_M):
     engine: str
     display_name: str = ""
@@ -82,6 +95,7 @@ class Gateway(_M):
     authz_policies: list[AuthzPolicyRef] = Field(default_factory=list)
     bound_engines: list[BoundEngine] = Field(default_factory=list)
     create_time: str = ""
+    enforcement: GatewayEnforcement = Field(default_factory=GatewayEnforcement)
     error: Optional[str] = None
 
 
@@ -191,8 +205,10 @@ class GatewayRef(_In):
 
 
 IntentKind = Literal["grant", "revoke", "bind_gateway", "unbind_gateway", "model_armor_on", "model_armor_off",
-                     "model_armor_template", "model_armor_extension", "iam_project_grant"]
+                     "model_armor_template", "model_armor_extension", "iam_project_grant",
+                     "set_enforcement", "dedicate_extension"]
 SETUP_KINDS = ("model_armor_template", "model_armor_extension", "iam_project_grant")
+ENFORCEMENT_KINDS = ("set_enforcement", "dedicate_extension")
 
 Level = Literal["LOW_AND_ABOVE", "MEDIUM_AND_ABOVE", "HIGH", "off"]
 
@@ -234,10 +250,32 @@ class Intent(_In):
     gateway: Optional[GatewayRef] = None
     engine: Optional[str] = None
     params: Optional[SetupParams] = None   # model_armor_template / model_armor_extension / iam_project_grant
+    # set_enforcement: the IAP authz extension, the target mode and whether the change is meant for every gateway
+    # that shares the extension ("shared") or only this one ("dedicated": the extension is, or is about to be, its own)
+    extension: Optional[str] = None
+    mode: Optional[Literal["ENFORCE", "DRY_RUN"]] = None
+    scope: Optional[Literal["shared", "dedicated"]] = None
+    # dedicate_extension: copy source_extension to new_name and point this gateway's IAP policy at the copy.
+    # revert = the inverse (undo): point the policy back at source_extension and delete the copy new_name.
+    source_extension: Optional[str] = None
+    new_name: Optional[str] = None
+    revert: Optional[bool] = None
 
     @property
     def is_delete(self) -> bool:
         return self.kind in SETUP_KINDS and bool(self.params and self.params.delete)
+
+    @property
+    def is_destructive(self) -> bool:
+        """Revokes, unbinds, Model Armor off, setup deletes, dry run (stops blocking) and reverting a dedicated
+        extension (deletes it)."""
+        if self.kind in ("revoke", "unbind_gateway", "model_armor_off"):
+            return True
+        if self.kind == "set_enforcement":
+            return self.mode == "DRY_RUN"
+        if self.kind == "dedicate_extension":
+            return bool(self.revert)
+        return self.is_delete
 
 
 class Finding(_M):

@@ -122,6 +122,8 @@ class FakeRest:
         self.calls: list[tuple[str, str]] = []
         self.fail = fail or {}
         self.model_armor = model_armor
+        self.log_entries: list[dict] = []          # Cloud Logging entries:list answers (newest first)
+        self.log_requests: list[dict] = []
 
     def _maybe_fail(self, url: str) -> None:
         for frag, status in self.fail.items():
@@ -165,6 +167,9 @@ class FakeRest:
                                                                                        ".update", "setIamPolicy"))]}
         if url.endswith(":getAncestry"):
             return {"ancestor": [{"resourceId": {"type": "organization", "id": ORG}}]}
+        if url.endswith("/v2/entries:list"):
+            self.log_requests.append(copy.deepcopy(json))
+            return {"entries": copy.deepcopy(self.log_entries[:json.get("pageSize", 50)])}
         if "cloudresourcemanager" in url and url.endswith(":getIamPolicy"):
             return copy.deepcopy(PROJECT_POLICY)
         if url.endswith(":getIamPolicy"):
@@ -255,6 +260,8 @@ class FakeWriteGcp(FakeRest):
         return super().list_all(url, key, params)
 
     def post(self, url: str, json: Any = None, ok404: bool = False) -> Any:
+        if url.endswith("/v2/entries:list"):
+            return FakeRest.post(self, url, json, ok404)
         if url.endswith(":testIamPermissions"):
             assert url.split("?")[0].endswith(READ_ONLY_POSTS)
             self.calls.append(("POST", url))
@@ -306,6 +313,14 @@ class FakeWriteGcp(FakeRest):
                 raise GcpError(409, "already exists", url)
             self.extensions[xid] = {"name": f"{base}/{xid}", **copy.deepcopy(json)}
             return self._op(base.rsplit("/authzExtensions", 1)[0])
+        if method == "PATCH" and "/authzExtensions/" in url:
+            xid = url.split("?", 1)[0].rsplit("/", 1)[-1]
+            self.extensions[xid].update(copy.deepcopy(json))          # metadata is replaced wholesale
+            return self._op(url.split("/v1/", 1)[1].split("?", 1)[0].rsplit("/authzExtensions", 1)[0])
+        if method == "PATCH" and "/authzPolicies/" in url:
+            pid = url.split("?", 1)[0].rsplit("/", 1)[-1]
+            self.policies[pid]["customProvider"] = copy.deepcopy(json["customProvider"])
+            return self._op(url.split("/v1/", 1)[1].split("?", 1)[0].rsplit("/authzPolicies", 1)[0])
         if method == "DELETE" and "/authzExtensions/" in url:
             xid = url.rsplit("/", 1)[-1]
             del self.extensions[xid]

@@ -15,6 +15,7 @@ import { useApplyGate } from "../components/Mode";
 import { WarningCallouts } from "./ModelArmorSetup";
 import { RedeployHelp } from "../components/Redeploy";
 import { PlayIcon } from "../components/Icons";
+import { DESTRUCTIVE_PHRASE, isDestructive } from "../lib/apply";
 
 function ApplyButton({ ids, label, small }: { ids: string[] | null; label: string; small?: boolean }) {
   const { openApply, cart, ctx } = useStudio();
@@ -110,7 +111,17 @@ function ItemCard({ intent, idx, res, diff, fmt, setFmt }: { intent: Intent; idx
       <header className="review-head">
         <span className="review-num">{idx + 1}</span>
         <div className="grow">
-          <div className="small muted">{KIND_LABEL[intent.kind]}</div>
+          <div className="small muted">
+            {KIND_LABEL[intent.kind]}
+            {isDestructive(intent) && (
+              <>
+                {" "}
+                <Badge tone="red" title="This change takes something away; Apply asks you to acknowledge it.">
+                  <WarnIcon size={11} /> Destructive: {DESTRUCTIVE_PHRASE[intent.kind]}
+                </Badge>
+              </>
+            )}
+          </div>
           <h3>{item?.english ?? intentEnglish(intent)}</h3>
         </div>
         {(intent.kind === "grant" || intent.kind === "revoke") && (

@@ -1,14 +1,16 @@
 // Step 1: gateways in the region, their policies and bound agents; stage bind / unbind.
-import { Tip } from "../components/Tooltip";
-import { useState } from "react";
+import { Tip, unavailable } from "../components/Tooltip";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useLookup, useStudio } from "../store";
-import type { Engine, Gateway, Intent } from "../api/types";
-import { Badge, Callout, Disclosure, Load, StepHeader, Term } from "../components/ui";
+import { api } from "../api/client";
+import type { EnforcementMode, Engine, Gateway, GatewayEnforcement, GatewayLogEntry, GatewayLogsResp, Intent } from "../api/types";
+import { Badge, Callout, Disclosure, Load, Spinner, StepHeader, Term } from "../components/ui";
 import { CodeView } from "../components/CodeView";
-import { GatewayIcon, LockIcon, PlusIcon, RobotIcon, ShieldIcon, SparkIcon, WarnIcon } from "../components/Icons";
-import { newId, shortName } from "../lib/policy";
+import { ArrowIcon, ClockIcon, EyeIcon, GatewayIcon, LockIcon, OpenInNewIcon, PlayIcon, PlusIcon, RefreshIcon, RobotIcon, ShieldIcon, SparkIcon, WarnIcon } from "../components/Icons";
+import { intentKey, newId, shortName } from "../lib/policy";
 import { RedeployHelp } from "../components/Redeploy";
-import { fmtDate } from "../lib/util";
+import { useApplyGate } from "../components/Mode";
+import { fmtDate, plural } from "../lib/util";
 
 export function ProviderChip({ p }: { p: Gateway["authz_policies"][number] }) {
   const label = p.provider === "iap" ? "IAP" : p.provider === "model_armor" ? "Model Armor" : "Other";
@@ -90,6 +92,327 @@ function BindPicker({ gw, onDone }: { gw: Gateway; onDone: () => void }) {
   );
 }
 
+// ---------------- enforcement mode (Enforce / Dry run) ----------------
+
+const EXT_NAME_RE = /^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$/;
+const MODE_TEXT: Record<EnforcementMode, string> = { ENFORCE: "Enforce", DRY_RUN: "Dry run" };
+const PROPAGATION = "Typically takes effect within a few minutes; not yet measured.";
+
+const extFull = (source: string, name: string) => source.replace(/\/authzExtensions\/[^/]+$/, `/authzExtensions/${name}`);
+const listText = (xs: string[]) => (xs.length <= 1 ? xs.join("") : `${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`);
+
+/** A free default name for a gateway's own IAP extension. */
+function suggestName(gw: Gateway, taken: Set<string>): string {
+  const base = `${gw.id}-iap-authz`.toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 55);
+  let n = base;
+  let k = 2;
+  while (taken.has(n)) n = `${base}-${k++}`;
+  return n;
+}
+
+function useTakenExtensionNames(): Set<string> {
+  const { gateways, modelArmor } = useStudio();
+  return useMemo(() => {
+    const s = new Set<string>();
+    for (const g of gateways.data?.gateways ?? []) {
+      if (g.enforcement?.extension) s.add(shortName(g.enforcement.extension));
+      for (const p of g.authz_policies) if (p.extension) s.add(shortName(p.extension));
+    }
+    for (const x of modelArmor.data?.extensions ?? []) s.add(shortName(x.name));
+    return s;
+  }, [gateways.data, modelArmor.data]);
+}
+
+function EnforcementChange({ gw, enf, target, onDone }: { gw: Gateway; enf: GatewayEnforcement; target: EnforcementMode; onDone: () => void }) {
+  const { addIntents, cart, openApply } = useStudio();
+  const { blockedFor, generate } = useApplyGate();
+  const taken = useTakenExtensionNames();
+  const shared = enf.shared_with.map(shortName);
+  const [choice, setChoice] = useState<"own" | "all">(shared.length ? "own" : "all");
+  const [name, setName] = useState(() => suggestName(gw, taken));
+  const nameErr = choice !== "own" ? null : !EXT_NAME_RE.test(name) ? "Lowercase letters, digits and hyphens, starting with a letter (at most 63)." : taken.has(name) ? "An extension with this name already exists." : null;
+  const dry = target === "DRY_RUN";
+  const gwRef = { name: gw.name, direction: gw.type };
+  const build = (): Intent[] =>
+    choice === "own" && shared.length
+      ? [
+          { id: newId(), kind: "dedicate_extension", gateway: gwRef, source_extension: enf.extension, new_name: name },
+          { id: newId(), kind: "set_enforcement", gateway: gwRef, extension: extFull(enf.extension, name), mode: target, scope: "dedicated" },
+        ]
+      : [{ id: newId(), kind: "set_enforcement", gateway: gwRef, extension: enf.extension, mode: target, scope: shared.length ? "shared" : "dedicated" }];
+  /** Stage (deduplicated) and return the cart ids of the staged items. */
+  const stage = (): string[] => {
+    const items = build();
+    const ids = items.map((i) => cart.find((c) => intentKey(c) === intentKey(i))?.id ?? i.id);
+    addIntents(items);
+    return ids;
+  };
+  const preview = build();
+  const applyReason = blockedFor(preview);
+  const all = [gw.id, ...shared];
+  return (
+    <div className={`enf-change ${dry ? "enf-change-dry" : ""}`} role="group" aria-label={`Change ${gw.id} to ${MODE_TEXT[target]}`}>
+      <div className="enf-change-title">
+        {dry ? <WarnIcon size={15} /> : <ShieldIcon size={15} />} Switch {gw.id} to <b>{MODE_TEXT[target].toLowerCase()}</b>
+      </div>
+      <p className="small">
+        {dry
+          ? "IAP keeps deciding and logging, but every call goes through, including ones without a grant. Use it to see what enforcing would block, not as a steady state."
+          : "Calls without a matching roles/iap.egressor grant are blocked with 403. Check the “would have been denied” list first so enforcing doesn't break calls that should be allowed."}
+      </p>
+      {shared.length > 0 && (
+        <>
+          <Callout tone="warn" title={<>This extension also controls: {listText(shared)}</>}>
+            The mode lives on the IAP authz extension <span className="mono">{shortName(enf.extension)}</span>, and {listText(shared)} use{shared.length === 1 ? "s" : ""} it too.
+          </Callout>
+          <div className="enf-choices" role="radiogroup" aria-label="Which gateways change">
+            <Tip tip={`Create ${name || "a copy"} (same settings as ${shortName(enf.extension)}), point ${gw.id}'s IAP policy at it, then switch only the copy. ${listText(shared)} keep${shared.length === 1 ? "s" : ""} ${MODE_TEXT[enf.mode ?? "ENFORCE"].toLowerCase()}.`} block>
+              <label className={`enf-choice ${choice === "own" ? "on" : ""}`}>
+                <input type="radio" name={`enf-${gw.id}`} checked={choice === "own"} onChange={() => setChoice("own")} />
+                <span>
+                  <b>Give {gw.id} its own extension</b> <Badge tone="green">recommended</Badge>
+                  <span className="block small muted">Only {gw.id} changes. Two steps: copy the extension, then point {gw.id}'s IAP policy at the copy.</span>
+                </span>
+              </label>
+            </Tip>
+            {choice === "own" && (
+              <div className={`field enf-name ${nameErr ? "has-error" : ""}`}>
+                <label htmlFor={`enf-name-${gw.id}`}>Name of the new extension</label>
+                <input id={`enf-name-${gw.id}`} className="mono" value={name} onChange={(e) => setName(e.target.value.trim())} spellCheck={false} />
+                {nameErr && <span className="small field-error">{nameErr}</span>}
+              </div>
+            )}
+            <Tip tip={`Change the shared extension ${shortName(enf.extension)} in place: ${listText(all)} all switch to ${MODE_TEXT[target].toLowerCase()} together.`} block>
+              <label className={`enf-choice ${choice === "all" ? "on" : ""}`}>
+                <input type="radio" name={`enf-${gw.id}`} checked={choice === "all"} onChange={() => setChoice("all")} />
+                <span>
+                  <b>Change for all {all.length} gateways</b>
+                  <span className="block small muted">{listText(all)} switch together.</span>
+                </span>
+              </label>
+            </Tip>
+          </div>
+        </>
+      )}
+      <p className="tiny muted">
+        <ClockIcon size={11} /> {PROPAGATION}
+      </p>
+      <div className="row">
+        <Tip tip={`Add ${preview.length === 1 ? "this change" : "these 2 steps"} to the cart. Nothing changes in Google Cloud until you apply.${nameErr ? ` Unavailable: ${nameErr}` : ""}`}>
+          <button
+            className="btn btn-primary btn-small"
+            disabled={!!nameErr}
+            onClick={() => {
+              stage();
+              onDone();
+            }}
+          >
+            Stage change
+          </button>
+        </Tip>
+        {!generate && (
+          <Tip tip={`Stage it and open Apply on just ${preview.length === 1 ? "this change" : "these steps"}. You'll confirm first${dry ? " and acknowledge that dry run stops blocking" : ""}.${unavailable(nameErr ?? applyReason)}`}>
+            <button
+              className="btn btn-outline btn-small"
+              disabled={!!nameErr || !!applyReason}
+              onClick={() => {
+                const ids = stage();
+                onDone();
+                openApply(ids);
+              }}
+            >
+              <PlayIcon size={13} /> Review &amp; apply
+            </button>
+          </Tip>
+        )}
+        <button className="btn btn-text btn-small" onClick={onDone}>
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function registryLabels(inv: ReturnType<typeof useLookup>["inv"]): Map<string, string> {
+  const m = new Map<string, string>();
+  const tail = (n: string) => (n.includes("/locations/") ? n.slice(n.indexOf("/locations/") + 1) : n);
+  for (const x of [...(inv?.agents ?? []), ...(inv?.mcp_servers ?? []), ...(inv?.endpoints ?? [])]) m.set(tail(x.name), x.display_name);
+  return m;
+}
+
+function WouldDeny({ gw }: { gw: Gateway }) {
+  const { ctx } = useStudio();
+  const { inv } = useLookup();
+  const [data, setData] = useState<GatewayLogsResp | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [all, setAll] = useState(false);
+  const labels = useMemo(() => registryLabels(inv), [inv]);
+  const load = useCallback(
+    async (refresh: boolean) => {
+      setBusy(true);
+      setErr(null);
+      try {
+        setData(await api.gatewayLogs(ctx, gw.name, "24h", refresh));
+      } catch (e) {
+        setErr(e instanceof Error ? e.message : String(e));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [ctx, gw.name],
+  );
+  useEffect(() => {
+    void load(false);
+  }, [load]);
+  const rows = (data?.entries ?? []).filter((e) => e.decision === "would_deny");
+  const shown = all ? rows : rows.slice(0, 6);
+  const dest = (e: GatewayLogEntry) => {
+    const r = e.registry_resource;
+    const t = r && r.includes("/locations/") ? r.slice(r.indexOf("/locations/") + 1) : "";
+    return labels.get(t) ?? e.destination ?? e.host;
+  };
+  return (
+    <section className="would-deny" aria-label="Would have been denied in the last 24 hours">
+      <div className="would-deny-head">
+        <h5>
+          Would have been denied <span className="muted">(last 24 h)</span>
+        </h5>
+        {data && <Badge tone={rows.length ? "amber" : "neutral"}>{rows.length}{data.truncated ? "+" : ""}</Badge>}
+        <span className="grow" />
+        <Tip tip="Read the gateway's request log again from Cloud Logging (read-only).">
+          <button className="icon-btn" aria-label="Refresh the would-be-denied list" onClick={() => void load(true)} disabled={busy}>
+            <RefreshIcon size={14} className={busy ? "spin" : ""} />
+          </button>
+        </Tip>
+        {data?.console_url && (
+          <Tip tip="Open these log entries in Cloud Logging (new tab).">
+            <a className="icon-btn" href={data.console_url} target="_blank" rel="noreferrer" aria-label="Open in Cloud Logging">
+              <OpenInNewIcon size={14} />
+            </a>
+          </Tip>
+        )}
+      </div>
+      {err ? (
+        <p className="small field-error">
+          Couldn't read the gateway's request log: {err}
+          {/permission|403/i.test(err) ? " (reading logs needs roles/logging.viewer)." : ""}
+        </p>
+      ) : !data ? (
+        <Spinner label="Reading the request log…" />
+      ) : rows.length === 0 ? (
+        <p className="small muted">
+          Nothing would have been denied in the last 24 hours ({plural(data.entries.length, "request")} logged
+          {data.entries.length ? `, ${data.counts.denied} denied anyway` : ""}). Either every call had a grant, or there was little traffic. Dry-run entries are recognized as IAP “denied” on a call that went through; that hasn't been checked against real dry-run logs yet.
+        </p>
+      ) : (
+        <>
+          <ul className="would-deny-list">
+            {shown.map((e, n) => (
+              <li key={(e.insert_id ?? "") + n}>
+                <span className="wd-who">
+                  <RobotIcon size={13} /> {e.agent ?? "an agent"}
+                  {e.agent_inferred && <span className="tiny muted" title="Request logs don't name the caller; this is the only agent bound to the gateway."> (inferred)</span>}
+                </span>
+                <ArrowIcon size={12} />
+                <span className="wd-what">
+                  {dest(e)}
+                  {e.mcp_tool && <span className="mono tiny"> · {e.mcp_tool}</span>}
+                </span>
+                <span className="grow" />
+                <span className="tiny muted" title={e.timestamp}>
+                  {fmtTime(e.timestamp)}
+                </span>
+                {e.console_url && (
+                  <a className="tiny" href={e.console_url} target="_blank" rel="noreferrer" aria-label="Open this entry in Cloud Logging">
+                    log
+                  </a>
+                )}
+              </li>
+            ))}
+          </ul>
+          {rows.length > shown.length && (
+            <button className="link-btn small" onClick={() => setAll(true)}>
+              Show all {rows.length}
+            </button>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
+const fmtTime = (iso: string) => {
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? iso : d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+};
+
+function Enforcement({ gw }: { gw: Gateway }) {
+  const { cart } = useStudio();
+  const enf = gw.enforcement;
+  const [target, setTarget] = useState<EnforcementMode | null>(null);
+  if (!enf) return null;
+  const mode = enf.mode;
+  const staged = cart.find((i) => i.kind === "set_enforcement" && shortName(i.gateway?.name ?? "") === gw.id);
+  const sharedBy = cart.find(
+    (i) => i.kind === "set_enforcement" && i.scope === "shared" && i.extension && shortName(i.extension) === shortName(enf.extension) && shortName(i.gateway?.name ?? "") !== gw.id,
+  );
+  const disabledWhy = !enf.editable ? enf.reason ?? "This gateway has no IAP policy whose mode Policy Studio can change." : null;
+  const shared = enf.shared_with.map(shortName);
+  const TIPS: Record<EnforcementMode, string> = {
+    ENFORCE: `Enforce: IAP blocks calls from bound agents that don't hold roles/iap.egressor on the destination (403).${shared.length ? ` Shared with ${listText(shared)}.` : ""}`,
+    DRY_RUN: `Dry run: IAP still decides and logs, but lets every call through, so nothing is blocked.${shared.length ? ` Shared with ${listText(shared)}.` : ""}`,
+  };
+  return (
+    <div className="gw-section enf">
+      <h4>
+        <Term k="dry-run">Enforcement</Term>
+      </h4>
+      {mode === "DRY_RUN" && (
+        <div className="enf-banner" role="status">
+          <WarnIcon size={15} /> <b>Dry run: nothing is blocked on this gateway</b>
+        </div>
+      )}
+      <div className="enf-row">
+        <div className={`seg enf-seg ${disabledWhy ? "enf-seg-off" : ""}`} role="radiogroup" aria-label={`Enforcement mode of ${gw.id}`}>
+          {(["ENFORCE", "DRY_RUN"] as const).map((m) => (
+            <Tip key={m} tip={disabledWhy ? `Unavailable: ${disabledWhy}` : mode === m ? `${TIPS[m]} This is the current mode.` : `${TIPS[m]} Click to stage the change (nothing changes until you apply).`}>
+              <button
+                type="button"
+                role="radio"
+                aria-checked={mode === m}
+                disabled={!!disabledWhy}
+                className={`seg-btn ${mode === m ? `on ${m === "DRY_RUN" ? "on-dry" : "on-enforce"}` : ""} ${target === m ? "pending" : ""}`}
+                onClick={() => setTarget(mode === m ? null : m)}
+              >
+                {m === "ENFORCE" ? <ShieldIcon size={13} /> : <EyeIcon size={13} />} {MODE_TEXT[m]}
+              </button>
+            </Tip>
+          ))}
+        </div>
+        {!disabledWhy && (
+          <span className="tiny muted enf-meta">
+            <span className="mono">{shortName(enf.extension)}</span>
+            {shared.length > 0 && (
+              <Tip tip={`The mode lives on this IAP authz extension, which ${listText(shared)} use${shared.length === 1 ? "s" : ""} too: changing it in place changes all of them.`}>
+                <span className="enf-shared" tabIndex={0}>
+                  {" "}
+                  · shared with {listText(shared)}
+                </span>
+              </Tip>
+            )}
+          </span>
+        )}
+        {staged && <Badge tone="blue">{MODE_TEXT[staged.mode ?? "ENFORCE"]} staged</Badge>}
+        {!staged && sharedBy && <Badge tone="blue">{MODE_TEXT[sharedBy.mode ?? "ENFORCE"]} staged (shared)</Badge>}
+      </div>
+      {disabledWhy && <p className="small muted">{disabledWhy}</p>}
+      {target && enf.editable && target !== mode && <EnforcementChange gw={gw} enf={enf} target={target} onDone={() => setTarget(null)} />}
+      {mode === "DRY_RUN" && <WouldDeny gw={gw} />}
+    </div>
+  );
+}
+
 function GatewayCard({ gw }: { gw: Gateway }) {
   const { addIntents, cart } = useStudio();
   const { engineByName } = useLookup();
@@ -98,7 +421,7 @@ function GatewayCard({ gw }: { gw: Gateway }) {
   const staged = (e: string) => cart.some((i) => i.kind === "unbind_gateway" && i.engine === e && i.gateway?.name === gw.name);
   const hasIap = gw.authz_policies.some((p) => p.provider === "iap");
   return (
-    <article className="card gw-card">
+    <article className={`card gw-card ${gw.enforcement?.mode === "DRY_RUN" ? "gw-dry" : ""}`}>
       <header className="gw-head">
         <span className={`gw-icon gw-${gw.type}`}>
           <GatewayIcon size={20} />
@@ -133,6 +456,8 @@ function GatewayCard({ gw }: { gw: Gateway }) {
         )}
         {gw.type === "egress" && !hasIap && <Callout tone="warn" title="No IAP policy">Without an IAP REQUEST_AUTHZ policy, grants are not enforced on this gateway.</Callout>}
       </div>
+
+      <Enforcement gw={gw} />
 
       <div className="gw-section">
         <h4>

@@ -2,6 +2,11 @@
 export type GlossaryEntry = { term: string; short: string; long: string };
 
 export const GLOSSARY: Record<string, GlossaryEntry> = {
+  "dry-run": {
+    term: "Enforce vs dry run",
+    short: "Enforce blocks calls without a grant; dry run only logs what would have been blocked.",
+    long: "A gateway's IAP check (its REQUEST_AUTHZ policy) calls an IAP authz extension, and the mode lives on that extension, not on the gateway. Enforce: failOpen false and no iamEnforcementMode, so calls without a roles/iap.egressor grant get a 403. Dry run: metadata iamEnforcementMode DRY_RUN (and failOpen true): IAP still decides and logs, but every call goes through. One extension can serve several gateways; changing it changes all of them, so Policy Studio can give a gateway its own copy first. A change typically takes effect within a few minutes (not yet measured).",
+  },
   "agent-gateway": {
     term: "Agent Gateway",
     short: "A managed checkpoint that agent traffic passes through, where access and content rules are enforced.",

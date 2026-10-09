@@ -3675,3 +3675,160 @@ body.resizing * {
 .unbindable .disclosure {
   flex-basis: 100%;
 }
+
+/* ---------- Gateways: enforcement mode (Enforce / Dry run) ---------- */
+.gw-card.gw-dry {
+  box-shadow: inset 0 3px 0 var(--amber), var(--shadow-1);
+}
+.enf-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  margin-bottom: 8px;
+  border-radius: 8px;
+  background: var(--amber-weak);
+  color: var(--amber);
+  border: 1px solid color-mix(in srgb, var(--amber) 45%, transparent);
+  font-size: 13.5px;
+}
+.enf-banner b {
+  color: var(--text);
+}
+.enf-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+.enf-seg .seg-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.enf-seg .seg-btn.on-enforce {
+  background: var(--green-weak);
+  color: var(--green);
+}
+.enf-seg .seg-btn.on-dry {
+  background: var(--amber-weak);
+  color: var(--amber);
+}
+.enf-seg .seg-btn.pending {
+  box-shadow: inset 0 0 0 2px var(--blue);
+  color: var(--blue);
+}
+.enf-seg .seg-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+.enf-meta {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.enf-shared {
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+  color: var(--amber);
+}
+.enf-change {
+  margin-top: 10px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.enf-change-dry {
+  border-color: color-mix(in srgb, var(--amber) 55%, var(--border));
+}
+.enf-change p {
+  margin: 0;
+}
+.enf-change-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 500;
+}
+.enf-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.enf-choice {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  cursor: pointer;
+}
+.enf-choice.on {
+  border-color: var(--blue);
+  background: var(--blue-weak);
+}
+.enf-choice input {
+  margin-top: 3px;
+}
+.enf-name {
+  margin-left: 26px;
+}
+.enf-name input {
+  width: 100%;
+  max-width: 340px;
+}
+.would-deny {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.would-deny-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.would-deny-head h5 {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 500;
+}
+.would-deny-head .grow {
+  flex: 1;
+}
+.would-deny-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.would-deny-list li {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 13px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  background: var(--surface);
+  border-left: 3px solid var(--amber);
+}
+.would-deny-list .grow {
+  flex: 1;
+}
+.wd-who,
+.wd-what {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}

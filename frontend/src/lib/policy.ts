@@ -78,6 +78,14 @@ export function intentEnglish(i: Intent): string {
       const roles = (i.params?.roles ?? []).map(shortName).join(", ") || "no roles";
       return i.params?.delete ? `Remove ${roles} from ${who}.` : `Let ${who} call Model Armor (${roles}).`;
     }
+    case "set_enforcement":
+      return i.mode === "DRY_RUN"
+        ? `Put ${gw} in dry run: IAP denials are only logged, nothing is blocked${i.scope === "shared" ? " (shared extension: other gateways too)" : ""}.`
+        : `Enforce IAP on ${gw}: calls without a grant are blocked${i.scope === "shared" ? " (shared extension: other gateways too)" : ""}.`;
+    case "dedicate_extension":
+      return i.revert
+        ? `Point ${gw} back at ${shortName(i.source_extension ?? "") || "its original extension"} and delete ${i.new_name ?? "its own extension"}.`
+        : `Give ${gw} its own IAP extension ${i.new_name ?? ""} (a copy of ${shortName(i.source_extension ?? "") || "the shared one"}).`;
   }
 }
 
@@ -91,6 +99,8 @@ export const KIND_LABEL: Record<Intent["kind"], string> = {
   model_armor_template: "Model Armor template",
   model_armor_extension: "Model Armor extension",
   iam_project_grant: "Service agent roles",
+  set_enforcement: "Enforcement mode",
+  dedicate_extension: "Own IAP extension",
 };
 
 /** Order used for the review list: infrastructure first, then grants (plan §5). */
@@ -100,10 +110,12 @@ export const KIND_ORDER: Record<Intent["kind"], number> = {
   model_armor_template: 2,
   model_armor_extension: 3,
   iam_project_grant: 4,
-  model_armor_on: 5,
-  model_armor_off: 6,
-  grant: 7,
-  revoke: 8,
+  dedicate_extension: 5,
+  set_enforcement: 6,
+  model_armor_on: 7,
+  model_armor_off: 8,
+  grant: 9,
+  revoke: 10,
 };
 
 function stable(v: unknown): string {
@@ -130,6 +142,12 @@ export function intentKey(i: Intent): string {
     destination: i.destination ? [i.destination.kind, i.destination.id || shortName(i.destination.name)] : null,
     access: a ? [a.mode, [...(a.tools ?? [])].filter(Boolean).sort(), a.expression ?? "", a.title ?? null] : null,
     params: i.params ?? null,
+    extension: i.extension ? shortName(i.extension) : null,
+    mode: i.mode ?? null,
+    scope: i.scope ?? null,
+    source_extension: i.source_extension ? shortName(i.source_extension) : null,
+    new_name: i.new_name ? shortName(i.new_name) : null,
+    revert: i.revert ? true : null,
   });
 }
 

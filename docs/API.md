@@ -34,6 +34,7 @@ Every request carries the context as query params (GET) or a `context` object (P
 | POST | `/api/studio/render` | `{context, intents: [Intent]}` → `RenderResult` |
 | POST | `/api/studio/diff` | `{context, intents: [Intent]}` → `{items: [DiffItem]}` |
 | POST | `/api/studio/preflight` | `{context, intents: [Intent]}` → `{items: [PreflightItem]}` (read-only; the checks `/apply` enforces) |
+| GET | `/api/studio/gateway-logs?gateway=&since=24h&limit=200` | `GatewayLogs` (read-only Cloud Logging `entries:list`; see below) |
 
 GET responses are cached for 30 s per context. `?refresh=1` bypasses the cache; the **Sync** button uses it. Partial failures appear per item as `error: "…"` and never fail the whole request. A failure of the whole request (no credentials, network) is HTTP 502 `{detail}`.
 
@@ -50,7 +51,16 @@ PermissionCheck = { permission, granted: boolean | null /* null = not checked (c
 Gateway = { name, id, project, type: "egress" | "ingress", governed_access_path, registries: string[],
             authz_policies: [{name, profile: "REQUEST_AUTHZ"|"CONTENT_AUTHZ", provider: "iap"|"model_armor"|"other",
                               extension, enforcement?: "ENFORCE"|"DRY_RUN"}],
-            bound_engines: [{engine, display_name, direction: "egress"|"ingress"}], create_time }
+            bound_engines: [{engine, display_name, direction: "egress"|"ingress"}], create_time,
+            enforcement: GatewayEnforcement }
+GatewayEnforcement = { mode: "ENFORCE" | "DRY_RUN" | null, extension /* the IAP authz extension */,
+                       policy /* the REQUEST_AUTHZ policy that calls it */, failOpen: boolean,
+                       shared_with: string[] /* other gateways (full names) whose IAP policy uses the same extension */,
+                       editable: boolean, reason?: string /* why not: no IAP policy, extension unreadable, ... */ }
+  // The mode lives on the IAP authz extension (service iap.googleapis.com), not the gateway:
+  //   ENFORCE = failOpen false, metadata {iapPolicyVersion: "V1"} (no iamEnforcementMode)
+  //   DRY_RUN = failOpen true,  metadata {iapPolicyVersion: "V1", iamEnforcementMode: "DRY_RUN"}
+  // Several gateways can share an extension: changing it in place changes all of them.
 MaSetup = { ready: boolean, missing: ("template"|"extension"|"service_agent_roles")[], region,
             extensions: [{name, templates}], templates: [Template],
             service_agents: [{email, member, gateway, gateways: [str], project, source, note,
@@ -85,14 +95,35 @@ Finding = { severity: "high"|"medium"|"info", title, detail, resource?, fix?: In
   // fix intents for grant/revoke carry full source and destination objects with labels; bind fixes carry source too
 
 Intent = { id, kind: "grant"|"revoke"|"bind_gateway"|"unbind_gateway"|"model_armor_on"|"model_armor_off"
-              |"model_armor_template"|"model_armor_extension"|"iam_project_grant",
+              |"model_armor_template"|"model_armor_extension"|"iam_project_grant"
+              |"set_enforcement"|"dedicate_extension",
   source?:      { type: "engine"|"project_agents"|"custom", principal, label, engine? },
   destination?: { kind: "agent"|"mcp_server"|"endpoint"|"registry", id, name, label },
   access?:      { mode: "all"|"read_only_hint"|"tools"|"custom", tools?: string[], expression?: string,
                   title?: string /* exact condition title, e.g. when revoking an existing binding */ },
   gateway?:     { name, direction: "egress"|"ingress", extension?: string, policy?: string },
   engine?:      string,
-  params?:      SetupParams /* the Model Armor setup kinds */ }
+  params?:      SetupParams /* the Model Armor setup kinds */,
+  // set_enforcement
+  extension?: string /* the IAP authz extension (default: the gateway's) */, mode?: "ENFORCE"|"DRY_RUN",
+  scope?: "shared" /* update the extension in place: every gateway in shared_with changes too */
+        | "dedicated" /* the extension is (or is about to be) this gateway's own */,
+  // dedicate_extension
+  source_extension?: string /* default: the gateway's extension */, new_name?: string /* default <gateway>-iap-authz */,
+  revert?: boolean /* the undo: point the policy back at source_extension, delete new_name */ }
+  // set_enforcement: PATCH .../authzExtensions/NAME?updateMask=metadata,failOpen (metadata replaced wholesale: every
+  //   other key is re-sent); gcloud service-extensions authz-extensions import (full spec built from the current
+  //   extension); Terraform google_network_services_authz_extension with an import block; Python
+  //   DepServiceClient.update_authz_extension + FieldMask. DRY_RUN is destructive (stops blocking), ENFORCE isn't.
+  // dedicate_extension: create a copy of the extension (same service, timeout, failOpen, metadata, labels), then
+  //   PATCH the gateway's REQUEST_AUTHZ policy ?updateMask=customProvider.authzExtension.resources (customProvider
+  //   isn't marked immutable in the networksecurity v1 discovery doc). Terraform: the copy + an imported
+  //   google_network_security_authz_policy (check the plan is an in-place update). The UI stages it with a
+  //   set_enforcement of the copy (extension = the copy's name, scope "dedicated"); render folds that into the copy's
+  //   Terraform resource. revert is destructive (deletes the copy; kept if another policy still uses it).
+  // Not verified live yet: flipping an existing extension, how long it takes to take effect ("typically within a few
+  // minutes; not yet measured"), and the PATCH of an existing policy's provider. If that PATCH were refused, the
+  // fallback is delete + recreate of the policy (the gateway is unchecked in between); not done automatically.
 SetupParams = { project? /* default: the gateway project */, delete?: boolean /* the inverse (undo) */,
   // model_armor_template
   template_id?, block_message?, inspect_template? /* sdp "advanced" */,
@@ -126,15 +157,35 @@ RenderResult = { context /* resolved, incl. project_number */,
   // and the bundle sends them as one PATCH.
 
 PreflightItem = { intent_id, status: "ok"|"blocked"|"duplicate"|"invalid", reason?,
-                  fix?: "ma_setup"|"redeploy"|"permission", duplicate_of? }
+                  fix?: "ma_setup"|"redeploy"|"permission"|"already"|"", duplicate_of?,
+                  warning? /* ok, but affects more than it names: a shared IAP extension */ }
   // blocked: bind_gateway of an engine that can't be bound; model_armor_on with no Model Armor extension in the
-  // region and none staged; a kind the caller can't write (apply mode, /auth writable).
+  // region and none staged; a kind the caller can't write (apply mode, /auth writable); set_enforcement /
+  // dedicate_extension on a gateway with no IAP REQUEST_AUTHZ policy; set_enforcement to the mode the extension is
+  // already in (fix "already"); dedicate_extension to a name that exists, or whose policy targets other gateways too.
 
 DiffItem = { intent_id, status: "add"|"present"|"replace"|"remove"|"absent", detail, error? /* invalid intent */,
              current: Binding[] | null /* the member's roles/iap.egressor bindings on the resource today */,
              after:   Binding[] | null /* the same after the change; null for gateway / Model Armor intents */ }
   // "replace": the member already has a different condition. IAM ORs bindings, so after = current + the new one;
   // revoke the old binding to really replace it.
+  // set_enforcement: "replace" (mode changes; detail "gw: Dry run → Enforce", plus shared gateways), "present" (same
+  // mode), with current_mode / target_mode. dedicate_extension: "add" / "present"; revert: "remove" / "absent".
+
+GatewayLogs = { gateway, since /* RFC 3339 */, filter, console_url, truncated, notes: [str], errors: [str],
+                counts: {allowed, denied, would_deny},
+                entries: [{ decision: "allowed"|"denied"|"would_deny", status, host, mcp_tool, mcp_method,
+                            registry_resource, destination, policies: [{name, result}], authz_result, timestamp,
+                            method, url, insert_id, console_url /* this entry in Cloud Logging */,
+                            agent /* null unless exactly one agent is bound: logs don't name the caller */,
+                            agent_inferred }] }
+  // filter: logName="projects/P/logs/networkservices.googleapis.com%2Fgateway_requests"
+  //         AND resource.labels.gateway_name="GATEWAY" AND timestamp>="SINCE"   (since: 24h, 30m, 7d or RFC 3339)
+  // Live format (enforcing gateway): jsonPayload.authzPolicyInfo {result ALLOWED|DENIED, policies[{name, result}]},
+  // jsonPayload.agentGatewayInfo {agentRegistryResource, mcpInfo {method "tools/call", parameter TOOL}},
+  // httpRequest.status 403 on an IAP denial. would_deny = a DENIED result on a request that went through (status
+  // < 400), or a result/policy marked DRY_RUN; this dry-run format hasn't been seen live yet. Needs
+  // logging.logEntries.list (roles/logging.viewer).
 ```
 
 ## Conditions
@@ -188,7 +239,7 @@ Available only when `can_apply`; otherwise it returns 403 with the reason.
 {"context": {...}, "intents": [Intent], "confirm": {"project": "proj-b", "acknowledge_destructive": false}}
 ```
 
-`confirm.project` must equal `context.project`. Revokes, unbinds, `model_armor_off` and setup deletes (`params.delete`) need `acknowledge_destructive: true`.
+`confirm.project` must equal `context.project`. Revokes, unbinds, `model_armor_off`, setup deletes (`params.delete`), `set_enforcement` to `DRY_RUN` and `dedicate_extension` with `revert` need `acknowledge_destructive: true`.
 
 The response streams NDJSON or SSE events per intent: `{intent_id, state: "running"|"done"|"verified"|"failed"|"skipped", detail, operation?, undo?: Intent, raw_error?, blocked?, fix?}`, then `{type: "done", summary}` (`summary.blocked` counts preflight refusals).
 
@@ -200,6 +251,8 @@ Each intent is applied, then read back and verified:
 - **model_armor_on/off:** create or delete the `CONTENT_AUTHZ` authz policy (long-running operation, about 4 min).
 - **model_armor_template:** create (or delete) the template on `modelarmor.<R>.rep.googleapis.com`; read back.
 - **model_armor_extension:** create (or delete) the authz extension (long-running; waited for, so a `model_armor_on` in the same request can use it); read back that it names the template.
+- **set_enforcement:** GET the extension (must be `iap.googleapis.com`; skipped if already in the mode) → PATCH `?updateMask=metadata,failOpen` with the live metadata (only `iamEnforcementMode` added or removed) → wait for the operation → read back mode and failOpen. Undo: the previous mode.
+- **dedicate_extension:** GET the source extension and the gateway's REQUEST_AUTHZ policy (must use the source and target only this gateway) → create the copy (waited for) → PATCH the policy `?updateMask=customProvider.authzExtension.resources` (waited for) → read back. Runs before other kinds, so a `set_enforcement` of the copy in the same request finds it (and is skipped if the copy failed). Undo: `revert` (PATCH back, delete the copy unless another policy uses it). The writer allows only these two PATCH masks, with bodies limited to those fields.
 - **iam_project_grant:** project getIamPolicy → add (or remove) the member in the Model Armor roles only → setIamPolicy with the etag (retried on a conflict); read back. The writer refuses any other change to the project policy.
 
 Every applied intent returns its inverse in `undo`, which the UI keeps as an "Undo last apply" list. An apply log is appended to `~/.policy-studio/apply-log.jsonl` (locally).

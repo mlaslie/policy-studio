@@ -48,11 +48,13 @@ def test_findings_from_fixture(state):
     pub = f["allUsers on KB Agent"]
     assert pub.severity == "high" and pub.fix.kind == "revoke" and pub.fix.source.principal == "allUsers"
     assert pub.fix.destination.kind == "agent"
-    # gateways: no Model Armor on egress (info + fix), IAP in dry run (medium)
+    # gateways: no Model Armor on egress (info + fix), dry run (high, fix: enforce)
     ma = f["No Model Armor on corp-out"]
     assert ma.severity == "info" and ma.fix.kind == "model_armor_on"
     assert "No Model Armor on corp-in" not in f
-    assert f["IAP in dry run on corp-out"].severity == "medium"
+    dry = f["Gateway corp-out is in dry run: nothing is blocked"]
+    assert dry.severity == "high" and dry.fix.kind == "set_enforcement" and dry.fix.mode == "ENFORCE"
+    assert dry.fix.scope == "dedicated" and dry.fix.extension.endswith("/authzExtensions/corp-out-iap")
     # ordering: high first
     sev = [x.severity for x in res["findings"]]
     assert sev == sorted(sev, key={"high": 0, "medium": 1, "info": 2}.get)

@@ -20,6 +20,8 @@ const TONE: Record<Intent["kind"], string> = {
   model_armor_template: "purple",
   model_armor_extension: "purple",
   iam_project_grant: "purple",
+  set_enforcement: "amber",
+  dedicate_extension: "blue",
 };
 
 const FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]), [tabindex]:not([tabindex="-1"])';
