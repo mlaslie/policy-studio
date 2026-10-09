@@ -1,8 +1,10 @@
-// Learn panel: a friendly explanation and mini diagram for the current step, plus the glossary.
-import { useEffect, useRef, type ReactNode } from "react";
+// Learn panel (collapsible, resizable right rail): a friendly explanation and mini diagram for the current step, plus the glossary.
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { useStudio, type StepN } from "../store";
 import { GLOSSARY } from "../lib/glossary";
 import { BookIcon, ChevronIcon } from "../components/Icons";
+import { Tip } from "../components/Tooltip";
+import { load, save } from "../lib/util";
 
 type Node = { label: string; sub?: string; tone?: "agent" | "gw" | "dest" | "check" | "muted" };
 
@@ -142,10 +144,151 @@ const LESSONS: Record<StepN, { title: string; body: ReactNode; flow: ReactNode }
   },
 };
 
-export function LearnPanel() {
+export const RAIL_MIN = 240;
+export const RAIL_MAX = 560;
+export const RAIL_DEFAULT = 330;
+export const RAIL_COLLAPSED = 36;
+const SNAP = 180; // dragging narrower than this collapses the panel
+const KEY_STEP = 16;
+
+/** Widest the rail may be right now, so the center column keeps at least ~500px at 1280. */
+function maxWidth() {
+  const stepper = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--stepper-w")) || 224;
+  return Math.max(RAIL_MIN, Math.min(RAIL_MAX, window.innerWidth - stepper - 520));
+}
+const clamp = (w: number) => Math.round(Math.min(maxWidth(), Math.max(RAIL_MIN, w)));
+
+/** Rail width (persisted) + collapsed state (the store's learnOpen, persisted). Returns the CSS width. */
+export function useRailWidth() {
+  const { learnOpen } = useStudio();
+  const [width, setWidthState] = useState<number>(() => {
+    const w = load<number>("studio.learnWidth", RAIL_DEFAULT);
+    return typeof w === "number" && isFinite(w) ? Math.min(RAIL_MAX, Math.max(RAIL_MIN, w)) : RAIL_DEFAULT;
+  });
+  const setWidth = useCallback((w: number) => {
+    setWidthState(w);
+    save("studio.learnWidth", w);
+  }, []);
+  // Re-clamp when the window shrinks so the center never scrolls sideways.
+  const [, force] = useState(0);
+  useEffect(() => {
+    const on = () => force((n) => n + 1);
+    window.addEventListener("resize", on);
+    return () => window.removeEventListener("resize", on);
+  }, []);
+  const effective = learnOpen ? clamp(width) : RAIL_COLLAPSED;
+  return { width, setWidth, effective };
+}
+
+function ResizeHandle({ width, setWidth }: { width: number; setWidth: (w: number) => void }) {
+  const { learnOpen, setLearnOpen } = useStudio();
+  const drag = useRef<{ x: number; w: number; orig: number; moved: boolean } | null>(null);
+  const [dragging, setDragging] = useState(false);
+  const shown = learnOpen ? clamp(width) : RAIL_COLLAPSED;
+
+  const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    drag.current = { x: e.clientX, w: shown, orig: width, moved: false };
+    setDragging(true);
+    document.body.classList.add("resizing");
+  };
+  const onPointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const d = drag.current;
+    if (!d) return;
+    const raw = d.w + (d.x - e.clientX);
+    if (Math.abs(d.x - e.clientX) > 2) d.moved = true;
+    if (!d.moved) return;
+    if (raw < SNAP) {
+      // Snap to collapsed, and remember the width from before the drag for the next expand.
+      if (learnOpen) setLearnOpen(false);
+      if (width !== d.orig) setWidth(d.orig);
+    } else {
+      if (!learnOpen) setLearnOpen(true);
+      setWidth(clamp(raw));
+    }
+  };
+  const end = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (!drag.current) return;
+    drag.current = null;
+    setDragging(false);
+    document.body.classList.remove("resizing");
+    try {
+      (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+    } catch {
+      /* already released */
+    }
+  };
+  const onKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+      e.preventDefault();
+      const delta = (e.key === "ArrowLeft" ? 1 : -1) * (e.shiftKey ? KEY_STEP * 4 : KEY_STEP);
+      if (!learnOpen) {
+        if (delta > 0) setLearnOpen(true);
+        return;
+      }
+      setWidth(clamp(clamp(width) + delta));
+    } else if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      setLearnOpen(!learnOpen);
+    } else if (e.key === "Home") {
+      e.preventDefault();
+      setLearnOpen(true);
+      setWidth(RAIL_MIN);
+    } else if (e.key === "End") {
+      e.preventDefault();
+      setLearnOpen(true);
+      setWidth(clamp(RAIL_MAX));
+    }
+  };
+
+  return (
+    <Tip tip="Drag to resize the Learn panel; drag far right to collapse it. Double-click resets the width. Keyboard: Left/Right resize, Enter collapses or expands." block className="rail-handle-tip">
+      <div
+        className={`rail-handle ${dragging ? "dragging" : ""}`}
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize Learn panel"
+        aria-controls="learn-panel"
+        aria-valuenow={shown}
+        aria-valuemin={RAIL_COLLAPSED}
+        aria-valuemax={RAIL_MAX}
+        aria-valuetext={learnOpen ? `${shown} pixels wide` : "collapsed"}
+        tabIndex={0}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={end}
+        onPointerCancel={end}
+        onDoubleClick={() => {
+          setLearnOpen(true);
+          setWidth(RAIL_DEFAULT);
+        }}
+        onKeyDown={onKeyDown}
+      >
+        <span className="rail-grip" aria-hidden="true" />
+      </div>
+    </Tip>
+  );
+}
+
+export function LearnPanel({ width, setWidth }: { width: number; setWidth: (w: number) => void }) {
   const { step, learnOpen, setLearnOpen, glossaryTerm } = useStudio();
   const lesson = LESSONS[step];
   const ref = useRef<HTMLDivElement>(null);
+  const toggle = useRef<HTMLButtonElement>(null);
+  const strip = useRef<HTMLButtonElement>(null);
+  const wasOpen = useRef(learnOpen);
+
+  // Keep focus on the matching toggle when the panel collapses/expands from a toggle button.
+  useEffect(() => {
+    if (wasOpen.current === learnOpen) return;
+    const active = document.activeElement;
+    if (active === toggle.current || active === strip.current || active === document.body) {
+      requestAnimationFrame(() => (learnOpen ? toggle.current : strip.current)?.focus({ preventScroll: true }));
+    }
+    wasOpen.current = learnOpen;
+  }, [learnOpen]);
 
   useEffect(() => {
     if (!glossaryTerm || !learnOpen) return;
@@ -160,34 +303,49 @@ export function LearnPanel() {
   }, [glossaryTerm, learnOpen]);
 
   return (
-    <section className={`learn ${learnOpen ? "open" : ""}`} aria-label="Learn">
-      <button className="rail-head" aria-expanded={learnOpen} onClick={() => setLearnOpen(!learnOpen)}>
-        <BookIcon size={16} />
-        <span className="rail-title">Learn</span>
-        <span className="rail-sub">{lesson.title}</span>
-        <ChevronIcon size={18} className="chev" />
-      </button>
-      {learnOpen && (
-        <div className="learn-body" ref={ref}>
-          <h3>{lesson.title}</h3>
-          {lesson.flow}
-          <div className="learn-text">{lesson.body}</div>
-          <h4 className="gloss-head">Glossary</h4>
-          <dl className="glossary">
-            {Object.entries(GLOSSARY).map(([k, g]) => (
-              <div key={k} data-term={k} className={`gloss-item ${glossaryTerm === k ? "current" : ""}`}>
-                <details open={glossaryTerm === k}>
-                  <summary>
-                    <dt>{g.term}</dt>
-                    <dd className="gloss-short">{g.short}</dd>
-                  </summary>
-                  <dd className="gloss-long">{g.long}</dd>
-                </details>
-              </div>
-            ))}
-          </dl>
-        </div>
+    <aside className={`rail ${learnOpen ? "" : "collapsed"}`} aria-label="Learn">
+      <ResizeHandle width={width} setWidth={setWidth} />
+      {learnOpen ? (
+        <section className="learn open" id="learn-panel">
+          <div className="rail-head static">
+            <BookIcon size={16} />
+            <span className="rail-title">Learn</span>
+            <span className="rail-sub">{lesson.title}</span>
+            <Tip tip="Collapse the Learn panel to a slim strip. Your width is kept." placement="bottom">
+              <button ref={toggle} type="button" className="icon-btn rail-toggle" aria-expanded={true} aria-controls="learn-panel" aria-label="Collapse Learn panel" onClick={() => setLearnOpen(false)}>
+                <ChevronIcon size={18} />
+              </button>
+            </Tip>
+          </div>
+          <div className="learn-body" ref={ref}>
+            <h3>{lesson.title}</h3>
+            {lesson.flow}
+            <div className="learn-text">{lesson.body}</div>
+            <h4 className="gloss-head">Glossary</h4>
+            <dl className="glossary">
+              {Object.entries(GLOSSARY).map(([k, g]) => (
+                <div key={k} data-term={k} className={`gloss-item ${glossaryTerm === k ? "current" : ""}`}>
+                  <details open={glossaryTerm === k}>
+                    <summary>
+                      <dt>{g.term}</dt>
+                      <dd className="gloss-short">{g.short}</dd>
+                    </summary>
+                    <dd className="gloss-long">{g.long}</dd>
+                  </details>
+                </div>
+              ))}
+            </dl>
+          </div>
+        </section>
+      ) : (
+        <Tip tip={`Expand the Learn panel: ${lesson.title}.`}>
+          <button ref={strip} type="button" className="rail-strip" aria-expanded={false} aria-controls="learn-panel" aria-label={`Expand Learn panel: ${lesson.title}`} onClick={() => setLearnOpen(true)}>
+            <ChevronIcon size={16} className="rail-strip-chev" />
+            <BookIcon size={16} />
+            <span className="rail-strip-label">Learn</span>
+          </button>
+        </Tip>
       )}
-    </section>
+    </aside>
   );
 }

@@ -3,6 +3,7 @@ import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 
 import { createPortal } from "react-dom";
 import { copyText } from "../lib/util";
 import { CheckIcon, CloseIcon, CopyIcon } from "./Icons";
+import { Tip } from "./Tooltip";
 
 const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 const CLOSE_MS = 180;
@@ -104,7 +105,7 @@ export function GlassModal(props: {
 }
 
 /** Button that copies `getText()` and shows "Copied" (or "Copy failed") feedback for a moment. */
-export function CopyButton({ getText, label = "Copy", ariaLabel, className = "glass-btn", compact }: { getText: () => string; label?: string; ariaLabel: string; className?: string; compact?: boolean }) {
+export function CopyButton({ getText, label = "Copy", ariaLabel, className = "glass-btn", compact, tip }: { getText: () => string; label?: string; ariaLabel: string; className?: string; compact?: boolean; tip?: ReactNode }) {
   const [st, setSt] = useState<"idle" | "ok" | "fail">("idle");
   const timer = useRef<number | undefined>(undefined);
   useEffect(() => () => window.clearTimeout(timer.current), []);
@@ -120,9 +121,11 @@ export function CopyButton({ getText, label = "Copy", ariaLabel, className = "gl
     timer.current = window.setTimeout(() => setSt("idle"), 1800);
   };
   return (
-    <button className={`${className} ${st === "ok" ? "copied" : ""} ${st === "fail" ? "copy-failed" : ""}`} onClick={onClick} aria-label={ariaLabel} title={ariaLabel}>
-      {st === "ok" ? <CheckIcon size={15} /> : <CopyIcon size={15} />}
-      {!compact || st !== "idle" ? <span aria-live="polite">{st === "ok" ? "Copied" : st === "fail" ? "Copy failed" : label}</span> : null}
-    </button>
+    <Tip tip={tip ?? `${ariaLabel} to the clipboard.`}>
+      <button className={`${className} ${st === "ok" ? "copied" : ""} ${st === "fail" ? "copy-failed" : ""}`} onClick={onClick} aria-label={ariaLabel}>
+        {st === "ok" ? <CheckIcon size={15} /> : <CopyIcon size={15} />}
+        {!compact || st !== "idle" ? <span aria-live="polite">{st === "ok" ? "Copied" : st === "fail" ? "Copy failed" : label}</span> : null}
+      </button>
+    </Tip>
   );
 }

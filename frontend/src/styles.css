@@ -525,7 +525,8 @@ p {
   padding: 0 16px 0 18px;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
-  z-index: 5;
+  position: relative;
+  z-index: 20;
 }
 .brand {
   display: flex;
@@ -2343,7 +2344,9 @@ tr:last-child td {
 }
 .filters {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
+  min-width: 0;
 }
 .filters select {
   width: auto;
@@ -2361,12 +2364,13 @@ tr:last-child td {
 
 /* ---------- right rail ---------- */
 .rail {
+  position: relative;
   border-left: 1px solid var(--border);
   background: var(--surface);
   display: flex;
   flex-direction: column;
   min-height: 0;
-  overflow: hidden;
+  min-width: 0;
 }
 .rail-head {
   display: flex;
@@ -2398,32 +2402,6 @@ tr:last-child td {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-.rail-head .chev {
-  transform: rotate(90deg);
-  transition: transform 0.15s;
-  color: var(--text-2);
-}
-.learn.open .rail-head .chev {
-  transform: rotate(-90deg);
-}
-.cart {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  max-height: 52%;
-  flex-shrink: 0;
-}
-.learn:not(.open) {
-  margin-top: auto;
-  border-top: 1px solid var(--border);
-}
-.learn:not(.open) .rail-head {
-  border-bottom: 0;
-}
-.rail:has(.learn:not(.open)) .cart {
-  max-height: none;
-  flex: 1;
 }
 .cart-count {
   display: inline-grid;
@@ -2489,18 +2467,11 @@ tr:last-child td {
 .cart-item:focus-within .cart-actions {
   opacity: 1;
 }
-.cart .btn-block {
-  margin: 4px 14px 12px;
-  width: auto;
-}
 .learn {
   display: flex;
   flex-direction: column;
   min-height: 0;
   flex: 1;
-}
-.learn.open {
-  border-top: 1px solid var(--border);
 }
 .learn-body {
   overflow-y: auto;
@@ -3053,4 +3024,368 @@ button.mode-badge:focus-visible {
 /* multi-line fixes (one command per line) */
 .fix code {
   white-space: pre-wrap;
+}
+
+/* ---------- accessible tooltip (components/Tooltip.tsx) ---------- */
+.sr-only {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+.tip-wrap {
+  display: inline-flex;
+  max-width: 100%;
+  min-width: 0;
+  vertical-align: middle;
+}
+.tip-wrap.tip-block {
+  display: flex;
+}
+.tip-wrap.tip-block > :first-child {
+  flex: 1;
+  min-width: 0;
+}
+/* Disabled buttons swallow pointer events in some browsers; let the wrapper be the hover target. */
+.tip-wrap.tip-disabled {
+  cursor: not-allowed;
+  border-radius: 999px;
+}
+.tip-wrap.tip-disabled > :disabled {
+  pointer-events: none;
+}
+.tip-wrap.tip-disabled:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+.tooltip {
+  position: fixed;
+  z-index: 100;
+  max-width: min(300px, calc(100vw - 16px));
+  padding: 7px 10px;
+  border-radius: 9px;
+  background: var(--text);
+  color: var(--surface);
+  font-size: 12.5px;
+  font-weight: 400;
+  line-height: 1.4;
+  text-align: left;
+  white-space: normal;
+  box-shadow: var(--shadow-2);
+  pointer-events: none;
+  animation: tip-in 0.12s ease-out both;
+}
+.tooltip-bottom {
+  animation-name: tip-in-down;
+}
+.tooltip-hint {
+  display: block;
+  margin-top: 4px;
+  opacity: 0.72;
+  font-size: 11.5px;
+}
+@keyframes tip-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+}
+@keyframes tip-in-down {
+  from {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+}
+
+/* ---------- policy cart: top-bar button + glass popover ---------- */
+.cart-anchor {
+  position: relative;
+  flex-shrink: 0;
+}
+.cart-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 8px 0 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  font-weight: 500;
+  font-size: 13.5px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s, border-color 0.15s;
+}
+.cart-btn > svg {
+  color: var(--text-2);
+}
+.cart-btn:hover,
+.cart-btn.open {
+  border-color: var(--blue);
+  background: var(--blue-weak);
+}
+.cart-btn.has-items > svg {
+  color: var(--blue);
+}
+.cart-btn-count {
+  display: inline-grid;
+  place-items: center;
+  min-width: 22px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  color: var(--text-2);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+.cart-btn.has-items .cart-btn-count {
+  background: var(--blue);
+  color: var(--surface);
+}
+.cart-btn-count.pulse {
+  animation: cart-pulse 0.7s cubic-bezier(0.3, 1.4, 0.5, 1) both;
+}
+@keyframes cart-pulse {
+  0% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--blue) 55%, transparent);
+  }
+  35% {
+    transform: scale(1.28);
+  }
+  100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 9px transparent;
+  }
+}
+.cart-btn-dot {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--red);
+  box-shadow: 0 0 0 2px var(--surface);
+}
+.cart-pop {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  z-index: 60;
+  width: min(420px, calc(100vw - 32px));
+  max-height: min(620px, calc(100vh - var(--topbar-h) - 24px));
+  display: flex;
+  flex-direction: column;
+  border-radius: 18px;
+  background: var(--glass-sheen), var(--glass-fill-strong);
+  outline: none;
+  overflow: hidden;
+  transform-origin: top right;
+  animation: cart-pop-in 0.2s cubic-bezier(0.2, 0.9, 0.25, 1.15) both;
+}
+.cart-pop:focus-visible {
+  box-shadow: inset 0 1px 0 var(--glass-highlight), 0 0 0 2px var(--blue), var(--glass-shadow);
+}
+@keyframes cart-pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.97);
+  }
+}
+.cart-pop-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 10px 10px 16px;
+  border-bottom: 1px solid var(--glass-edge);
+}
+.cart-pop-head > svg:first-child {
+  color: var(--blue);
+}
+.cart-pop-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 500;
+}
+.cart-pop-head .cart-count {
+  margin-right: 0;
+}
+.cart-pop-close {
+  margin-left: auto;
+}
+.cart-pop .cart-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px;
+}
+.cart-pop .cart-item:hover,
+.cart-pop .cart-item.focused {
+  background: var(--glass-btn-hover);
+}
+.cart-pop .cart-actions {
+  opacity: 0.7;
+}
+.cart-pop-actions {
+  display: flex;
+  gap: 8px;
+  padding: 10px 14px 6px;
+  border-top: 1px solid var(--glass-edge);
+}
+.cart-pop-foot {
+  padding: 4px 16px 12px;
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+}
+.danger-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--red);
+}
+.cart-confirm {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  width: 100%;
+}
+.cart-confirm > .small {
+  margin-right: auto;
+}
+.cart-pop .cart-empty {
+  padding: 16px 18px 18px;
+}
+
+/* ---------- Learn rail: collapse + resize ---------- */
+.layout {
+  transition: grid-template-columns 0.18s ease;
+}
+body.resizing .layout {
+  transition: none;
+}
+body.resizing,
+body.resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+.rail-handle-tip {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -5px;
+  width: 10px;
+  z-index: 6;
+}
+.rail-handle {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  cursor: col-resize;
+  touch-action: none;
+  outline: none;
+}
+.rail-handle::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 4px;
+  width: 2px;
+  background: transparent;
+  transition: background 0.15s;
+}
+.rail-handle:hover::before,
+.rail-handle.dragging::before,
+.rail-handle:focus-visible::before {
+  background: var(--blue);
+}
+.rail-grip {
+  position: absolute;
+  top: 50%;
+  left: 1px;
+  width: 8px;
+  height: 36px;
+  transform: translateY(-50%);
+  border-radius: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  opacity: 0;
+  transition: opacity 0.15s;
+  background-image: radial-gradient(circle, var(--text-3) 1px, transparent 1.3px);
+  background-size: 4px 6px;
+  background-position: center;
+}
+.rail-handle:hover .rail-grip,
+.rail-handle.dragging .rail-grip,
+.rail-handle:focus-visible .rail-grip {
+  opacity: 1;
+}
+.rail-handle:focus-visible .rail-grip {
+  box-shadow: 0 0 0 2px var(--blue);
+}
+.rail .learn {
+  flex: 1;
+  min-height: 0;
+}
+.rail-toggle {
+  flex-shrink: 0;
+  margin: -4px -6px -4px 0;
+}
+.rail.collapsed {
+  overflow: hidden;
+}
+.rail.collapsed > .tip-wrap:last-child {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+.rail-strip {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+  width: 100%;
+}
+.rail-strip:hover {
+  background: var(--surface-3);
+  color: var(--blue);
+}
+.rail-strip > svg:nth-child(2) {
+  color: var(--blue);
+}
+.rail-strip-chev {
+  transform: rotate(180deg);
+}
+.rail-strip-label {
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  font-weight: 500;
+  font-size: 13px;
+  letter-spacing: 0.4px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .layout,
+  .cart-pop,
+  .cart-btn-count.pulse,
+  .tooltip {
+    transition: none;
+    animation: none;
+  }
 }

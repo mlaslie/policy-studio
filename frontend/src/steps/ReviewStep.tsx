@@ -1,5 +1,6 @@
 // Step 5: render the cart (or one item) as Terraform / gcloud / REST / Python with copy and download,
 // plus a diff against the current state from POST /diff.
+import { Tip, unavailable } from "../components/Tooltip";
 import { useEffect, useMemo, useState } from "react";
 import { useStudio } from "../store";
 import { api } from "../api/client";
@@ -14,17 +15,17 @@ import { useApplyGate } from "../components/Mode";
 import { PlayIcon } from "../components/Icons";
 
 function ApplyButton({ ids, label, small }: { ids: string[] | null; label: string; small?: boolean }) {
-  const { openApply, cart } = useStudio();
+  const { openApply, cart, ctx } = useStudio();
   const { blockedFor } = useApplyGate();
   const reason = blockedFor(ids ? cart.filter((i) => ids.includes(i.id)) : cart);
   const canApply = !reason;
-  const tip = canApply ? "Review, confirm and apply with your credentials" : `Apply unavailable: ${reason}`;
+  const what = ids?.length === 1 ? "this change" : "these changes";
   return (
-    <span title={tip} className="disabled-wrap">
+    <Tip tip={`Make ${what} in ${ctx.project || "your project"} now. You'll confirm first.${unavailable(reason)}`}>
       <button className={`btn btn-outline ${small ? "btn-small" : ""}`} disabled={!canApply} aria-label={`${label}${canApply ? "" : ` (unavailable: ${reason})`}`} onClick={() => openApply(ids)}>
         {canApply ? <PlayIcon size={14} /> : <LockIcon size={14} />} {label}
       </button>
-    </span>
+    </Tip>
   );
 }
 
@@ -111,13 +112,17 @@ function ItemCard({ intent, idx, res, diff, fmt, setFmt }: { intent: Intent; idx
           <h3>{item?.english ?? intentEnglish(intent)}</h3>
         </div>
         {(intent.kind === "grant" || intent.kind === "revoke") && (
-          <button className="icon-btn" title="Edit in builder" aria-label="Edit in builder" onClick={() => openBuilder(intent, { editId: intent.id, mode: intent.kind === "revoke" ? "revoke" : "grant" })}>
-            <PencilIcon size={15} />
-          </button>
+          <Tip tip="Open this item in the builder to change it. Saving replaces it in the cart.">
+            <button className="icon-btn" aria-label="Edit in builder" onClick={() => openBuilder(intent, { editId: intent.id, mode: intent.kind === "revoke" ? "revoke" : "grant" })}>
+              <PencilIcon size={15} />
+            </button>
+          </Tip>
         )}
-        <button className="icon-btn danger" title="Remove from cart" aria-label="Remove from cart" onClick={() => removeIntent(intent.id)}>
-          <TrashIcon size={15} />
-        </button>
+        <Tip tip="Take this item out of the cart. Nothing in Google Cloud changes.">
+          <button className="icon-btn danger" aria-label="Remove from cart" onClick={() => removeIntent(intent.id)}>
+            <TrashIcon size={15} />
+          </button>
+        </Tip>
         <ApplyButton ids={[intent.id]} label="Apply" small />
       </header>
       {item?.warnings.map((w) => (
@@ -239,10 +244,18 @@ Run with credentials that can change IAM in ${ctx.project}.
           )}
         </div>
         <div className="row">
-          <CopyButton className="btn btn-tonal" label={`Copy all (${FMT.find((x) => x.id === fmt)!.label})`} ariaLabel={`Copy all items as ${fmt}`} getText={() => allText(fmt)} />
-          <button className="btn btn-primary" onClick={download} disabled={!res}>
-            <DownloadIcon size={16} /> Download bundle
-          </button>
+          <CopyButton
+            className="btn btn-tonal"
+            label={`Copy all (${FMT.find((x) => x.id === fmt)!.label})`}
+            ariaLabel={`Copy all items as ${fmt}`}
+            tip={`Copy every staged item as ${FMT.find((x) => x.id === fmt)!.label} to the clipboard, ready to run yourself.`}
+            getText={() => allText(fmt)}
+          />
+          <Tip tip={res ? `Download a .zip with Terraform, gcloud, REST and Python versions of every staged item, plus a README. Nothing changes in ${ctx.project}.` : "Still rendering the cart…"}>
+            <button className="btn btn-primary" onClick={download} disabled={!res}>
+              <DownloadIcon size={16} /> Download bundle
+            </button>
+          </Tip>
           <ApplyButton ids={focus ? [focus] : null} label={focus ? "Apply this" : `Apply all ${sorted.length}`} />
         </div>
       </div>

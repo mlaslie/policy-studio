@@ -1,5 +1,6 @@
 // Step 4: the guided policy builder (Who → What → How much) with a live preview, IAM anatomy,
 // prerequisite checks and a Revoke mode.
+import { Tip } from "../components/Tooltip";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useLookup, useStudio } from "../store";
 import { api } from "../api/client";
@@ -198,9 +199,11 @@ function RevokePicker({ onStage, initial }: { onStage: (i: Intent) => void; init
             {!shown.length && <p className="muted">No grants match.</p>}
           </div>
           <div className="form-actions">
-            <button className="btn btn-danger" disabled={sel === null} onClick={() => sel !== null && onStage(toIntent(grants[sel]))}>
-              Stage revoke
-            </button>
+            <Tip tip={sel === null ? "Pick a grant above first." : "Stage removing this grant in the cart. Nothing changes in Google Cloud until you apply."}>
+              <button className="btn btn-danger" disabled={sel === null} onClick={() => sel !== null && onStage(toIntent(grants[sel]))}>
+                Stage revoke
+              </button>
+            </Tip>
             {sel !== null && <span className="small">{intentEnglish(toIntent(grants[sel]))}</span>}
           </div>
         </section>
@@ -360,9 +363,11 @@ export function BuilderStep() {
       {editId && cart.some((c) => c.id === editId) && (
         <Callout tone="info" title="Editing a staged item">
           Changes replace the item in your cart.{" "}
-          <button className="link-btn" onClick={resetWhat}>
-            Stop editing
-          </button>
+          <Tip tip="Leave the staged item as it is and clear the builder.">
+            <button className="link-btn" onClick={resetWhat}>
+              Stop editing
+            </button>
+          </Tip>
         </Callout>
       )}
       {mode === "revoke" ? (
@@ -472,12 +477,16 @@ export function BuilderStep() {
                       {mcp && (
                         <div className="tool-check">
                           <div className="tool-check-bar">
-                            <button type="button" className="link-btn" onClick={() => setTools(readOnlyTools(mcp))}>
-                              Select all read-only
-                            </button>
-                            <button type="button" className="link-btn" onClick={() => setTools([])}>
-                              Clear
-                            </button>
+                            <Tip tip="Tick every tool this MCP server marks readOnlyHint.">
+                              <button type="button" className="link-btn" onClick={() => setTools(readOnlyTools(mcp))}>
+                                Select all read-only
+                              </button>
+                            </Tip>
+                            <Tip tip="Untick every tool.">
+                              <button type="button" className="link-btn" onClick={() => setTools([])}>
+                                Clear
+                              </button>
+                            </Tip>
                             <span className="muted small">{tools.length} selected</span>
                           </div>
                           {mcp.tools.map((t) => (
@@ -532,9 +541,11 @@ export function BuilderStep() {
                                 (added ? (
                                   <Badge tone="green">fix will be staged</Badge>
                                 ) : (
-                                  <button className="btn btn-small btn-outline" onClick={() => setExtraFixes([...extraFixes, c.fix!])}>
-                                    {c.fixLabel ?? "Also stage fix"}
-                                  </button>
+                                  <Tip tip="Also stage this fix when you add the policy to the cart. Nothing changes in Google Cloud until you apply.">
+                                    <button className="btn btn-small btn-outline" onClick={() => setExtraFixes([...extraFixes, c.fix!])}>
+                                      {c.fixLabel ?? "Also stage fix"}
+                                    </button>
+                                  </Tip>
                                 ))}
                             </div>
                           );
@@ -553,13 +564,25 @@ export function BuilderStep() {
                   </p>
                 )}
                 <div className="preview-actions">
-                  <button className="btn btn-primary" disabled={!intent || lint.some((l) => /unbalanced|not closed|empty/.test(l))} onClick={() => commit(false)}>
-                    {editId && cart.some((c) => c.id === editId) ? "Save changes" : "Add to cart"}
-                    {extraFixes.length > 0 && ` (+${extraFixes.length} fix)`}
-                  </button>
-                  <button className="btn btn-tonal" disabled={!intent} onClick={() => commit(true)}>
-                    <PlusIcon size={16} /> Add & build another
-                  </button>
+                  <Tip
+                    tip={
+                      !intent
+                        ? "Answer the questions above first."
+                        : lint.some((l) => /unbalanced|not closed|empty/.test(l))
+                          ? "Fix the condition expression first."
+                          : `${editId && cart.some((c) => c.id === editId) ? "Replace the staged item with this policy" : "Stage this policy in the cart"}${extraFixes.length ? ` plus ${extraFixes.length} fix` : ""}, then open Review & output. Nothing changes in Google Cloud until you apply.`
+                    }
+                  >
+                    <button className="btn btn-primary" disabled={!intent || lint.some((l) => /unbalanced|not closed|empty/.test(l))} onClick={() => commit(false)}>
+                      {editId && cart.some((c) => c.id === editId) ? "Save changes" : "Add to cart"}
+                      {extraFixes.length > 0 && ` (+${extraFixes.length} fix)`}
+                    </button>
+                  </Tip>
+                  <Tip tip={intent ? "Stage this policy in the cart and start a new one, keeping who is calling. Nothing changes in Google Cloud until you apply." : "Answer the questions above first."}>
+                    <button className="btn btn-tonal" disabled={!intent} onClick={() => commit(true)}>
+                      <PlusIcon size={16} /> Add & build another
+                    </button>
+                  </Tip>
                   <span className="muted small">Nothing changes in {ctx.project} until you run the generated commands.</span>
                 </div>
               </section>

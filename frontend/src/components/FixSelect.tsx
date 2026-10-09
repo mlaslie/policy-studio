@@ -1,6 +1,7 @@
 // Multi-select for lists of fix commands: a checkbox per row that has a fix, and a toolbar with
 // "Select all missing", "Clear", "Copy selected (N)" and "Download as .sh". The copied script keeps
 // display order, drops duplicate commands and puts a "# <title>" comment above each one.
+import { Tip } from "./Tooltip";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { copyText } from "../lib/util";
 import { downloadBlob } from "../lib/zip";
@@ -90,27 +91,34 @@ export function FixToolbar({ sel, filename = "fix.sh", label }: { sel: FixSelect
   const download = () => downloadBlob(new Blob([fixScript(sel.commands, true)], { type: "text/x-shellscript" }), filename);
   return (
     <div className="fix-toolbar" role="toolbar" aria-label={`${label}: fix commands`}>
-      <button type="button" className="link-btn small" onClick={sel.selectMissing} disabled={!missing} title={missing ? `Select every row that needs a fix (${missing})` : "Nothing is missing"}>
-        Select all missing{missing ? ` (${missing})` : ""}
-      </button>
-      <button type="button" className="link-btn small" onClick={sel.clear} disabled={!sel.selected.size}>
-        Clear
-      </button>
+      <Tip tip={missing ? `Tick every row that needs a fix (${missing}) so you can copy or download their commands together.` : "Nothing is missing, so there is nothing to select."}>
+        <button type="button" className="link-btn small" onClick={sel.selectMissing} disabled={!missing}>
+          Select all missing{missing ? ` (${missing})` : ""}
+        </button>
+      </Tip>
+      <Tip tip={sel.selected.size ? "Untick every selected row." : "Nothing is selected."}>
+        <button type="button" className="link-btn small" onClick={sel.clear} disabled={!sel.selected.size}>
+          Clear
+        </button>
+      </Tip>
       <span className="grow" />
-      <button
-        type="button"
-        className={`mini-btn ${st?.kind === "ok" ? "copied" : ""} ${st?.kind === "fail" ? "copy-failed" : ""}`}
-        onClick={copy}
-        disabled={!n}
-        title={n ? "Copy the selected fix commands as one script" : "Select one or more rows first"}
-      >
-        {st?.kind === "ok" ? <CheckIcon size={14} /> : <CopyIcon size={14} />}
-        <span aria-live="polite">{st?.kind === "ok" ? `Copied ${st.n} command${st.n === 1 ? "" : "s"}` : st?.kind === "fail" ? "Copy failed" : `Copy selected (${n})`}</span>
-      </button>
-      <button type="button" className="mini-btn" onClick={download} disabled={!n} title={n ? `Download the selected commands as ${filename}` : "Select one or more rows first"}>
-        <DownloadIcon size={14} />
-        <span>.sh</span>
-      </button>
+      <Tip tip={n ? "Copy the selected fix commands to the clipboard as one script. Run it yourself." : "Select one or more rows first."}>
+        <button
+          type="button"
+          className={`mini-btn ${st?.kind === "ok" ? "copied" : ""} ${st?.kind === "fail" ? "copy-failed" : ""}`}
+          onClick={copy}
+          disabled={!n}
+        >
+          {st?.kind === "ok" ? <CheckIcon size={14} /> : <CopyIcon size={14} />}
+          <span aria-live="polite">{st?.kind === "ok" ? `Copied ${st.n} command${st.n === 1 ? "" : "s"}` : st?.kind === "fail" ? "Copy failed" : `Copy selected (${n})`}</span>
+        </button>
+      </Tip>
+      <Tip tip={n ? `Download the selected commands as ${filename}, a shell script you run yourself.` : "Select one or more rows first."}>
+        <button type="button" className="mini-btn" onClick={download} disabled={!n} aria-label={`Download selected commands as ${filename}`}>
+          <DownloadIcon size={14} />
+          <span>.sh</span>
+        </button>
+      </Tip>
     </div>
   );
 }

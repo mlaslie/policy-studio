@@ -1,6 +1,7 @@
 // Step 6: Apply. Shows the plan (cart or the selected items) with a diff per item, asks for confirmation
 // (type the project ID; acknowledge destructive changes), streams POST /apply progress, then offers Undo.
 // In generate mode, or when credential checks fail, it explains why and points at the commands instead.
+import { Tip, unavailable } from "../components/Tooltip";
 import { useEffect, useMemo, useState } from "react";
 import { useStudio } from "../store";
 import { api } from "../api/client";
@@ -133,9 +134,11 @@ function ConfirmCard({ items, diff }: { items: Intent[]; diff: DiffItem[] | null
         <Callout tone="warn" title="You can't apply some of these changes">
           {kindBlockedReason(auth.data, denied[0].kind)} Get the role and click Check again on Context, or copy the commands for {denied.length > 1 ? "them" : "it"} from Review and run them with an account that can.{" "}
           {items.length > denied.length && (
-            <button type="button" className="link-btn" onClick={() => openApply(items.filter((i) => !denied.includes(i)).map((i) => i.id))}>
-              Apply only the {items.length - denied.length} you can
-            </button>
+            <Tip tip={`Limit this apply to the ${items.length - denied.length} change${items.length - denied.length > 1 ? "s" : ""} you have permission for, in ${ctx.project}. You'll confirm first; the rest stay in the cart.`}>
+              <button type="button" className="link-btn" onClick={() => openApply(items.filter((i) => !denied.includes(i)).map((i) => i.id))}>
+                Apply only the {items.length - denied.length} you can
+              </button>
+            </Tip>
           )}
         </Callout>
       )}
@@ -162,9 +165,11 @@ function ConfirmCard({ items, diff }: { items: Intent[]; diff: DiffItem[] | null
         </label>
       )}
       <div className="row">
-        <button type="submit" className={`btn ${destructive.length ? "btn-danger" : "btn-primary"}`} disabled={!ready}>
-          <PlayIcon size={15} /> Apply {items.length} change{items.length > 1 ? "s" : ""}
-        </button>
+        <Tip tip={`Make ${items.length > 1 ? "these changes" : "this change"} in ${ctx.project} now. Each one is read back and verified, and can be undone.${unavailable(why || null)}`}>
+          <button type="submit" className={`btn ${destructive.length ? "btn-danger" : "btn-primary"}`} disabled={!ready}>
+            <PlayIcon size={15} /> Apply {items.length} change{items.length > 1 ? "s" : ""}
+          </button>
+        </Tip>
         {why && <span className="muted small">{why}</span>}
       </div>
     </form>
@@ -245,9 +250,11 @@ function UndoList({ run }: { run: ApplyRun }) {
           <RefreshIcon size={15} /> Undo
         </h3>
         <span className="grow" />
-        <button className="btn btn-tonal btn-small" onClick={() => stageUndo(all)} title="Stage the inverse of every applied change in the cart, then review and apply it">
-          Undo all ({all.length})
-        </button>
+        <Tip tip="Stage the reverse of every applied change in the cart and open Apply. Nothing changes in Google Cloud until you confirm.">
+          <button className="btn btn-tonal btn-small" onClick={() => stageUndo(all)}>
+            Undo all ({all.length})
+          </button>
+        </Tip>
       </div>
       <p className="small muted">Each applied change has an inverse. Undo stages it in the cart and opens Apply, so you confirm it like any other change.</p>
       <ul className="undo-list">
@@ -261,9 +268,11 @@ function UndoList({ run }: { run: ApplyRun }) {
                 </div>
               ))}
             </div>
-            <button className="btn btn-outline btn-small" onClick={() => stageUndo(i.undo)}>
-              Undo this
-            </button>
+            <Tip tip="Stage the reverse of this change in the cart and open Apply. Nothing changes in Google Cloud until you confirm.">
+              <button className="btn btn-outline btn-small" onClick={() => stageUndo(i.undo)}>
+                Undo this
+              </button>
+            </Tip>
           </li>
         ))}
       </ul>
@@ -287,9 +296,11 @@ function RunPanel({ run }: { run: ApplyRun }) {
           </span>
           <span className="grow" />
           {!run.done && (
-            <button className="btn btn-text btn-small" onClick={cancelApply} title="Stop watching progress. Operations already started keep running on Google Cloud.">
-              Stop watching
-            </button>
+            <Tip tip="Stop following progress here. Operations already started keep running in Google Cloud; Sync later to see the result.">
+              <button className="btn btn-text btn-small" onClick={cancelApply}>
+                Stop watching
+              </button>
+            </Tip>
           )}
         </div>
         <ol className="run-list">
@@ -369,9 +380,11 @@ function History() {
                 </ul>
                 {r.error && <p className="small mono field-error">{r.error}</p>}
                 {undo.length > 0 && (
-                  <button className="btn btn-outline btn-small" onClick={() => stageUndo(undo)}>
-                    Undo this apply ({undo.length})
-                  </button>
+                  <Tip tip="Stage the reverse of every change in this apply and open Apply. Nothing changes in Google Cloud until you confirm.">
+                    <button className="btn btn-outline btn-small" onClick={() => stageUndo(undo)}>
+                      Undo this apply ({undo.length})
+                    </button>
+                  </Tip>
                 )}
               </Disclosure>
             </li>
@@ -400,9 +413,11 @@ function Unavailable() {
           </div>
         </div>
         <div className="row">
-          <button className="btn btn-primary" onClick={() => openReview(null)} disabled={!cart.length} title={cart.length ? "Open Review & output: Copy all / Download bundle" : "The cart is empty"}>
-            <CopyIcon size={15} /> Copy all commands
-          </button>
+          <Tip tip={cart.length ? "Open Review & output, where Copy all and Download bundle give you every command to run yourself." : "The cart is empty."}>
+            <button className="btn btn-primary" onClick={() => openReview(null)} disabled={!cart.length}>
+              <CopyIcon size={15} /> Copy all commands
+            </button>
+          </Tip>
           <span className="muted small">Opens Review & output, with Copy all and Download bundle (Terraform, gcloud, REST, Python).</span>
         </div>
         <Disclosure summary={<span>Or run Policy Studio locally to apply from here</span>}>
@@ -420,7 +435,7 @@ function Unavailable() {
           {c.fix && (
             <div className="fix">
               <code>{c.fix}</code>
-              <CopyButton compact className="mini-btn" ariaLabel={`Copy fix: ${c.fix}`} getText={() => c.fix!} />
+              <CopyButton compact className="mini-btn" ariaLabel={`Copy fix: ${c.fix}`} tip="Copy this fix command to the clipboard. Run it in your terminal, then Check again." getText={() => c.fix!} />
             </div>
           )}
         </div>

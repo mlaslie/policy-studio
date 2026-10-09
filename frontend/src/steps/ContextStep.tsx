@@ -1,4 +1,5 @@
 // Step 0: project / region / optional gateway project and Gemini Enterprise app, then the access check.
+import { Tip } from "../components/Tooltip";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { useStudio } from "../store";
 import type { ContextInfo, Ctx, PermissionCheck } from "../api/types";
@@ -86,13 +87,25 @@ export function ContextStep() {
           </div>
         </div>
         <div className="form-actions">
-          <button type="submit" className="btn btn-primary" disabled={syncing}>
-            {syncing ? "Checking…" : ctxInfo.data && !dirty ? "Check again" : "Save and check access"}
-          </button>
-          {dirty && ctx.project && (
-            <button type="button" className="btn btn-text" onClick={() => setF(ctx)}>
-              Discard changes
+          <Tip
+            tip={
+              syncing
+                ? "Checking now…"
+                : ctxInfo.data && !dirty
+                  ? "Re-run the API and permission checks for this project and region, and re-read everything from Google Cloud."
+                  : "Save this project and region as your context (in this browser), then check APIs and permissions and read everything from Google Cloud."
+            }
+          >
+            <button type="submit" className="btn btn-primary" disabled={syncing}>
+              {syncing ? "Checking…" : ctxInfo.data && !dirty ? "Check again" : "Save and check access"}
             </button>
+          </Tip>
+          {dirty && ctx.project && (
+            <Tip tip="Put the form back to the saved project and region. Nothing is re-checked.">
+              <button type="button" className="btn btn-text" onClick={() => setF(ctx)}>
+                Discard changes
+              </button>
+            </Tip>
           )}
           <span className="muted small">Checking only lists and reads resources.</span>
         </div>
@@ -183,7 +196,7 @@ function ApisCard({ ci }: { ci: ContextInfo }) {
               {r.fix && (
                 <div className="fix">
                   <code>{r.fix}</code>
-                  <CopyButton compact className="mini-btn" ariaLabel={`Copy command to enable ${r.key}`} getText={() => r.fix!} />
+                  <CopyButton compact className="mini-btn" ariaLabel={`Copy command to enable ${r.key}`} tip="Copy the gcloud command that enables this API. Run it yourself; nothing changes from here." getText={() => r.fix!} />
                 </div>
               )}
             </div>
@@ -257,8 +270,8 @@ function PermissionsCard({ ci }: { ci: ContextInfo }) {
                       {g.perms.every((x) => x.write) && <span className="badge badge-neutral perm-tag" title="Only needed to apply changes from Policy Studio">Apply</span>}
                     </span>
                     <ul className="perm-covers">
-                      {g.perms.map((x) => (
-                        <li key={x.permission}>
+                      {g.perms.map((x, i) => (
+                        <li key={`${x.permission}-${x.needed_for}-${i}`}>
                           {x.needed_for} <span className="mono tiny muted">{x.permission}</span>
                         </li>
                       ))}
@@ -268,7 +281,7 @@ function PermissionsCard({ ci }: { ci: ContextInfo }) {
                 {g.fix && (
                   <div className="fix">
                     <code>{g.fix}</code>
-                    <CopyButton compact className="mini-btn" ariaLabel="Copy fix command" getText={() => g.fix!} />
+                    <CopyButton compact className="mini-btn" ariaLabel="Copy fix command" tip="Copy the command that grants the missing role. Run it yourself; nothing changes from here." getText={() => g.fix!} />
                   </div>
                 )}
               </div>

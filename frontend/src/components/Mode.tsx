@@ -3,6 +3,7 @@ import { useStudio } from "../store";
 import { applyBlockedReason, kindBlockedReason } from "../lib/apply";
 import type { Intent } from "../api/types";
 import { CheckIcon, CodeIcon, LockIcon, WarnIcon } from "./Icons";
+import { Tip } from "./Tooltip";
 
 export const GENERATE_TIP = "Running on Cloud Run with a service account: build and copy commands; apply them yourself";
 
@@ -58,12 +59,16 @@ export function ModeBadge({ onClick }: { onClick?: () => void }) {
     </>
   );
   return onClick ? (
-    <button type="button" className={cls} title={`${tip}\n\nClick to see your credentials.`} aria-label={`${text}. ${tip}. Show credentials.`} onClick={onClick}>
-      {body}
-    </button>
+    <Tip tip={<>{tip}<span className="tooltip-hint">Click to see your credentials on Context.</span></>} placement="bottom">
+      <button type="button" className={cls} aria-label={`${text}. Show credentials.`} onClick={onClick}>
+        {body}
+      </button>
+    </Tip>
   ) : (
-    <span className={cls} title={tip}>
-      {body}
-    </span>
+    <Tip tip={tip}>
+      <span className={cls} tabIndex={0}>
+        {body}
+      </span>
+    </Tip>
   );
 }

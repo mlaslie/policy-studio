@@ -1,4 +1,5 @@
 // Step 7: audit: summary tiles, grants in plain English with filters, findings with fixes, Terraform export.
+import { Tip } from "../components/Tooltip";
 import { useEffect, useState } from "react";
 import { useLookup, useStudio } from "../store";
 import { api } from "../api/client";
@@ -10,7 +11,7 @@ import { AuditIcon, DownloadIcon, PencilIcon, TrashIcon, WarnIcon, CheckIcon, In
 import { grantToIntent } from "../lib/grants";
 import { downloadBlob, makeZip } from "../lib/zip";
 import { ago } from "../lib/util";
-import { KIND_LABEL } from "../lib/policy";
+import { KIND_LABEL, intentEnglish } from "../lib/policy";
 
 const SEV: Record<Finding["severity"], { tone: "red" | "amber" | "neutral"; label: string }> = {
   high: { tone: "red", label: "High" },
@@ -50,6 +51,7 @@ function ExportModal({ onClose }: { onClose: () => void }) {
       onClose={onClose}
       actions={
         res && (
+          <Tip tip={`Download current-grants-${ctx.project}.zip with main.tf and variables.tf for these grants. Nothing changes in ${ctx.project}.`}>
           <button
             className="glass-btn"
             onClick={() =>
@@ -64,6 +66,7 @@ function ExportModal({ onClose }: { onClose: () => void }) {
           >
             <DownloadIcon size={15} /> Download
           </button>
+          </Tip>
         )
       }
     >
@@ -102,9 +105,11 @@ export function AuditStep() {
         title="Audit"
         lead={<>Everything currently allowed in this project and region, in plain English, with problems flagged. Fixes are staged in the cart so you can review them first.</>}
         actions={
-          <button className="btn btn-tonal" onClick={() => setExporting(true)} disabled={!audit.data}>
-            <DownloadIcon size={16} /> Export as Terraform
-          </button>
+          <Tip tip={audit.data ? "Render every current grant as Terraform you can preview, copy or download. Read-only: nothing changes in Google Cloud." : "Waiting for the audit to load."}>
+            <button className="btn btn-tonal" onClick={() => setExporting(true)} disabled={!audit.data}>
+              <DownloadIcon size={16} /> Export as Terraform
+            </button>
+          </Tip>
         }
       />
       <Load l={audit} what="the audit">
@@ -161,14 +166,18 @@ export function AuditStep() {
                                   <CheckIcon size={12} /> Fix staged
                                 </Badge>
                               ) : (
-                                <button className="btn btn-small btn-primary" onClick={() => addIntents([{ ...f.fix! }])}>
-                                  Stage fix: {KIND_LABEL[f.fix.kind].toLowerCase()}
-                                </button>
+                                <Tip tip={`Stage this fix in the cart: ${intentEnglish(f.fix)}. Nothing changes in Google Cloud until you apply.`}>
+                                  <button className="btn btn-small btn-primary" onClick={() => addIntents([{ ...f.fix! }])}>
+                                    Stage fix: {KIND_LABEL[f.fix.kind].toLowerCase()}
+                                  </button>
+                                </Tip>
                               )}
                               {(f.fix.kind === "grant" || f.fix.kind === "revoke") && (
-                                <button className="btn btn-small btn-text" onClick={() => openBuilder(f.fix!, { mode: f.fix!.kind === "revoke" ? "revoke" : "grant" })}>
-                                  <PencilIcon size={14} /> Edit in builder
-                                </button>
+                                <Tip tip="Open this fix in the builder to adjust it before staging.">
+                                  <button className="btn btn-small btn-text" onClick={() => openBuilder(f.fix!, { mode: f.fix!.kind === "revoke" ? "revoke" : "grant" })}>
+                                    <PencilIcon size={14} /> Edit in builder
+                                  </button>
+                                </Tip>
                               )}
                             </div>
                           )}
@@ -246,15 +255,19 @@ export function AuditStep() {
                           </td>
                           <td>{g.condition ? <Badge tone="blue" title={g.condition.expression}>{g.condition.title}</Badge> : <Badge tone="neutral">Unconditional</Badge>}</td>
                           <td className="actions-cell">
-                            <button className="icon-btn" title="Edit in builder" aria-label={`Edit: ${g.english}`} onClick={() => openBuilder(grantToIntent(g, engineByPrincipal, "grant"), { mode: "grant" })}>
-                              <PencilIcon size={14} />
-                            </button>
+                            <Tip tip="Open this grant in the builder to stage a changed version.">
+                              <button className="icon-btn" aria-label={`Edit: ${g.english}`} onClick={() => openBuilder(grantToIntent(g, engineByPrincipal, "grant"), { mode: "grant" })}>
+                                <PencilIcon size={14} />
+                              </button>
+                            </Tip>
                             {revokeStaged(g) ? (
                               <Badge tone="red">revoke staged</Badge>
                             ) : (
-                              <button className="icon-btn danger" title="Stage revoke" aria-label={`Revoke: ${g.english}`} onClick={() => addIntents([grantToIntent(g, engineByPrincipal, "revoke")])}>
-                                <TrashIcon size={14} />
-                              </button>
+                              <Tip tip="Stage revoking this grant in the cart. Nothing changes in Google Cloud until you apply.">
+                                <button className="icon-btn danger" aria-label={`Revoke: ${g.english}`} onClick={() => addIntents([grantToIntent(g, engineByPrincipal, "revoke")])}>
+                                  <TrashIcon size={14} />
+                                </button>
+                              </Tip>
                             )}
                           </td>
                         </tr>

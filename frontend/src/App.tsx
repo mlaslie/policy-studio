@@ -1,10 +1,11 @@
-// Shell: top bar, stepper, current step, right rail (cart + Learn), toasts.
-import { useEffect, useState } from "react";
+// Shell: top bar (with the policy cart), stepper, current step, collapsible/resizable Learn rail, toasts.
+import { useEffect, useState, type CSSProperties } from "react";
 import { STEPS, useStudio, type StepN } from "./store";
 import { IS_MOCK } from "./api/client";
 import { ago } from "./lib/util";
-import { CartPanel } from "./panels/Cart";
-import { LearnPanel } from "./panels/Learn";
+import { CartButton } from "./panels/Cart";
+import { LearnPanel, useRailWidth } from "./panels/Learn";
+import { Tip } from "./components/Tooltip";
 import { ContextIcon, LockIcon, RefreshIcon, ShieldIcon, CheckIcon, WarnIcon } from "./components/Icons";
 import { ContextStep } from "./steps/ContextStep";
 import { GatewaysStep } from "./steps/GatewaysStep";
@@ -36,12 +37,15 @@ function TopBar() {
       </div>
       <div className="topbar-right">
         {IS_MOCK && (
-          <span className="mock-chip" title="Running with built-in sample data (npm run dev:mock). No backend is called.">
-            MOCK DATA
-          </span>
+          <Tip tip="Running with built-in sample data (npm run dev:mock). No backend is called." placement="bottom">
+            <span className="mock-chip">
+              MOCK DATA
+            </span>
+          </Tip>
         )}
         <ModeBadge onClick={() => goto(0)} />
-        <button className="ctx-chip" onClick={() => goto(0)} title="Change project and region">
+        <Tip tip="Change the project and region every step reads from." placement="bottom">
+        <button className="ctx-chip" onClick={() => goto(0)}>
           <ContextIcon size={15} />
           {ctx.project ? (
             <>
@@ -53,11 +57,18 @@ function TopBar() {
             <span>Set project…</span>
           )}
         </button>
-        <button className="btn btn-tonal sync-btn" onClick={() => sync(true)} disabled={syncing || !ctx.project} title="Re-read gateways, Model Armor, inventory, grants and credentials (bypasses the 30 s cache)">
+        </Tip>
+        <Tip
+          placement="bottom"
+          tip={`Re-read gateways, Model Armor, Agent Registry and IAM from Google Cloud (bypasses the 30-second cache).${!ctx.project ? " Unavailable: set a project first." : syncing ? " Sync is already running." : ""}`}
+        >
+        <button className="btn btn-tonal sync-btn" onClick={() => sync(true)} disabled={syncing || !ctx.project}>
           <RefreshIcon size={16} className={syncing ? "spin" : ""} />
           <span>{syncing ? "Syncing…" : "Sync"}</span>
           <span className="sync-ago">{syncing ? "" : `synced ${ago(syncedAt, now)}`}</span>
         </button>
+        </Tip>
+        <CartButton />
       </div>
     </header>
   );
@@ -147,10 +158,11 @@ function Toasts() {
 
 export default function App() {
   const { step } = useStudio();
+  const rail = useRailWidth();
   return (
     <div className="app">
       <TopBar />
-      <div className="layout">
+      <div className="layout" style={{ "--rail-w": `${rail.effective}px` } as CSSProperties}>
         <Stepper />
         <main className="center" id="main">
           <div className="center-inner">
@@ -164,10 +176,7 @@ export default function App() {
             {step === 7 && <AuditStep />}
           </div>
         </main>
-        <aside className="rail">
-          <CartPanel />
-          <LearnPanel />
-        </aside>
+        <LearnPanel width={rail.width} setWidth={rail.setWidth} />
       </div>
       <Toasts />
     </div>

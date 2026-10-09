@@ -1,5 +1,6 @@
 // Step 3: Agent Registry inventory (agents, MCP servers, endpoints) and Agent Runtime engines,
 // each with "Who can reach it" and a shortcut into the builder.
+import { Tip } from "../components/Tooltip";
 import { useMemo, useState } from "react";
 import { useLookup, useStudio } from "../store";
 import type { Binding, Engine, Intent, McpServer, McpTool, RegAgent, ResourceKind } from "../api/types";
@@ -73,9 +74,11 @@ function destOf(kind: ResourceKind, x: { id: string; name: string; display_name:
 function BuildBtn({ dest }: { dest: Intent["destination"] }) {
   const { openBuilder } = useStudio();
   return (
-    <button className="btn btn-small btn-tonal" onClick={() => openBuilder({ kind: "grant", destination: dest })}>
-      Build a policy for this <ArrowIcon size={14} />
-    </button>
+    <Tip tip={`Open the builder with ${dest?.label ?? "this destination"} filled in as what may be called. Nothing is staged yet.`}>
+      <button className="btn btn-small btn-tonal" onClick={() => openBuilder({ kind: "grant", destination: dest })}>
+        Build a policy for this <ArrowIcon size={14} />
+      </button>
+    </Tip>
   );
 }
 
@@ -168,12 +171,14 @@ function EngineCard({ e }: { e: Engine }) {
             <span className="mono">reasoningEngines/{e.id}</span> · created {fmtDate(e.create_time)}
           </div>
         </div>
-        <button
-          className="btn btn-small btn-tonal"
-          onClick={() => openBuilder({ kind: "grant", source: { type: "engine", principal: e.principal, label: e.display_name, engine: e.name } })}
-        >
-          Build a policy from this agent <ArrowIcon size={14} />
-        </button>
+        <Tip tip={`Open the builder with ${e.display_name} filled in as the caller. Nothing is staged yet.`}>
+          <button
+            className="btn btn-small btn-tonal"
+            onClick={() => openBuilder({ kind: "grant", source: { type: "engine", principal: e.principal, label: e.display_name, engine: e.name } })}
+          >
+            Build a policy from this agent <ArrowIcon size={14} />
+          </button>
+        </Tip>
       </header>
       <div className="engine-gw">
         <span>
@@ -191,7 +196,7 @@ function EngineCard({ e }: { e: Engine }) {
           <span>
             <Term k="agent-identity">Agent Identity</Term> <span className="muted small">({e.identity_type})</span>
           </span>
-          <CopyButton compact className="mini-btn" ariaLabel={`Copy ${e.display_name}'s principal`} getText={() => e.principal} />
+          <CopyButton compact className="mini-btn" ariaLabel={`Copy ${e.display_name}'s principal`} tip="Copy this agent's principal (its Agent Identity) to the clipboard." getText={() => e.principal} />
         </div>
         <code className="principal-value">{e.principal}</code>
         <Disclosure summary="What is this?">

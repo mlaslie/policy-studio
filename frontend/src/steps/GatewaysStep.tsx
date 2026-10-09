@@ -1,4 +1,5 @@
 // Step 1: gateways in the region, their policies and bound agents; stage bind / unbind.
+import { Tip } from "../components/Tooltip";
 import { useState } from "react";
 import { useLookup, useStudio } from "../store";
 import type { Engine, Gateway, Intent } from "../api/types";
@@ -50,17 +51,19 @@ function BindPicker({ gw, onDone }: { gw: Gateway; onDone: () => void }) {
             </option>
           ))}
         </select>
-        <button
-          className="btn btn-primary"
-          disabled={!chosen}
-          onClick={() => {
-            if (!chosen) return;
-            addIntents([{ id: newId(), kind: "bind_gateway", gateway: { name: gw.name, direction: gw.type }, engine: chosen.name, engine_label: chosen.display_name }]);
-            onDone();
-          }}
-        >
-          Stage bind
-        </button>
+        <Tip tip={chosen ? `Stage binding ${chosen.display_name} to ${gw.id} in the cart. Nothing changes in Google Cloud until you apply.` : "Choose an agent first."}>
+          <button
+            className="btn btn-primary"
+            disabled={!chosen}
+            onClick={() => {
+              if (!chosen) return;
+              addIntents([{ id: newId(), kind: "bind_gateway", gateway: { name: gw.name, direction: gw.type }, engine: chosen.name, engine_label: chosen.display_name }]);
+              onDone();
+            }}
+          >
+            Stage bind
+          </button>
+        </Tip>
         <button className="btn btn-text" onClick={onDone}>
           Cancel
         </button>
@@ -143,13 +146,14 @@ function GatewayCard({ gw }: { gw: Gateway }) {
                   {staged(b.engine) ? (
                     <Badge tone="amber">Unbind staged</Badge>
                   ) : (
-                    <button
-                      className="btn btn-small btn-outline"
-                      onClick={() => addIntents([{ id: newId(), kind: "unbind_gateway", gateway: { name: gw.name, direction: gw.type }, engine: b.engine, engine_label: b.display_name }])}
-                      title="Stage removal of this agent from the gateway"
-                    >
-                      Unbind
-                    </button>
+                    <Tip tip={`Stage detaching ${b.display_name} from ${gw.id} in the cart. Nothing changes in Google Cloud until you apply.`}>
+                      <button
+                        className="btn btn-small btn-outline"
+                        onClick={() => addIntents([{ id: newId(), kind: "unbind_gateway", gateway: { name: gw.name, direction: gw.type }, engine: b.engine, engine_label: b.display_name }])}
+                      >
+                        Unbind
+                      </button>
+                    </Tip>
                   )}
                 </li>
               );
@@ -161,9 +165,11 @@ function GatewayCard({ gw }: { gw: Gateway }) {
         {binding ? (
           <BindPicker gw={gw} onDone={() => setBinding(false)} />
         ) : (
-          <button className="btn btn-tonal" onClick={() => setBinding(true)}>
-            <PlusIcon size={16} /> Bind an agent…
-          </button>
+          <Tip tip={`Pick an agent to send its ${gw.type} traffic through ${gw.id}. Binding is staged in the cart; nothing changes until you apply.`}>
+            <button className="btn btn-tonal" onClick={() => setBinding(true)}>
+              <PlusIcon size={16} /> Bind an agent…
+            </button>
+          </Tip>
         )}
       </div>
     </article>
@@ -188,12 +194,14 @@ function Unprotected({ engines, egress }: { engines: Engine[]; egress?: Gateway 
               ) : staged ? (
                 <Badge tone="blue">Bind staged</Badge>
               ) : egress ? (
-                <button
-                  className="link-btn"
-                  onClick={() => addIntents([{ id: newId(), kind: "bind_gateway", gateway: { name: egress.name, direction: "egress" }, engine: e.name, engine_label: e.display_name } satisfies Intent])}
-                >
-                  Stage bind to {egress.id}
-                </button>
+                <Tip tip={`Stage binding ${e.display_name} to ${egress.id} in the cart. Nothing changes in Google Cloud until you apply.`}>
+                  <button
+                    className="link-btn"
+                    onClick={() => addIntents([{ id: newId(), kind: "bind_gateway", gateway: { name: egress.name, direction: "egress" }, engine: e.name, engine_label: e.display_name } satisfies Intent])}
+                  >
+                    Stage bind to {egress.id}
+                  </button>
+                </Tip>
               ) : null}
             </li>
           );

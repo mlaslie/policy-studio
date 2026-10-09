@@ -1,4 +1,5 @@
 // Step 2: Model Armor per gateway, the template in plain English, stage on / off.
+import { Tip } from "../components/Tooltip";
 import { useState } from "react";
 import { useStudio } from "../store";
 import type { ModelArmorGateway, Template } from "../api/types";
@@ -89,13 +90,17 @@ function GatewayMA({ g }: { g: ModelArmorGateway }) {
           {staged ? (
             <Badge tone="blue">{staged.kind === "model_armor_on" ? "Turn on staged" : "Turn off staged"}</Badge>
           ) : g.enabled ? (
-            <button className="btn btn-outline" onClick={() => stage(false)}>
-              Turn off…
-            </button>
+            <Tip tip={`Stage turning off Model Armor on ${shortName(g.gateway)} (removes its content-screening policy). Nothing changes in Google Cloud until you apply.`}>
+              <button className="btn btn-outline" onClick={() => stage(false)}>
+                Turn off…
+              </button>
+            </Tip>
           ) : (
-            <button className="btn btn-primary" onClick={() => stage(true)}>
-              Turn on
-            </button>
+            <Tip tip={`Stage turning on Model Armor for ${shortName(g.gateway)} (attaches a content-screening policy). Nothing changes in Google Cloud until you apply.`}>
+              <button className="btn btn-primary" onClick={() => stage(true)}>
+                Turn on
+              </button>
+            </Tip>
           )}
         </div>
       </header>

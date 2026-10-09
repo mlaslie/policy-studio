@@ -1,5 +1,6 @@
 // Step 0: the Credentials card (GET /auth): run mode, where credentials come from, checks with fixes,
 // a project-mismatch warning, and in generate mode how to run Policy Studio locally to apply.
+import { Tip } from "../components/Tooltip";
 import { useMemo } from "react";
 import { useStudio } from "../store";
 import type { AuthCheck, AuthInfo } from "../api/types";
@@ -28,7 +29,7 @@ function Cmd({ cmd, label }: { cmd: string; label: string }) {
   return (
     <div className="fix">
       <code>{cmd}</code>
-      <CopyButton compact className="mini-btn" ariaLabel={label} getText={() => cmd} />
+      <CopyButton compact className="mini-btn" ariaLabel={label} tip="Copy this command to the clipboard. Run it in your terminal." getText={() => cmd} />
     </div>
   );
 }
@@ -59,7 +60,7 @@ export function LocalSetup({ project, compact }: { project: string; compact?: bo
           </li>
         ))}
       </ol>
-      <CopyButton className="btn btn-tonal btn-small" label="Copy all 4 commands" ariaLabel="Copy all local setup commands" getText={() => steps.map((s) => `# ${s.title}\n${s.cmd}`).join("\n\n") + "\n"} />
+      <CopyButton className="btn btn-tonal btn-small" label="Copy all 4 commands" ariaLabel="Copy all local setup commands" tip="Copy all four setup commands to the clipboard as one script, with a comment above each." getText={() => steps.map((s) => `# ${s.title}\n${s.cmd}`).join("\n\n") + "\n"} />
     </div>
   );
 }
@@ -102,9 +103,11 @@ export function CredentialsCard() {
         <h3 className="card-title">Credentials</h3>
         <ModeBadge />
         <span className="grow" />
-        <button type="button" className="btn btn-text btn-small" onClick={() => void refreshAuth(true)} disabled={auth.loading} title="Check credentials again (after you sign in or change projects)">
-          <RefreshIcon size={14} className={auth.loading ? "spin" : ""} /> Check again
-        </button>
+        <Tip tip="Re-run the credential and permission checks (after you sign in or change projects).">
+          <button type="button" className="btn btn-text btn-small" onClick={() => void refreshAuth(true)} disabled={auth.loading}>
+            <RefreshIcon size={14} className={auth.loading ? "spin" : ""} /> Check again
+          </button>
+        </Tip>
       </div>
 
       {a.mode === "generate" ? (
