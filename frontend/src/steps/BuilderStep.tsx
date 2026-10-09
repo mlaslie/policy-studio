@@ -22,6 +22,20 @@ import {
   validateMember,
 } from "../lib/policy";
 
+type DestType = "all" | "a2a" | "runtime" | "mcp" | "api";
+const DEST_TYPES: { id: DestType; label: string; tip: string }[] = [
+  { id: "all", label: "All", tip: "Show every destination in the Agent Registry for this region." },
+  { id: "a2a", label: "A2A agents", tip: "Remote agents called over the Agent2Agent (A2A) protocol, e.g. on Cloud Run." },
+  { id: "runtime", label: "Agent Runtime agents", tip: "Agents on Agent Runtime, registered automatically." },
+  { id: "mcp", label: "MCP servers", tip: "MCP servers; you can limit access to read-only or specific tools." },
+  { id: "api", label: "APIs", tip: "API endpoints registered in Agent Registry (e.g. Google APIs the agent needs)." },
+];
+function destTypeOf(d: { kind: string; sub: string }): DestType {
+  if (d.kind === "mcp_server") return "mcp";
+  if (d.kind === "endpoint") return "api";
+  return d.sub === "A2A agent" ? "a2a" : "runtime";
+}
+
 type Mode = "grant" | "revoke";
 
 function Section({ n, title, sub, done, children }: { n: number; title: string; sub: string; done: boolean; children: React.ReactNode }) {
@@ -224,6 +238,7 @@ export function BuilderStep() {
   const [custom, setCustom] = useState("");
   const [destName, setDestName] = useState("");
   const [dq, setDq] = useState("");
+  const [dtype, setDtype] = useState<DestType>("all");
   const [access, setAccess] = useState<AccessMode>("all");
   const [tools, setTools] = useState<string[]>([]);
   const [expr, setExpr] = useState(READ_ONLY_EXPR);
@@ -331,7 +346,11 @@ export function BuilderStep() {
     }
   };
 
-  const filteredDests = dests.filter((d) => !dq || `${d.label} ${d.id} ${d.sub}`.toLowerCase().includes(dq.toLowerCase()));
+  // Name filter first, then the type filter; counts on the type buttons reflect the name filter.
+  const byName = dests.filter((d) => !dq || `${d.label} ${d.id} ${d.name} ${d.sub}`.toLowerCase().includes(dq.toLowerCase()));
+  const typeCounts = Object.fromEntries(DEST_TYPES.map((t) => [t.id, byName.filter((d) => destTypeOf(d) === t.id || t.id === "all").length])) as Record<DestType, number>;
+  const filteredDests = byName.filter((d) => dtype === "all" || destTypeOf(d) === dtype);
+  const showAllEndpoints = !!dq || dtype === "api";
   const grouped = (["agent", "mcp_server", "endpoint"] as const).map((k) => ({ k, items: filteredDests.filter((d) => d.kind === k) }));
 
   return (
@@ -424,14 +443,33 @@ export function BuilderStep() {
                   <>
                     <label className="search wide">
                       <SearchIcon size={16} />
-                      <input value={dq} onChange={(e) => setDq(e.target.value)} placeholder="Search agents, MCP servers, APIs…" aria-label="Search destinations" autoFocus={!!source} />
+                      <input value={dq} onChange={(e) => setDq(e.target.value)} placeholder="Filter by name…" aria-label="Filter destinations by name" autoFocus={!!source} />
+                      {dq && (
+                        <button className="search-clear" onClick={() => setDq("")} aria-label="Clear name filter">
+                          ×
+                        </button>
+                      )}
                     </label>
+                    <div className="type-filters" role="group" aria-label="Filter destinations by type">
+                      {DEST_TYPES.map((t) => (
+                        <Tip key={t.id} tip={t.tip}>
+                          <button
+                            className={`type-filter${dtype === t.id ? " on" : ""}`}
+                            aria-pressed={dtype === t.id}
+                            disabled={t.id !== "all" && typeCounts[t.id] === 0 && dtype !== t.id}
+                            onClick={() => setDtype(t.id)}
+                          >
+                            {t.label} <span className="type-count">{typeCounts[t.id]}</span>
+                          </button>
+                        </Tip>
+                      ))}
+                    </div>
                     <div className="dest-list">
                       {grouped.map(({ k, items }) =>
                         items.length ? (
                           <div key={k} className="dest-group">
                             <div className="dest-group-title">{k === "agent" ? "Agents" : k === "mcp_server" ? "MCP servers" : "API endpoints"}</div>
-                            {(k === "endpoint" && !dq ? items.slice(0, 5) : items).map((d) => (
+                            {(k === "endpoint" && !showAllEndpoints ? items.slice(0, 5) : items).map((d) => (
                               <button
                                 key={d.name}
                                 className="dest"
@@ -449,11 +487,24 @@ export function BuilderStep() {
                                 <span className="muted tiny">{(invd.access[d.name] ?? []).length} grants</span>
                               </button>
                             ))}
-                            {k === "endpoint" && !dq && items.length > 5 && <div className="muted small dest-more">+ {items.length - 5} more: type to search</div>}
+                            {k === "endpoint" && !showAllEndpoints && items.length > 5 && (
+                              <button className="btn btn-small btn-text dest-more" onClick={() => setDtype("api")}>
+                                + {items.length - 5} more: show all APIs
+                              </button>
+                            )}
                           </div>
                         ) : null,
                       )}
-                      {!filteredDests.length && <p className="muted">Nothing matches “{dq}”.</p>}
+                      {!filteredDests.length && (
+                        <p className="muted">
+                          No {dtype === "all" ? "destinations" : DEST_TYPES.find((t) => t.id === dtype)!.label} {dq ? <>match “{dq}”</> : "in this region"}.{" "}
+                          {(dq || dtype !== "all") && (
+                            <button className="btn btn-small btn-text" onClick={() => { setDq(""); setDtype("all"); }}>
+                              Clear filters
+                            </button>
+                          )}
+                        </p>
+                      )}
                     </div>
                   </>
                 )}

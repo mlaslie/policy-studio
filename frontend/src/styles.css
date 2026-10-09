@@ -3389,3 +3389,16 @@ body.resizing * {
     animation: none;
   }
 }
+
+/* Builder: destination type filters (step 4) */
+.type-filters { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 10px; }
+.type-filter { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--surface); color: var(--text); font: inherit; font-size: 13px; cursor: pointer; }
+.type-filter:hover:not(:disabled) { border-color: var(--blue); }
+.type-filter:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.type-filter.on { background: var(--blue-weak); border-color: var(--blue); color: var(--blue); font-weight: 600; }
+.type-filter:disabled { opacity: .45; cursor: default; }
+.type-count { font-size: 11px; padding: 0 6px; border-radius: 999px; background: var(--surface-3); color: var(--text-2); }
+.type-filter.on .type-count { background: var(--surface); color: var(--blue); }
+.search-clear { border: 0; background: transparent; color: var(--text-3); font-size: 18px; line-height: 1; cursor: pointer; padding: 0 4px; }
+.search-clear:hover { color: var(--text); }
