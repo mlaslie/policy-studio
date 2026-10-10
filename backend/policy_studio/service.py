@@ -4,10 +4,10 @@ from __future__ import annotations
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from . import audit as audit_mod
+from . import audit as audit_mod, dryrun
 from .english import make_binding
 from .gcp import discovery, engines as eng_mod, gateways as gw_mod, logs as logs_mod, model_armor as ma_mod, \
     registry as reg_mod
@@ -279,38 +279,80 @@ def audit_view(ctx: Context, refresh: bool = False) -> dict[str, Any]:
 
 
 # ------------------------------------------------------------------ gateway request logs
+def _callers(r: Rest, ctx: Context, projects: list[str], gid: str, since_ts: str,
+             bound: list[Engine]) -> dict[str, Any]:
+    """{client cert fingerprint: Engine} for the bound engines (only needed when there is more than one)."""
+    if len(bound) < 2:
+        return {}
+    try:
+        csince = (datetime.fromisoformat(since_ts.replace("Z", "+00:00")) - timedelta(hours=2)) \
+            .strftime("%Y-%m-%dT%H:%M:%SZ")
+        fps = logs_mod.fetch_callers(r, projects, gid, csince, [e.id for e in bound])
+    except Exception:  # noqa: BLE001  (attribution is best effort; the entries still load)
+        return {}
+    by_id = {e.id: e for e in bound}
+    return {fp: by_id[eid] for fp, eid in fps.items() if eid in by_id}
+
+
 def gateway_logs_view(ctx: Context, gateway: str, since: str = "24h", limit: int = 200,
                       refresh: bool = False) -> dict[str, Any]:
-    """GET /gateway-logs: recent request log entries of one gateway, classified allowed / denied / would_deny.
-    `gateway` is an id or a full name (its project is then where the logs are read)."""
+    """GET /gateway-logs: recent request log entries of one gateway. Logged decisions are allowed / denied; on an
+    egress gateway in dry run, allowed entries are checked against the caller's current grants (dryrun.py) and
+    become would_deny / allowed / unknown with a reason. `gateway` is an id or a full name (its project is then
+    where the logs are read)."""
     gid = gateway.rstrip("/").split("/")[-1]
     projects = [gateway.split("/")[1]] if gateway.startswith("projects/") else \
         list(dict.fromkeys([ctx.gw_project, ctx.project]))
 
     def build() -> dict[str, Any]:
         r = rest_for(ctx)
+        errors: list[str] = []
+        inv: Inventory | None = None
+        try:
+            inv = inventory_view(ctx)
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"read the inventory (grants): {err_text(e)}")
         labels: dict[str, str] = {}
-        inv = cache.peek((ctx.key(), "inventory"))
-        if inv is not None:
-            for coll in (inv.agents, inv.mcp_servers, inv.endpoints):
-                for x in coll:
-                    labels[eng_mod.tail(x.name)] = x.display_name
+        for coll in ((inv.agents, inv.mcp_servers, inv.endpoints) if inv else ()):
+            for x in coll:
+                labels[eng_mod.tail(x.name)] = x.display_name
         out = logs_mod.fetch(r, projects, gid, since, limit, labels)
-        notes = ["The caller's identity isn't in Agent Gateway request logs; the agent is shown only when exactly "
-                 "one agent is bound to this gateway (inferred).",
-                 "Dry-run entries are recognized by an IAP DENIED result on a request that went through (2xx); this "
-                 "classification hasn't been checked against real dry-run entries yet."]
-        gv = cache.peek((ctx.key(), "gateways"))
-        agent = None
-        if gv is not None:
-            g = next((x for x in gv["gateways"] if x.id == gid), None)
-            bound = [b for b in (g.bound_engines if g else []) if b.direction == (g.type if g else "egress")]
-            if len(bound) == 1:
-                agent = bound[0].display_name
+        g = None
+        engines: list[Engine] = []
+        try:
+            g = next((x for x in gateways_view(ctx)["gateways"] if x.id == gid), None)
+            engines = region_engines(ctx)[0]
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"read the gateway: {err_text(e)}")
+        by_name = {e.name: e for e in engines}
+        bound = [by_name[b.engine] for b in (g.bound_engines if g else []) if b.direction == g.type
+                 and b.engine in by_name]
+        dry = bool(g and g.type == "egress" and g.enforcement and g.enforcement.mode == "DRY_RUN")
+        fps = _callers(r, ctx, projects, gid, out["since"], bound)
         for e in out["entries"]:
-            e["agent"] = agent
-            e["agent_inferred"] = agent is not None
-        out.update(notes=notes, errors=[], synced_at=now_iso(), projects=projects)
+            eng, how = fps.get(e.get("client_cert") or ""), "mtls"
+            if eng is None and len(bound) == 1:
+                eng, how = bound[0], "only_bound_agent"
+            caller = dryrun.Caller(engine=eng.name, display_name=eng.display_name, principal=eng.principal,
+                                   how=how) if eng else None
+            e["agent"] = caller.display_name if caller else None
+            e["agent_inferred"] = caller is not None
+            e["caller"] = {"engine": caller.engine, "display_name": caller.display_name, "how": caller.how} \
+                if caller else None
+            e["computed"] = dry and e["decision"] == "allowed"
+            e["reason"] = None
+            if e["computed"]:
+                e["decision"], e["reason"] = dryrun.check(e, caller, inv)
+        out["counts"] = logs_mod.count(out["entries"])
+        notes = ["Agent Gateway request logs don't name the caller. The agent is matched by its mTLS client "
+                 "certificate (seen on its own Agent Runtime calls through the gateway), or is the only agent bound "
+                 "to the gateway; either way it's inferred."]
+        if dry:
+            notes.append("In dry run Google logs every call as allowed (status 200, IAP result ALLOWED), including "
+                         "the ones IAP would deny. Would-be-denied is computed by Policy Studio from the caller's "
+                         "current roles/iap.egressor grants on the destination, not reported by Google. Grants on "
+                         "the project or above aren't counted; a condition it can't evaluate gives unknown.")
+        out.update(notes=notes, errors=errors, synced_at=now_iso(), projects=projects, dry_run=dry)
         return out
     return cache.get((ctx.key(), "gateway_logs", gid, since, int(limit)), build, refresh)
 

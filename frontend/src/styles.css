@@ -3824,6 +3824,16 @@ body.resizing * {
 .would-deny-list .grow {
   flex: 1;
 }
+.would-deny-list li.wd-unknown {
+  border-left-color: var(--border-strong);
+}
+.wd-why {
+  flex-basis: 100%;
+  padding-left: 17px;
+}
+.wd-caveat {
+  margin: 6px 0 0;
+}
 .wd-who,
 .wd-what {
   display: inline-flex;
@@ -3831,4 +3841,16 @@ body.resizing * {
   gap: 4px;
   min-width: 0;
   overflow-wrap: anywhere;
+}
+/* Apply: cart items staged after the finished apply that is shown (plan + confirm above it). */
+.staged-since {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 20px;
+  padding-bottom: 20px;
+  border-bottom: 1px dashed var(--border-strong);
+}
+.undo-staged {
+  margin-left: 6px;
 }

@@ -424,7 +424,7 @@ export function buildWorld(ctx: Ctx) {
         return {
           severity: "high",
           title: ids.length > 1 ? `Gateways ${names} are in dry run: nothing is blocked` : `Gateway ${names} is in dry run: nothing is blocked`,
-          detail: `The IAP authz extension ${x.name.split("/").pop()} runs in dry run (metadata.iamEnforcementMode DRY_RUN, failOpen true): IAP still decides, but denials are only logged and every request goes through. Switch it to enforce${ids.length > 1 ? ` (the extension is shared, so the fix switches ${names} together; to change one gateway only, give it its own extension on the Gateways step)` : ""}. Check the “would have been denied” log on the Gateways step first.`,
+          detail: `The IAP authz extension ${x.name.split("/").pop()} runs in dry run (metadata.iamEnforcementMode DRY_RUN, failOpen true): IAP still decides, but every call passes and is logged as allowed and every request goes through. Switch it to enforce${ids.length > 1 ? ` (the extension is shared, so the fix switches ${names} together; to change one gateway only, give it its own extension on the Gateways step)` : ""}. Check the “would have been denied” log on the Gateways step first.`,
           resource: x.name,
           fix: { id: `fix-enforce-${x.name.split("/").pop()}`, kind: "set_enforcement", gateway: { name: x.gateways[0], direction: x.gateways[0] === ingress ? "ingress" : "egress" }, extension: x.name, mode: "ENFORCE", scope: x.gateways.length > 1 ? "shared" : "dedicated" },
         };

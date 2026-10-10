@@ -54,8 +54,8 @@ def condition_for(access: Optional[Access]) -> Optional[Condition]:
     return cond
 
 
-def parse_tools(expression: str) -> Optional[list[str]]:
-    """Tool names of a `toolName in [...]` expression ('' removed), or None if it isn't one."""
+def parse_tools(expression: str, keep_empty: bool = False) -> Optional[list[str]]:
+    """Tool names of a `toolName in [...]` expression ('' removed unless keep_empty), or None if it isn't one."""
     m = _TOOLS_RE.match(expression or "")
     if not m:
         return None
@@ -64,7 +64,7 @@ def parse_tools(expression: str) -> Optional[list[str]]:
     rest = re.sub(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"|,|\s", "", inner)
     if rest:
         return None
-    return [a or b for a, b in items if (a or b)]
+    return [a or b for a, b in items if (a or b) or keep_empty]
 
 
 def classify(cond: Optional[Condition | dict]) -> Access:

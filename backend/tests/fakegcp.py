@@ -123,6 +123,7 @@ class FakeRest:
         self.fail = fail or {}
         self.model_armor = model_armor
         self.log_entries: list[dict] = []          # Cloud Logging entries:list answers (newest first)
+        self.platform_entries: list[dict] = []     # answers to the caller query (engines' own platform calls)
         self.log_requests: list[dict] = []
 
     def _maybe_fail(self, url: str) -> None:
@@ -169,7 +170,8 @@ class FakeRest:
             return {"ancestor": [{"resourceId": {"type": "organization", "id": ORG}}]}
         if url.endswith("/v2/entries:list"):
             self.log_requests.append(copy.deepcopy(json))
-            return {"entries": copy.deepcopy(self.log_entries[:json.get("pageSize", 50)])}
+            src = self.platform_entries if "httpRequest.requestUrl:" in json.get("filter", "") else self.log_entries
+            return {"entries": copy.deepcopy(src[:json.get("pageSize", 50)])}
         if "cloudresourcemanager" in url and url.endswith(":getIamPolicy"):
             return copy.deepcopy(PROJECT_POLICY)
         if url.endswith(":getIamPolicy"):
@@ -319,7 +321,14 @@ class FakeWriteGcp(FakeRest):
             return self._op(url.split("/v1/", 1)[1].split("?", 1)[0].rsplit("/authzExtensions", 1)[0])
         if method == "PATCH" and "/authzPolicies/" in url:
             pid = url.split("?", 1)[0].rsplit("/", 1)[-1]
-            self.policies[pid]["customProvider"] = copy.deepcopy(json["customProvider"])
+            mask = url.split("updateMask=", 1)[1].split("&", 1)[0].split(",") if "updateMask=" in url else []
+            pol = self.policies[pid]
+            if "customProvider.authzExtension.resources" in mask:
+                pol["customProvider"] = copy.deepcopy(json["customProvider"])
+            # As seen live: a PATCH clears the policy's labels unless labels is in the update mask.
+            pol.pop("labels", None)
+            if "labels" in mask and json.get("labels"):
+                pol["labels"] = copy.deepcopy(json["labels"])
             return self._op(url.split("/v1/", 1)[1].split("?", 1)[0].rsplit("/authzPolicies", 1)[0])
         if method == "DELETE" and "/authzExtensions/" in url:
             xid = url.rsplit("/", 1)[-1]

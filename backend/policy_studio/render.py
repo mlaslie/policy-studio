@@ -27,9 +27,11 @@ Sources of truth (REST shapes, gcloud flags and Terraform resources verified liv
                    authz-extensions import (full spec); Terraform google_network_services_authz_extension (import
                    block for the existing extension); Python DepServiceClient.update_authz_extension.
                  dedicate: create a copy of the extension, then PATCH the gateway's REQUEST_AUTHZ policy
-                   ?updateMask=customProvider.authzExtension.resources (customProvider isn't marked immutable in the
-                   networksecurity v1 discovery doc; policyProfile is). Neither the flip nor the PATCH of an
-                   existing policy has been verified live yet.
+                   ?updateMask=customProvider.authzExtension.resources,labels with the current labels re-sent (a
+                   PATCH without labels in the mask clears them; seen live). Verified live: the PATCH updates the
+                   policy in place (~20 s operation), a flip takes effect in about 2-3 minutes, and Terraform plans
+                   an in-place update of the imported policy. Not verified: gcloud authz-policies import updating
+                   an existing policy in place.
 """
 from __future__ import annotations
 
@@ -1268,14 +1270,16 @@ def tf_proj_iam(sp: ProjIamSpec, env: RenderEnv, name: str, bundle: bool) -> str
 NETWORKSERVICES_V1 = "https://networkservices.googleapis.com/v1"
 NETWORKSECURITY_V1 = "https://networksecurity.googleapis.com/v1"
 ENF_MASK = "metadata,failOpen"
-POLICY_PROVIDER_MASK = "customProvider.authzExtension.resources"
+# labels is in the mask because a PATCH of customProvider alone clears the policy's labels (seen live, Oct 2026);
+# the current labels are re-sent with it.
+POLICY_PROVIDER_MASK = "customProvider.authzExtension.resources,labels"
 DRY_RUN_KEY = "iamEnforcementMode"
 # Fields of an authz extension that a copy keeps (everything that isn't output-only or the name).
 EXT_COPY_FIELDS = ("labels", "service", "timeout", "failOpen", "metadata", "authority", "loadBalancingScheme",
                    "forwardHeaders", "forwardAttributes", "wireFormat")
 ASSUMED_EXT = {"service": "iap.googleapis.com", "timeout": "1s", "metadata": {"iapPolicyVersion": "V1"}}
-ENF_LEARN = ("the change typically takes effect within a few minutes; not yet measured (flipping an existing "
-             "extension hasn't been verified live)")
+ENF_LEARN = ("the change takes effect in about 2–3 minutes (measured), and can take effect before the operation "
+             "reports done")
 MODE_LABEL = {"ENFORCE": "Enforce", "DRY_RUN": "Dry run"}
 _EXT_NAME_RE = re.compile(r"^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$")
 
@@ -1444,7 +1448,7 @@ def enf_spec(intent: Intent, env: RenderEnv, warnings: list[str]) -> EnfSpec:
                         "extension first (stage it together with this change).")
     if intent.mode == "DRY_RUN":
         warnings.append(f"Dry run: once applied, nothing is blocked on {english_list([short(gateway)] + (shared if scope == 'shared' else []))}; "
-                        "IAP denials are only logged.")
+                        "Calls IAP would deny pass and are logged as allowed.")
     md = mode_metadata(current.get("metadata") or {}, intent.mode)
     return EnfSpec(gateway=gateway, gateway_id=short(gateway), project=proj, region=env.region, ext_id=short(ext),
                    extension=ext, mode=intent.mode, prev_mode=prev, scope=scope, shared_with=shared,
@@ -1510,7 +1514,7 @@ def enf_english(sp: EnfSpec) -> str:
     if sp.mode == "ENFORCE":
         return (f"Enforce IAP on {where}{shared}: requests without a matching roles/iap.egressor grant are "
                 "blocked.")
-    return f"Put {where} in dry run{shared}: IAP denials are only logged, nothing is blocked."
+    return f"Put {where} in dry run{shared}: nothing is blocked (calls IAP would deny pass and are logged as allowed)."
 
 
 def ded_english(sp: DedSpec) -> str:
@@ -1538,8 +1542,13 @@ def ded_policy_url(sp: DedSpec) -> str:
     return f"{NETWORKSECURITY_V1}/{sp.policy}?updateMask={POLICY_PROVIDER_MASK}"
 
 
-def provider_body(ext: str) -> dict[str, Any]:
-    return {"customProvider": {"authzExtension": {"resources": [ext]}}}
+def provider_body(ext: str, labels: Optional[dict[str, str]] = None) -> dict[str, Any]:
+    """The policy PATCH body: the extension, plus the policy's current labels (labels is in the update mask, so
+    leaving them out would clear them)."""
+    body: dict[str, Any] = {"customProvider": {"authzExtension": {"resources": [ext]}}}
+    if labels:
+        body["labels"] = dict(labels)
+    return body
 
 
 def enf_anatomy(sp: EnfSpec) -> Anatomy:
@@ -1562,20 +1571,23 @@ def enf_anatomy(sp: EnfSpec) -> Anatomy:
 def ded_anatomy(sp: DedSpec) -> Anatomy:
     if sp.op == "revert":
         notes = [f"PATCH the REQUEST_AUTHZ policy {sp.policy_id} (customProvider.authzExtension.resources) back to "
-                 f"{short(sp.source)}", f"then delete {sp.new_id} (a long-running operation)",
+                 f"{short(sp.source)}", LABELS_NOTE, f"then delete {sp.new_id} (a long-running operation)",
                  "between the two steps the gateway already uses the original extension, so no request goes "
                  "unchecked", ENF_LEARN]
         return Anatomy(resource=sp.policy, role="customProvider.authzExtension", member=sp.source, notes=notes)
     notes = [f"1. create {sp.new_id}: a copy of {short(sp.source)} (same service, timeout, failOpen and metadata, so "
              "the same mode for now)",
              f"2. PATCH the gateway's REQUEST_AUTHZ policy {sp.policy_id} with updateMask customProvider."
-             f"authzExtension.resources, so {sp.gateway_id} uses the copy; other gateways keep the original",
-             "the policy keeps its name, target and profile (policyProfile is immutable; customProvider isn't "
-             "marked immutable in the API, but an in-place update of an existing policy hasn't been verified live)",
-             "if the API refuses the PATCH, the fallback is delete + recreate of the policy, which leaves the gateway "
-             "without an IAP check in between (not done automatically)",
-             "both steps are long-running operations"]
+             f"authzExtension.resources,labels, so {sp.gateway_id} uses the copy; other gateways keep the original",
+             LABELS_NOTE,
+             "the policy is updated in place and keeps its name, target and profile (verified live; policyProfile "
+             "is immutable)",
+             "both steps are long-running operations (the policy PATCH took about 20 s live)"]
     return Anatomy(resource=sp.policy, role="customProvider.authzExtension", member=sp.new_ext, notes=notes)
+
+
+LABELS_NOTE = ("labels is in the update mask with the policy's current labels: a PATCH of customProvider alone "
+               "clears the policy's labels (seen live), so they are re-sent")
 
 
 def _yaml_scalar(v: Any) -> str:
@@ -1631,7 +1643,8 @@ def rest_enf(sp: EnfSpec) -> str:
 def gcloud_ded(sp: DedSpec) -> str:
     if sp.op == "revert":
         f = f"{sp.policy_id}.yaml"
-        return (f"# 1. Point {sp.gateway_id}'s IAP policy back at {short(sp.source)} (import updates it in place).\n"
+        return (f"# 1. Point {sp.gateway_id}'s IAP policy back at {short(sp.source)} (import should update it in place;\n"
+                "# not verified live, the REST tab's PATCH is).\n"
                 + f"cat > {f} <<'EOF'\n{policy_yaml(sp, sp.source)}EOF\n"
                 + cont([f"gcloud network-security authz-policies import {sp.policy_id}", f"--source={f}",
                         f"--location={sp.region}", f"--project={sp.policy_project}"])
@@ -1643,15 +1656,24 @@ def gcloud_ded(sp: DedSpec) -> str:
             + f"cat > {f1} <<'EOF'\n{ext_spec_yaml(sp.new_id, sp.body)}EOF\n"
             + cont([f"gcloud service-extensions authz-extensions import {sp.new_id}", f"--source={f1}",
                     f"--location={sp.region}", f"--project={sp.project}"])
-            + f"\n# 2. Point {sp.gateway_id}'s IAP policy at it (import updates the existing policy in place).\n"
+            + f"\n# 2. Point {sp.gateway_id}'s IAP policy at it. import should update the existing policy in place; that\n"
+            "# hasn't been verified live (the REST tab's PATCH has). The YAML repeats its labels, target and profile.\n"
             + f"cat > {f2} <<'EOF'\n{policy_yaml(sp, sp.new_ext)}EOF\n"
             + cont([f"gcloud network-security authz-policies import {sp.policy_id}", f"--source={f2}",
                     f"--location={sp.region}", f"--project={sp.policy_project}"]))
 
 
+def _labels_comment(sp: DedSpec) -> str:
+    if sp.policy_raw:
+        return ("# labels is in the update mask (a PATCH without it clears them), so the policy's current labels are "
+                "re-sent.\n")
+    return ("# labels is in the update mask (a PATCH without it clears them). The policy wasn't read: if it has "
+            "labels,\n# add them to the body (\"labels\": {...}), or they are removed.\n")
+
+
 def rest_ded(sp: DedSpec) -> str:
-    patch = curl("PATCH", ded_policy_url(sp), body=json.dumps(provider_body(
-        sp.source if sp.op == "revert" else sp.new_ext), separators=(",", ":")))
+    patch = _labels_comment(sp) + curl("PATCH", ded_policy_url(sp), body=json.dumps(provider_body(
+        sp.source if sp.op == "revert" else sp.new_ext, sp.policy_raw.get("labels")), separators=(",", ":")))
     if sp.op == "revert":
         return (f"# 1. Point the IAP policy back at {short(sp.source)} (long-running).\n" + patch
                 + f"\n# 2. Delete {sp.new_id} (long-running).\n" + curl("DELETE", ded_ext_url(sp, False)))
@@ -1692,13 +1714,14 @@ def delete_iap_extension(project, region, name):
     return op.result(timeout=900)
 
 
-def point_policy_at(policy, extension):
-    """PATCH an authz policy's customProvider.authzExtension.resources (long-running)."""
+def point_policy_at(policy, extension, labels=None):
+    """PATCH an authz policy's customProvider.authzExtension.resources (long-running). labels is in the mask with
+    the policy's current labels: updating custom_provider alone clears them."""
     AuthzPolicy = network_security_v1.AuthzPolicy
-    p = AuthzPolicy(name=policy, custom_provider=AuthzPolicy.CustomProvider(
+    p = AuthzPolicy(name=policy, labels=labels or {}, custom_provider=AuthzPolicy.CustomProvider(
         authz_extension=AuthzPolicy.CustomProvider.AuthzExtension(resources=[extension])))
     op = ns.update_authz_policy(authz_policy=p, update_mask=field_mask_pb2.FieldMask(
-        paths=["custom_provider.authz_extension.resources"]))
+        paths=["custom_provider.authz_extension.resources", "labels"]))
     return op.result(timeout=900)
 '''
 
@@ -1708,12 +1731,20 @@ def python_enf_call(sp: EnfSpec) -> str:
             f"{'True' if sp.fail_open else 'False'},\n)")
 
 
+def _py_point(sp: DedSpec, ext: str) -> str:
+    labels = sp.policy_raw.get("labels")
+    if labels:
+        return f"point_policy_at(\n    {py_str(sp.policy)},\n    {py_str(ext)},\n    labels={py_obj(labels, 1)},\n)"
+    note = "" if sp.policy_raw else "# The policy wasn't read: pass labels={...} if it has any, or they are removed.\n"
+    return f"{note}point_policy_at({py_str(sp.policy)}, {py_str(ext)})"
+
+
 def python_ded_call(sp: DedSpec) -> str:
     if sp.op == "revert":
-        return (f"point_policy_at({py_str(sp.policy)}, {py_str(sp.source)})\n"
+        return (_py_point(sp, sp.source) + "\n"
                 f"delete_iap_extension({py_str(sp.project)}, {py_str(sp.region)}, {py_str(sp.new_id)})")
     return (f"copy_authz_extension(\n    {py_str(sp.project)},\n    {py_str(sp.region)},\n    {py_str(sp.new_id)},\n"
-            f"    {py_obj(sp.body, 1)},\n)\npoint_policy_at({py_str(sp.policy)}, {py_str(sp.new_ext)})")
+            f"    {py_obj(sp.body, 1)},\n)\n" + _py_point(sp, sp.new_ext))
 
 
 def _tf_ext_block(name: str, ext_id: str, project: str, spec: dict[str, Any], env: RenderEnv, bundle: bool,
@@ -1791,9 +1822,11 @@ def tf_ded(sp: DedSpec, env: RenderEnv, name: str, bundle: bool, final: Optional
         f"1. The copy {sp.new_id} (same settings as {short(sp.source)}"
         + (", with the mode staged in this cart" if final else "") + ").")
     head2 = hcl.comment_lines(
-        f"2. The existing IAP policy {sp.policy_id} is imported and pointed at the copy. Check the plan: it must be "
-        "an in-place update. If it shows a replace (destroy and create), the gateway has no IAP check between the "
-        "two; use the gcloud or REST tab (an in-place PATCH) instead.")
+        f"2. The existing IAP policy {sp.policy_id} is imported and pointed at the copy, updated in place (verified "
+        "live: plan 1 to import, 1 to add, 1 to change, 0 to destroy). Its labels, description and target repeat "
+        "the current ones" + ("" if pr else " (ASSUMED: the policy wasn't read; add its labels if it has any, or "
+                              "the plan removes them)") + ". If your plan shows a replace (destroy and create), the "
+        "gateway has no IAP check between the two; use the REST tab (an in-place PATCH) instead.")
     return (head + ext_b.render() + "\n" + head2
             + _tf_import(f"google_network_security_authz_policy.{pol_name}", sp.policy) + "\n" + pb.render())
 

@@ -80,7 +80,7 @@ export function intentEnglish(i: Intent): string {
     }
     case "set_enforcement":
       return i.mode === "DRY_RUN"
-        ? `Put ${gw} in dry run: IAP denials are only logged, nothing is blocked${i.scope === "shared" ? " (shared extension: other gateways too)" : ""}.`
+        ? `Put ${gw} in dry run: nothing is blocked (calls IAP would deny pass and are logged as allowed)${i.scope === "shared" ? " (shared extension: other gateways too)" : ""}.`
         : `Enforce IAP on ${gw}: calls without a grant are blocked${i.scope === "shared" ? " (shared extension: other gateways too)" : ""}.`;
     case "dedicate_extension":
       return i.revert

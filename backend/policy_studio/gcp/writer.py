@@ -15,7 +15,9 @@ Every write is checked against an allowlist of exactly the calls Apply makes:
   PATCH  https://networkservices.googleapis.com/v1/projects/P/locations/R/authzExtensions/NAME
            ?updateMask=metadata,failOpen     (body: only metadata and failOpen)
   PATCH  https://networksecurity.googleapis.com/v1/projects/P/locations/R/authzPolicies/NAME
-           ?updateMask=customProvider.authzExtension.resources     (body: only that field; dedicate / revert)
+           ?updateMask=customProvider.authzExtension.resources,labels   (body: only those two fields; dedicate /
+           revert. labels is in the mask because a PATCH without it clears the policy's labels, seen live; the
+           current labels are re-sent)
   POST   https://cloudresourcemanager.googleapis.com/v1/projects/P:setIamPolicy  (guarded: only through
            set_project_iam_policy, and only when the change adds or removes members of the Model Armor roles)
 Reads (getIamPolicy, GET engine / operation / policy) go through the read-only Rest client.
@@ -50,7 +52,7 @@ ALLOWED: list[tuple[str, re.Pattern[str]]] = [
     ("PATCH", re.compile(rf"^https://networkservices\.googleapis\.com/v1/projects/{_SEG}/locations/{_SEG}/"
                          rf"authzExtensions/{_SEG}\?updateMask=metadata,failOpen$")),
     ("PATCH", re.compile(rf"^https://networksecurity\.googleapis\.com/v1/projects/{_SEG}/locations/{_SEG}/"
-                         rf"authzPolicies/{_SEG}\?updateMask=customProvider\.authzExtension\.resources$")),
+                         rf"authzPolicies/{_SEG}\?updateMask=customProvider\.authzExtension\.resources,labels$")),
 ]
 # Allowed only through Writer.set_project_iam_policy, which checks the policy change itself.
 GUARDED: list[tuple[str, re.Pattern[str]]] = [
@@ -138,13 +140,17 @@ class Writer:
         return self._write("PATCH", url, body)
 
     def patch_authz_policy(self, url: str, body: dict[str, Any]) -> Any:
-        """Dedicated extension: only customProvider.authzExtension.resources of an authz policy (one extension)."""
-        res = ((body.get("customProvider") or {}).get("authzExtension") or {}).get("resources")
-        if set(body) != {"customProvider"} or set(body["customProvider"]) != {"authzExtension"} or \
-                set(body["customProvider"]["authzExtension"]) != {"resources"} or not isinstance(res, list) or \
-                len(res) != 1:
+        """Dedicated extension: only customProvider.authzExtension.resources (one extension) and labels (the
+        policy's current labels, re-sent so the PATCH keeps them) of an authz policy."""
+        cp = body.get("customProvider")
+        res = ((cp or {}).get("authzExtension") or {}).get("resources") if isinstance(cp, dict) else None
+        labels = body.get("labels", {})
+        if set(body) - {"customProvider", "labels"} or not isinstance(cp, dict) or set(cp) != {"authzExtension"} or \
+                set(cp["authzExtension"]) != {"resources"} or not isinstance(res, list) or len(res) != 1 or \
+                not isinstance(labels, dict) or not all(isinstance(k, str) and isinstance(v, str)
+                                                        for k, v in labels.items()):
             raise ValueError("policy_studio writer: an authz policy PATCH may only set "
-                             "customProvider.authzExtension.resources to one extension")
+                             "customProvider.authzExtension.resources to one extension, and labels")
         return self._write("PATCH", url, body)
 
     def set_project_iam_policy(self, project_url: str, current: dict[str, Any], policy: dict[str, Any]) -> Any:

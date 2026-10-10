@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from google.oauth2 import credentials as user_creds
 
 import fakegcp as F
-from policy_studio import service
+from policy_studio import dryrun, service
 from policy_studio.app import create_app
 from policy_studio.gcp import auth, gateways as gw_mod, logs as logs_mod
 from policy_studio.gcp.writer import Writer, allowed
@@ -98,7 +98,9 @@ def test_render_set_enforcement_all_formats():
     o = it.outputs
     assert it.english.startswith("Enforce IAP on gateway corp-out")
     assert it.anatomy.resource == EXT and it.anatomy.role == "enforcement: Dry run → Enforce"
-    assert any("not yet measured" in n for n in it.anatomy.notes)
+    assert any("about 2–3 minutes (measured)" in n and "before the operation reports done" in n
+               for n in it.anatomy.notes)
+    assert not any("not yet measured" in n or "verified live" in n for n in it.anatomy.notes)
     # REST: the PATCH with exactly metadata + failOpen; other metadata keys kept, the dry-run key gone
     assert f"https://networkservices.googleapis.com/v1/{EXT}?updateMask=metadata,failOpen" in o.rest
     assert '{"metadata":{"iapPolicyVersion":"V1"},"failOpen":false}' in o.rest
@@ -196,6 +198,40 @@ def test_render_revert():
     assert it.is_destructive
 
 
+def labelled_env():
+    raw = {"gateways": [{**g, "_project": F.P} for g in F.GATEWAYS],
+           "extensions": [{**x, "_project": F.P} for x in F.EXTENSIONS],
+           "policies": [{**p, "_project": F.P, **({"labels": {"team": "payments", "env": "prod"}}
+                                                   if p["name"].endswith("/corp-out-iap-policy") else {})}
+                        for p in F.POLICIES], "errors": []}
+    return env_from(raw)
+
+
+def test_render_dedicate_keeps_labels_in_every_format():
+    """The policy PATCH clears labels unless they are in the mask (seen live): every output re-sends them."""
+    res = render([Intent.model_validate(x) for x in dedicate_pair()], labelled_env())
+    ded = res.items[0]
+    check_syntax(ded)
+    o = ded.outputs
+    assert f"{POLICY}?updateMask=customProvider.authzExtension.resources,labels" in o.rest
+    assert ('{"customProvider":{"authzExtension":{"resources":["' + COPY + '"]}},'
+            '"labels":{"team":"payments","env":"prod"}}') in o.rest
+    assert "labels:\n  team: payments\n  env: prod\n" in o.gcloud
+    assert "labels=" in o.python and '"team": "payments"' in o.python and '"labels"]' in o.python
+    pol = o.terraform.split('resource "google_network_security_authz_policy"', 1)[1]
+    assert "labels = {" in pol and 'team = "payments"' in pol
+    assert any("clears the policy's labels" in n for n in ded.anatomy.notes)
+    assert not any("hasn't been verified" in n for n in ded.anatomy.notes)
+    rev = render([Intent(id="r", kind="dedicate_extension", gateway={"name": F.EG}, source_extension=EXT,
+                         new_name="corp-out-own-iap", revert=True)], labelled_env()).items[0]
+    assert ('{"customProvider":{"authzExtension":{"resources":["' + EXT + '"]}},'
+            '"labels":{"team":"payments","env":"prod"}}') in rev.outputs.rest
+    # policy not looked up: the outputs say to add the labels
+    env = RenderEnv(ctx=CTX)
+    unknown = render([Intent.model_validate(dedicate_pair()[0])], env).items[0]
+    assert "The policy wasn't read" in unknown.outputs.rest and "The policy wasn't read" in unknown.outputs.python
+
+
 # ====================================================================== preflight / diff
 @pytest.fixture
 def read_client(monkeypatch):
@@ -281,7 +317,7 @@ def test_apply_enforce_then_undo_dry_run(gcp):
     assert method == "PATCH" and url == f"https://networkservices.googleapis.com/v1/{EXT}?updateMask=metadata,failOpen"
     assert body == {"metadata": {"iapPolicyVersion": "V1"}, "failOpen": False}
     assert gcp.extensions["corp-out-iap"]["metadata"] == {"iapPolicyVersion": "V1"}
-    assert "not yet measured" in f["enf"]["detail"]
+    assert "about 2–3 minutes (measured)" in f["enf"]["detail"]
     undo = f["enf"]["undo"]
     assert undo["kind"] == "set_enforcement" and undo["mode"] == "DRY_RUN" and undo["extension"] == EXT
     detail, _ = run([undo], ack=False, status=400)                     # dry run is destructive
@@ -307,7 +343,7 @@ def test_apply_dedicate_then_flip_then_undo(gcp):
     assert gcp.writes[0][2] == {"service": "iap.googleapis.com", "failOpen": True,
                                 "metadata": {"iapPolicyVersion": "V1", "iamEnforcementMode": "DRY_RUN"}}
     assert gcp.writes[1][1].endswith("/authzPolicies/corp-out-iap-policy"
-                                     "?updateMask=customProvider.authzExtension.resources")
+                                     "?updateMask=customProvider.authzExtension.resources,labels")
     assert gcp.writes[2][1].endswith("/authzExtensions/corp-out-own-iap?updateMask=metadata,failOpen")
     # corp-out now has its own enforcing extension; corp-in keeps the original, still in dry run
     assert gcp.policies["corp-out-iap-policy"]["customProvider"]["authzExtension"]["resources"] == [COPY]
@@ -317,16 +353,89 @@ def test_apply_dedicate_then_flip_then_undo(gcp):
                                                              params={**Q, "refresh": 1}).json()["gateways"]}
     assert gws["corp-out"]["enforcement"]["mode"] == "ENFORCE" and gws["corp-out"]["enforcement"]["shared_with"] == []
     assert gws["corp-in"]["enforcement"]["mode"] == "DRY_RUN"
-    # undo: the flip back (destructive: dry run) and the revert (destructive: deletes the copy)
-    undo = [f["flip"]["undo"], f["ded"]["undo"]]
-    assert undo[1]["revert"] is True and undo[1]["new_name"] == "corp-out-own-iap"
+    # undo: only the revert (destructive: deletes the copy). The copy didn't exist before, so flipping it back
+    # first would be wasted: the flip has no undo of its own.
+    assert "undo" not in f["flip"] and "deletes corp-out-own-iap" in f["flip"]["detail"]
+    undo = [f["ded"]["undo"]]
+    assert undo[0]["revert"] is True and undo[0]["new_name"] == "corp-out-own-iap"
     run(undo, ack=False, status=400)
     gcp.writes.clear()
     _, u = run(undo, ack=True)
-    assert u["undo-flip"]["state"] == "verified" and u["undo-ded"]["state"] == "verified", u
+    assert u["undo-ded"]["state"] == "verified", u
     assert gcp.policies["corp-out-iap-policy"]["customProvider"]["authzExtension"]["resources"] == [EXT]
     assert "corp-out-own-iap" not in gcp.extensions
-    assert [m for m, _, _ in gcp.writes] == ["PATCH", "PATCH", "DELETE"]
+    assert [m for m, _, _ in gcp.writes] == ["PATCH", "DELETE"]
+
+
+def test_flip_of_existing_copy_keeps_its_undo(gcp):
+    """Flipping a copy made by an earlier apply (not this one) keeps its undo: the previous mode."""
+    _, f = run([dedicate_pair()[0]])
+    assert f["ded"]["state"] == "verified"
+    _, f = run([dedicate_pair()[1]], ack=True)
+    assert f["flip"]["state"] == "verified"
+    assert f["flip"]["undo"]["mode"] == "DRY_RUN" and f["flip"]["undo"]["extension"].endswith("/corp-out-own-iap")
+
+
+def flip_back():
+    return {"id": "undo-flip", "kind": "set_enforcement", "gateway": {"name": F.EG, "direction": "egress"},
+            "extension": COPY, "mode": "DRY_RUN", "scope": "dedicated"}
+
+
+def test_undo_flip_skipped_when_revert_deletes_copy(gcp):
+    """An older undo list with both the flip back and the revert: the flip is skipped (the copy is deleted)."""
+    _, f = run(dedicate_pair())
+    gcp.writes.clear()
+    _, u = run([flip_back(), f["ded"]["undo"]], ack=True)
+    assert u["undo-flip"]["state"] == "skipped" and "deleted by the revert" in u["undo-flip"]["detail"], u
+    assert u["undo-ded"]["state"] == "verified"
+    assert [m for m, _, _ in gcp.writes] == ["PATCH", "DELETE"]
+
+
+def test_undo_flip_runs_when_revert_keeps_copy(gcp):
+    """When another policy still uses the copy, the revert keeps it, so the flip back still runs."""
+    _, f = run(dedicate_pair())
+    gcp.policies["other"] = {"name": f"projects/{F.P}/locations/{F.R}/authzPolicies/other",
+                             "policyProfile": "REQUEST_AUTHZ", "target": {"resources": []},
+                             "customProvider": {"authzExtension": {"resources": [COPY]}}}
+    gcp.writes.clear()
+    _, u = run([flip_back(), f["ded"]["undo"]], ack=True)
+    assert u["undo-flip"]["state"] == "verified" and u["undo-ded"]["state"] == "done", u
+    assert gcp.extensions["corp-out-own-iap"]["metadata"]["iamEnforcementMode"] == "DRY_RUN"
+    assert [m for m, _, _ in gcp.writes] == ["PATCH", "PATCH"]
+
+
+LABELS = {"team": "payments", "env": "prod"}
+
+
+def test_dedicate_and_revert_keep_policy_labels(gcp):
+    gcp.policies["corp-out-iap-policy"]["labels"] = dict(LABELS)
+    _, f = run(dedicate_pair())
+    assert f["ded"]["state"] == "verified" and "labels kept: env=prod, team=payments" in f["ded"]["detail"], f
+    _, url, body = gcp.writes[1]
+    assert url.endswith("?updateMask=customProvider.authzExtension.resources,labels")
+    assert body == {"customProvider": {"authzExtension": {"resources": [COPY]}}, "labels": LABELS}
+    pol = gcp.policies["corp-out-iap-policy"]
+    assert pol["labels"] == LABELS and pol["customProvider"]["authzExtension"]["resources"] == [COPY]
+    gcp.writes.clear()
+    _, u = run([f["ded"]["undo"]], ack=True)
+    assert u["undo-ded"]["state"] == "verified", u
+    assert gcp.writes[0][2] == {"customProvider": {"authzExtension": {"resources": [EXT]}}, "labels": LABELS}
+    assert gcp.policies["corp-out-iap-policy"]["labels"] == LABELS
+
+
+def test_dedicate_read_back_catches_lost_labels(gcp, monkeypatch):
+    """If the labels didn't survive the PATCH, the read-back says so (the fake now ignores labels in the mask)."""
+    gcp.policies["corp-out-iap-policy"]["labels"] = dict(LABELS)
+    orig = gcp._request
+
+    def lossy(method, url, *, json=None, **kw):
+        if method == "PATCH" and "/authzPolicies/" in url:
+            json = {k: v for k, v in json.items() if k != "labels"}
+        return orig(method, url, json=json, **kw)
+    monkeypatch.setattr(gcp, "_request", lossy)
+    _, f = run([dedicate_pair()[0]])
+    assert f["ded"]["state"] == "failed" and "labels changed (env=prod, team=payments → none)" in f["ded"]["detail"]
+    assert f["ded"]["undo"]["revert"] is True
 
 
 def test_apply_flip_skipped_when_copy_fails(gcp):
@@ -353,32 +462,48 @@ def test_writer_guard(gcp):
     assert not allowed("PATCH", f"{base}?updateMask=service")
     assert not allowed("PATCH", base)
     assert allowed("PATCH", f"https://networksecurity.googleapis.com/v1/{POLICY}"
-                            "?updateMask=customProvider.authzExtension.resources")
+                            "?updateMask=customProvider.authzExtension.resources,labels")
+    # without labels in the mask the PATCH clears the policy's labels (seen live), so that mask isn't allowed
+    assert not allowed("PATCH", f"https://networksecurity.googleapis.com/v1/{POLICY}"
+                                "?updateMask=customProvider.authzExtension.resources")
+    assert not allowed("PATCH", f"https://networksecurity.googleapis.com/v1/{POLICY}?updateMask=labels")
     assert not allowed("PATCH", f"https://networksecurity.googleapis.com/v1/{POLICY}?updateMask=target")
     w = Writer(gcp)
     with pytest.raises(ValueError):
         w.patch_authz_extension(f"{base}?updateMask=metadata,failOpen", {"metadata": {}, "service": "x"})
-    with pytest.raises(ValueError):
-        w.patch_authz_policy(f"https://networksecurity.googleapis.com/v1/{POLICY}"
-                             "?updateMask=customProvider.authzExtension.resources",
-                             {"customProvider": {"authzExtension": {"resources": ["a", "b"]}}})
+    purl = f"https://networksecurity.googleapis.com/v1/{POLICY}?updateMask=customProvider.authzExtension.resources,labels"
+    for bad in ({"customProvider": {"authzExtension": {"resources": ["a", "b"]}}},
+                {"customProvider": {"authzExtension": {"resources": ["a"]}}, "target": {}},
+                {"customProvider": {"authzExtension": {"resources": ["a"]}}, "labels": {"k": 1}},
+                {"labels": {"k": "v"}}):
+        with pytest.raises(ValueError):
+            w.patch_authz_policy(purl, bad)
     assert not gcp.writes
 
 
 # ====================================================================== logs
-def entry(status, result=None, tool=None, ts="2026-10-09T14:09:23Z", policy_result=None, **jp):
-    """A gateway_requests entry in the format seen live (identifiers replaced with placeholders)."""
-    e = {"insertId": f"id-{status}-{result}-{tool}", "timestamp": ts,
+NUM_LOC = f"projects/123456789012/locations/{F.R}"     # log entries name registry resources by project number
+
+
+def entry(status=200, result="ALLOWED", tool=None, resource="mcpServers/agentregistry-mcp", fp="fp-hr",
+          ts="2026-10-09T14:09:23Z", policy_result=None, method="tools/call"):
+    """A gateway_requests entry in the format seen live (identifiers replaced with placeholders). In dry run a call
+    IAP would deny looks exactly like this too: status 200, result ALLOWED, matchedRules default_denied."""
+    gi = {"agentRegistryResource": f"{NUM_LOC}/{resource}"} if resource else {}
+    if tool or (method and method != "tools/call"):
+        gi["mcpInfo"] = {"method": method, **({"parameter": tool} if tool else {})}
+    e = {"insertId": f"id-{status}-{result}-{tool}-{resource}-{fp}", "timestamp": ts,
          "logName": "projects/my-demo-project/logs/networkservices.googleapis.com%2Fgateway_requests",
          "resource": {"type": "networkservices.googleapis.com/Gateway",
                       "labels": {"gateway_name": "corp-out", "location": F.R, "resource_container": "123456789012"}},
          "httpRequest": {"requestMethod": "POST", "status": status,
                          "requestUrl": "https://tickets-mcp-123456789012.europe-west4.run.app/mcp"},
-         "jsonPayload": {"enforcedGatewaySecurityPolicy": {"hostname": "tickets-mcp-123456789012.europe-west4.run.app"},
-                         "agentGatewayInfo": {"agentRegistryResource": f"projects/123456789012/locations/{F.R}/"
-                                                                        "mcpServers/agentregistry-mcp",
-                                              **({"mcpInfo": {"method": "tools/call", "parameter": tool}}
-                                                 if tool else {})}, **jp}}
+         "jsonPayload": {"enforcedGatewaySecurityPolicy": {
+                             "hostname": "tickets-mcp-123456789012.europe-west4.run.app",
+                             "matchedRules": [{"action": "ALLOWED", "name": "default_denied"}]},
+                         "agentGatewayInfo": gi}}
+    if fp:
+        e["jsonPayload"]["mtls"] = {"clientCertSha256Fingerprint": fp}
     if result:
         e["jsonPayload"]["authzPolicyInfo"] = {"result": result, "policies": [
             {"result": policy_result or result,
@@ -386,20 +511,30 @@ def entry(status, result=None, tool=None, ts="2026-10-09T14:09:23Z", policy_resu
     return e
 
 
+def platform(engine_id, fp):
+    """An engine's own Agent Runtime call through the gateway: its URL names the engine."""
+    return {"insertId": f"p-{engine_id}", "timestamp": "2026-10-09T14:00:00Z",
+            "httpRequest": {"requestMethod": "POST", "status": 200,
+                            "requestUrl": f"https://{F.R}-aiplatform.googleapis.com/v1beta1/projects/123456789012/"
+                                          f"locations/{F.R}/reasoningEngines/{engine_id}/sessions/s1:appendEvent"},
+            "jsonPayload": {"mtls": {"clientCertSha256Fingerprint": fp}}}
+
+
 def test_log_classification():
-    assert logs_mod.classify(entry(200, "ALLOWED")) == "allowed"
-    assert logs_mod.classify(entry(200)) == "allowed"                       # no authzPolicyInfo
+    """What the log says: DENIED (or 403) is denied, everything else allowed. Dry run can't be read off an entry."""
+    assert logs_mod.classify(entry()) == "allowed"
+    assert logs_mod.classify(entry(result=None)) == "allowed"                       # no authzPolicyInfo
     assert logs_mod.classify(entry(403, "DENIED", "delete_ticket")) == "denied"
-    assert logs_mod.classify(entry(200, "DENIED", "delete_ticket")) == "would_deny"
     assert logs_mod.classify(entry(None, "DENIED")) == "denied"
-    assert logs_mod.classify(entry(403, "DRY_RUN_DENIED")) == "would_deny"     # tolerant of a dry-run marker
-    assert logs_mod.classify(entry(200, "ALLOWED", policy_result="DENIED")) == "would_deny"
-    p = logs_mod.parse_entry(entry(200, "DENIED", "delete_ticket"), "my-demo-project",
+    assert logs_mod.classify(entry(403, None)) == "denied"
+    assert logs_mod.classify(entry(200, "ALLOWED", policy_result="DENIED")) == "denied"
+    p = logs_mod.parse_entry(entry(tool="delete_ticket"), "my-demo-project",
                              {f"locations/{F.R}/mcpServers/agentregistry-mcp": "Tickets MCP"})
-    assert p["decision"] == "would_deny" and p["mcp_tool"] == "delete_ticket" and p["destination"] == "Tickets MCP"
+    assert p["decision"] == "allowed" and p["mcp_tool"] == "delete_ticket" and p["destination"] == "Tickets MCP"
     assert p["host"] == "tickets-mcp-123456789012.europe-west4.run.app" and p["status"] == 200
+    assert p["client_cert"] == "fp-hr" and p["registry_resource"] == f"{NUM_LOC}/mcpServers/agentregistry-mcp"
     assert p["policies"] == [{"name": f"projects/123456789012/locations/{F.R}/authzPolicies/corp-out-iap-policy",
-                              "result": "DENIED"}]
+                              "result": "ALLOWED"}]
     assert p["console_url"].startswith("https://console.cloud.google.com/logs/query;query=insertId%3D")
     assert logs_mod.parse_since("2h", now=__import__("datetime").datetime(2026, 10, 9, 12, tzinfo=__import__(
         "datetime").timezone.utc)) == "2026-10-09T10:00:00Z"
@@ -407,18 +542,132 @@ def test_log_classification():
         logs_mod.parse_since("yesterday")
 
 
-def test_gateway_logs_endpoint(read_client, monkeypatch):
+def test_caller_map():
+    m = logs_mod.caller_map([platform("111", "fp-a"), platform("222", "fp-b"), platform("111", "fp-x"),
+                             platform("222", "fp-x"), entry(fp="fp-c")], ["111", "222"])
+    assert m == {"fp-a": "111", "fp-b": "222"}                       # fp-x is ambiguous, fp-c isn't a platform call
+    f = logs_mod.caller_filter([F.P], "corp-out", "2026-10-09T08:00:00Z", ["111", "222"])
+    assert f.endswith('AND (httpRequest.requestUrl:"reasoningEngines/111/" OR '
+                      'httpRequest.requestUrl:"reasoningEngines/222/")')
+
+
+@pytest.fixture
+def inv(read_client):
+    return service.inventory_view(service.resolve(Context(project=F.P, region=F.R)))
+
+
+def caller(eid, number=F.N, name=None):
+    return dryrun.Caller(engine=f"projects/{number}/locations/{F.R}/reasoningEngines/{eid}",
+                         display_name=name or f"agent {eid}", principal=F.principal(eid, number), how="mtls")
+
+
+def check(e, c, inv):
+    return dryrun.check(logs_mod.parse_entry(e, F.P), c, inv)
+
+
+def test_would_deny_grants_and_conditions(inv):
+    hr = caller("111", name="HR Assistant")
+    # unconditional grant on the MCP server
+    d, why = check(entry(tool="delete_ticket"), hr, inv)
+    assert d == "allowed" and why == "HR Assistant holds roles/iap.egressor on Tickets MCP."
+    # no grant at all
+    d, why = check(entry(resource="agents/agentregistry-rt1", method=None), hr, inv)
+    assert d == "would_deny" and "holds no roles/iap.egressor grant on HR Assistant" in why
+    # allUsers on the KB agent
+    assert check(entry(resource="agents/agentregistry-aaa", method=None), caller("555"), inv)[0] == "allowed"
+    # "all agents in project": same project number allowed, another project's agent not
+    d, why = check(entry(tool="lookup", resource="mcpServers/agentregistry-ro"), caller("222"), inv)
+    assert d == "allowed" and "through All agents in project" in why
+    assert check(entry(tool="lookup", resource="mcpServers/agentregistry-ro"), caller("222", number="9999"),
+                 inv)[0] == "would_deny"
+    # read-only-hint condition (principal 999): read-only tool yes, destructive no, unknown tool unknown, setup yes
+    ro = caller("999")
+    assert check(entry(tool="list_tickets"), ro, inv)[0] == "allowed"
+    d, why = check(entry(tool="delete_ticket"), ro, inv)
+    assert d == "would_deny" and "is limited (ro)" in why and "doesn't cover delete_ticket" in why
+    d, why = check(entry(tool="brand_new_tool"), ro, inv)
+    assert d == "unknown" and "can't be evaluated" in why
+    assert check(entry(method="tools/list"), ro, inv)[0] == "allowed"
+
+
+def test_would_deny_tool_list_custom_group_and_unknowns(inv):
+    from policy_studio.conditions import tools_expression
+    from policy_studio.model import Binding, Condition
+    key = next(k for k in inv.access if k.endswith("/mcpServers/agentregistry-mcp"))
+    inv.access[key] += [
+        Binding(role="roles/iap.egressor", member=F.principal("777"),
+                condition=Condition(title="Only MCP tools: add_note", expression=tools_expression(["add_note"]))),
+        Binding(role="roles/iap.egressor", member=F.principal("888"),
+                condition=Condition(title="Weekdays", expression="request.time.getDayOfWeek() < 5"))]
+    t = caller("777")
+    assert check(entry(tool="add_note"), t, inv)[0] == "allowed"
+    d, why = check(entry(tool="delete_ticket"), t, inv)
+    assert d == "would_deny" and "Only MCP tools: add_note" in why
+    assert check(entry(method="initialize"), t, inv)[0] == "allowed"           # toolName '' is in the list
+    d, why = check(entry(tool="add_note"), caller("888"), inv)
+    assert d == "unknown" and "Weekdays" in why                                 # custom condition: never would_deny
+    inv.access[key].append(Binding(role="roles/iap.egressor", member="group:agents@example.com"))
+    d, why = check(entry(tool="add_note"), caller("666"), inv)
+    assert d == "unknown" and "group or domain" in why                          # might be in the group
+    assert check(entry(tool="add_note"), None, inv)[0] == "unknown"             # caller not identified
+    d, why = check(entry(resource=None, method=None), t, inv)
+    assert d == "unknown" and "names no Agent Registry" in why
+    d, why = check(entry(resource="agents/agentregistry-elsewhere", method=None), t, inv)
+    assert d == "unknown" and "isn't in the inventory" in why
+    inv.access_errors[key] = "permission denied"
+    assert check(entry(tool="add_note"), t, inv)[0] == "unknown"
+    assert dryrun.check(logs_mod.parse_entry(entry(), F.P), t, None)[0] == "unknown"
+
+
+def test_gateway_logs_endpoint(read_client):
+    """Dry-run egress gateway with one bound agent (HR Assistant): allowed entries are checked against its grants."""
     c, rest = read_client
-    rest.log_entries = [entry(200, "DENIED", "delete_ticket"), entry(403, "DENIED", "close_ticket"),
-                        entry(200, "ALLOWED", "list_tickets")]
-    c.get("/api/studio/gateways", params=Q)                                   # warms the cache (agent inference)
+    rest.log_entries = [entry(tool="delete_ticket"), entry(resource="agents/agentregistry-rt1", method=None),
+                        entry(403, "DENIED", "close_ticket"), entry(resource=None, method=None)]
     r = c.get("/api/studio/gateway-logs", params={**Q, "gateway": "corp-out", "since": "24h", "limit": 50}).json()
-    assert r["counts"] == {"allowed": 1, "denied": 1, "would_deny": 1}
-    assert [e["decision"] for e in r["entries"]] == ["would_deny", "denied", "allowed"]
-    assert r["entries"][0]["agent"] == "HR Assistant" and r["entries"][0]["agent_inferred"] is True
-    req, = rest.log_requests
+    assert r["counts"] == {"allowed": 1, "denied": 1, "would_deny": 1, "unknown": 1}, r["entries"]
+    assert [e["decision"] for e in r["entries"]] == ["allowed", "would_deny", "denied", "unknown"]
+    assert [e["computed"] for e in r["entries"]] == [True, True, False, True]
+    wd = r["entries"][1]
+    assert wd["reason"].startswith("HR Assistant holds no roles/iap.egressor grant")
+    assert wd["agent"] == "HR Assistant" and wd["agent_inferred"] is True
+    assert wd["caller"] == {"engine": F.E1, "display_name": "HR Assistant", "how": "only_bound_agent"}
+    assert r["entries"][2]["reason"] is None and r["dry_run"] is True
+    assert any("not reported by Google" in n for n in r["notes"])
+    req, = rest.log_requests                                          # one bound agent: no caller query
     assert req["resourceNames"] == [f"projects/{F.P}"] and req["orderBy"] == "timestamp desc"
     assert f'logName="projects/{F.P}/logs/networkservices.googleapis.com%2Fgateway_requests"' in req["filter"]
     assert 'resource.labels.gateway_name="corp-out"' in req["filter"] and 'timestamp>="' in req["filter"]
     assert r["console_url"].startswith("https://console.cloud.google.com/logs/query;query=")
     assert c.get("/api/studio/gateway-logs", params={**Q, "gateway": "corp-out", "since": "soon"}).status_code == 400
+
+
+def test_gateway_logs_caller_by_client_cert(read_client, monkeypatch):
+    """Two agents bound: each entry's caller comes from the client certificate seen on its own platform calls."""
+    engines = [dict(e) for e in F.ENGINES]
+    engines[1] = {**engines[1], "spec": {**engines[1]["spec"], "deploymentSpec": engines[0]["spec"]["deploymentSpec"]}}
+    monkeypatch.setattr(F, "ENGINES", engines)
+    c, rest = read_client
+    rest.platform_entries = [platform("111", "fp-hr"), platform("222", "fp-pricing")]
+    rest.log_entries = [entry(tool="delete_ticket", fp="fp-hr"), entry(tool="delete_ticket", fp="fp-pricing"),
+                        entry(tool="delete_ticket", fp="fp-stranger")]
+    r = c.get("/api/studio/gateway-logs", params={**Q, "gateway": "corp-out"}).json()
+    hr, pricing, stranger = r["entries"]
+    assert hr["decision"] == "allowed" and hr["caller"]["how"] == "mtls" and hr["agent"] == "HR Assistant"
+    assert pricing["decision"] == "would_deny" and pricing["agent"] == "Pricing Analyst"
+    assert "Pricing Analyst holds no roles/iap.egressor grant on Tickets MCP" in pricing["reason"]
+    assert stranger["decision"] == "unknown" and stranger["agent"] is None and stranger["caller"] is None
+    main, callers = rest.log_requests
+    assert 'httpRequest.requestUrl:"reasoningEngines/111/"' in callers["filter"]
+    assert callers["filter"].split('timestamp>="')[1][:19] < main["filter"].split('timestamp>="')[1][:19]
+
+
+def test_gateway_logs_enforcing_gateway_is_not_computed(read_client, monkeypatch):
+    exts = [dict(x) for x in F.EXTENSIONS]
+    exts[0] = {**exts[0], "metadata": {"iapPolicyVersion": "V1"}, "failOpen": False}
+    monkeypatch.setattr(F, "EXTENSIONS", exts)
+    c, rest = read_client
+    rest.log_entries = [entry(resource="agents/agentregistry-rt1", method=None), entry(403, "DENIED", "x")]
+    r = c.get("/api/studio/gateway-logs", params={**Q, "gateway": "corp-out"}).json()
+    assert [e["decision"] for e in r["entries"]] == ["allowed", "denied"] and r["dry_run"] is False
+    assert not any(e["computed"] for e in r["entries"])

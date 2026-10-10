@@ -3,7 +3,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "./api/client";
 import type { ApplyConfirm, AuditResp, AuthInfo, ContextInfo, Ctx, GatewaysResp, Intent, Inventory, ModelArmorResp } from "./api/types";
-import { toList, type ApplyRun } from "./lib/apply";
+import { sameChange, toList, type ApplyRun } from "./lib/apply";
 import { load, save } from "./lib/util";
 import { intentKey, newId } from "./lib/policy";
 
@@ -344,11 +344,28 @@ export function StudioProvider({ children }: { children: ReactNode }) {
   const dismissRun = useCallback(() => setRun(null), []);
   const stageUndo = useCallback(
     (intents: Intent[]) => {
-      const staged = intents.map((i) => ({ ...structuredClone(i), id: newId("u") }));
-      setCart((c) => [...c, ...staged]);
-      toast(staged.length === 1 ? "Undo staged in the cart" : `${staged.length} undo items staged in the cart`, "ok");
+      // An undo that is already in the cart (e.g. "enforce" staged from Gateways) isn't staged twice: Apply focuses
+      // on the cart item instead.
+      const existing: string[] = [];
+      const fresh: Intent[] = [];
+      for (const i of intents) {
+        const same = cartRef.current.find((c) => sameChange(c, i));
+        if (same) existing.push(same.id);
+        else fresh.push(i);
+      }
+      const staged = fresh.map((i) => ({ ...structuredClone(i), id: newId("u") }));
+      if (staged.length) {
+        cartRef.current = [...cartRef.current, ...staged];
+        setCart(cartRef.current);
+      }
+      toast(
+        !staged.length
+          ? "Already staged in the cart"
+          : `${staged.length === 1 ? "Undo staged in the cart" : `${staged.length} undo items staged in the cart`}${existing.length ? ` (${existing.length} already there)` : ""}`,
+        "ok",
+      );
       setRun(null);
-      setApplyFocus(staged.map((i) => i.id));
+      setApplyFocus([...existing, ...staged.map((i) => i.id)]);
       goto(6);
     },
     [goto, toast],

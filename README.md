@@ -140,18 +140,26 @@ roles). Model Armor egress screening covers MCP traffic, not A2A.
 Each gateway card on the Gateways step has an **Enforce / Dry run** switch. Agent Gateway has no gateway-level
 enforcement setting: the gateway's IAP `REQUEST_AUTHZ` policy calls an IAP authz extension, and the mode lives there.
 **Enforce** (`failOpen: false`, no `iamEnforcementMode`) blocks calls without a `roles/iap.egressor` grant with a
-403. **Dry run** (`metadata.iamEnforcementMode: DRY_RUN`, `failOpen: true`) lets every call through and only logs
-IAP's decision; it's for testing grants before enforcing them. A dry-run gateway shows an amber banner and a
-**Would have been denied (last 24 h)** list from its request log (`GET /api/studio/gateway-logs`, read-only; needs
-`roles/logging.viewer`), and the audit flags it as high severity with an "enforce" fix.
+403. **Dry run** (`metadata.iamEnforcementMode: DRY_RUN`, `failOpen: true`) lets every call through; it's for testing
+grants before enforcing them. A dry-run gateway shows an amber banner, and the audit flags it as high severity with an
+"enforce" fix. An egress gateway in dry run also shows a **Would have been denied (last 24 h, computed)** list
+(`GET /api/studio/gateway-logs`, read-only; needs `roles/logging.viewer`). Google doesn't report would-be denials:
+in dry run the request log shows those calls exactly like allowed ones (status 200, IAP result `ALLOWED`). Policy
+Studio computes them from each caller's current `roles/iap.egressor` grants on the destination (registry-wide and
+"all agents in project" grants count; `toolName in [...]` and read-only-hint conditions are evaluated; anything it
+can't evaluate is shown as "couldn't be checked", never as a denial; project-level grants aren't read). The log
+doesn't name the caller either: it's matched by the agent's mTLS client certificate (seen on its own Agent Runtime
+calls through the gateway), or is the only agent bound to the gateway.
 
 One extension can serve several gateways, and then they switch together. When it's shared, the switch offers
 **Change for all N gateways** or **Give this gateway its own extension** (recommended): a copy of the extension, then
 the gateway's IAP policy pointed at the copy, then the mode change on the copy, staged together. In apply mode both are
-applied, read back and undoable (dry run and reverting a dedicated extension need the destructive acknowledgement).
-Not verified live yet: flipping an existing extension, how long a flip takes to take effect (typically within a few
-minutes; not yet measured), and updating an existing policy's extension in place; the dry-run log format ("would have
-been denied") hasn't been seen live either.
+applied, read back and undoable (dry run and reverting a dedicated extension need the destructive acknowledgement;
+undoing both is a single revert, since the copy is deleted). A flip takes effect in about 2–3 minutes (measured), and
+can take effect before the operation reports done. Pointing the policy at the copy is an in-place PATCH (verified
+live; about 20 s) with `labels` in the update mask and the current labels re-sent, because a PATCH of the provider
+alone clears the policy's labels. Terraform imports the policy and plans an in-place update (verified live). Not
+verified: `gcloud network-security authz-policies import` updating the existing policy in place.
 
 ## Permissions
 

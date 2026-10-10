@@ -167,6 +167,8 @@ class Applier:
         self._intents: dict[str, Intent] = {}
         self.on_finish = on_finish
         self.failed_extensions: set[str] = set()
+        self.created_copies: set[str] = set()          # tails of IAP extensions a dedicate in this request created
+        self.reverts: dict[str, Any] = {}               # copy tail -> DedSpec of a revert in this request
 
     # ---------------------------------------------------------- events
     def emit(self, intent_id: str, state: str, detail: str = "", **extra: Any) -> None:
@@ -228,7 +230,15 @@ class Applier:
                     self._intents[it.id] = it
                     self.emit(it.id, "failed", "Blocked before any change: " + blocked[it.id]["reason"],
                               blocked=True, fix=blocked[it.id]["fix"])
-            for it in sorted([i for i in intents if i.id not in dups and i.id not in blocked], key=run_order):
+            todo = [i for i in intents if i.id not in dups and i.id not in blocked]
+            for it in todo:
+                if it.kind == "dedicate_extension" and it.revert:
+                    try:
+                        sp = ded_spec(it, self.env, [])
+                        self.reverts[tail(sp.new_ext)] = sp
+                    except Exception:  # noqa: BLE001  (the revert itself reports it)
+                        pass
+            for it in sorted(todo, key=run_order):
                 self._intents[it.id] = it
                 try:
                     handler = {"grant": self._iap, "revoke": self._iap, "bind_gateway": self._bind,
@@ -620,6 +630,11 @@ class Applier:
             return self.emit(it.id, "skipped", f"Not attempted: {sp.ext_id} (the copy for {sp.gateway_id}) wasn't "
                                                "created")
         key = tail(sp.extension)
+        rsp = self.reverts.get(key)
+        if rsp is not None and not self._extension_users(rsp, rsp.new_ext):
+            # Undo of dedicate + flip: the revert in this request deletes the copy, so flipping it first is wasted.
+            return self.emit(it.id, "skipped", f"Not needed: {sp.ext_id} is deleted by the revert in this request "
+                                               f"({rsp.gateway_id} goes back to {short(rsp.source)})")
         self._serialize(key, it.id)
         url = f"{NETWORKSERVICES}/{sp.extension}"
         self.emit(it.id, "running", f"Reading {sp.ext_id}")
@@ -636,12 +651,15 @@ class Applier:
         others = f" (also {', '.join(sp.shared_with)})" if sp.shared_with else ""
         self.emit(it.id, "running", f"PATCH {sp.ext_id} metadata + failOpen → {label}{others}")
         op = self.writer.patch_authz_extension(f"{url}?updateMask=metadata,failOpen", body) or {}
-        undo = it.model_copy(update={"id": f"undo-{it.id}", "mode": cur, "extension": sp.extension})
+        # The copy a dedicate in this request just created has no "previous mode" to go back to: its undo is the
+        # dedicate's revert (which deletes it), so the flip gets none.
+        undo = None if key in self.created_copies else \
+            it.model_copy(update={"id": f"undo-{it.id}", "mode": cur, "extension": sp.extension})
         self.emit(it.id, "done", f"Update of {sp.ext_id} started", operation=op.get("name"), undo=undo)
         self._background(key, self._finish_enf, it.id, op, url, sp.mode, body["failOpen"], sp.ext_id, undo)
 
     def _finish_enf(self, intent_id: str, op: dict, url: str, mode: str, fail_open: bool, ext_id: str,
-                    undo: Intent) -> None:
+                    undo: Optional[Intent]) -> None:
         name = op.get("name") or None
         ok, msg = self._wait(intent_id, op, NETWORKSERVICES, "Extension update")
         if ok is None:
@@ -650,8 +668,9 @@ class Applier:
             return self.emit(intent_id, "failed", msg, operation=name, undo=undo)
         back = self.rest.get(url, ok404=True) or {}
         if ext_mode(back) == mode and bool(back.get("failOpen")) == fail_open:
+            extra = "" if undo else f". Undo: revert giving the gateway its own extension (deletes {ext_id})"
             return self.emit(intent_id, "verified", f"Read back: {ext_id} is in {MODE_LABEL[mode].lower()} (failOpen "
-                             f"{str(fail_open).lower()}); {ENF_LEARN}", operation=name, undo=undo)
+                             f"{str(fail_open).lower()}); {ENF_LEARN}{extra}", operation=name, undo=undo)
         self.emit(intent_id, "failed", f"Read back: {ext_id} is in {MODE_LABEL.get(ext_mode(back) or '', '?')} "
                   f"(failOpen {str(bool(back.get('failOpen'))).lower()}), expected {MODE_LABEL[mode].lower()}",
                   operation=name, undo=undo)
@@ -710,9 +729,11 @@ class Applier:
             return self.emit(it.id, "failed" if ok is not None else "done",
                              msg or f"Read back: {sp.new_id} is missing", operation=op.get("name"),
                              undo=undo if ok is None else None)
+        self.created_copies.add(tail(sp.new_ext))
+        labels = pol.get("labels") or {}
         self.emit(it.id, "running", f"Pointing {sp.policy_id} at {sp.new_id}", operation=op.get("name"))
         try:
-            op2 = self.writer.patch_authz_policy(ded_policy_url(sp), provider_body(sp.new_ext)) or {}
+            op2 = self.writer.patch_authz_policy(ded_policy_url(sp), provider_body(sp.new_ext, labels)) or {}
         except Exception as e:
             fail(sp.new_ext)
             return self.emit(it.id, "failed", f"{sp.new_id} was created, but pointing {sp.policy_id} at it failed: "
@@ -725,7 +746,12 @@ class Applier:
             return self.emit(it.id, "failed", msg, operation=op2.get("name"), undo=undo)
         back = self.rest.get(pol_url, ok404=True) or {}
         if tail(self._policy_ext(back)) == tail(sp.new_ext):
-            return self.emit(it.id, "verified", f"Read back: {sp.gateway_id}'s IAP policy uses {sp.new_id}",
+            if (back.get("labels") or {}) != labels:
+                return self.emit(it.id, "failed", f"Read back: {sp.policy_id} uses {sp.new_id}, but its labels changed "
+                                                  f"({_labels_text(labels)} → {_labels_text(back.get('labels'))})",
+                                 operation=op2.get("name"), undo=undo)
+            return self.emit(it.id, "verified", f"Read back: {sp.gateway_id}'s IAP policy uses {sp.new_id}"
+                             + (f" (labels kept: {_labels_text(labels)})" if labels else ""),
                              operation=op2.get("name"), undo=undo)
         fail(sp.new_ext)
         self.emit(it.id, "failed", f"Read back: {sp.policy_id} uses {short(self._policy_ext(back))}, expected "
@@ -742,9 +768,10 @@ class Applier:
         if not self.rest.get(f"{NETWORKSERVICES}/{sp.source}", ok404=True):
             return self.emit(it.id, "failed", f"{short(sp.source)} doesn't exist any more; not reverting")
         cur = self._policy_ext(pol)
+        labels = pol.get("labels") or {}
         if tail(cur) == tail(sp.new_ext):
             self.emit(it.id, "running", f"Pointing {sp.policy_id} back at {short(sp.source)}")
-            op = self.writer.patch_authz_policy(ded_policy_url(sp), provider_body(sp.source)) or {}
+            op = self.writer.patch_authz_policy(ded_policy_url(sp), provider_body(sp.source, labels)) or {}
             ok, msg = self._wait(it.id, op, NETWORKSECURITY, "Policy update")
             if ok is not True:
                 return self.emit(it.id, "failed" if ok is False else "done", msg, operation=op.get("name"))
@@ -766,6 +793,9 @@ class Applier:
                 return self.emit(it.id, "failed" if ok is False else "done", msg, operation=op.get("name"))
         back = self.rest.get(pol_url, ok404=True) or {}
         gone = not self.rest.get(new_url, ok404=True)
+        if (back.get("labels") or {}) != labels:
+            return self.emit(it.id, "failed", f"Read back: {sp.policy_id}'s labels changed ({_labels_text(labels)} → "
+                                              f"{_labels_text(back.get('labels'))})", undo=undo)
         if tail(self._policy_ext(back)) == tail(sp.source) and gone:
             return self.emit(it.id, "verified", f"Read back: {sp.gateway_id} uses {short(sp.source)} again and "
                                                 f"{sp.new_id} is gone", undo=undo)
@@ -781,6 +811,10 @@ class Applier:
             return []
         return [short(p.get("name", "")) for p in pols
                 if tail(self._policy_ext(p)) == tail(ext) and tail(p.get("name", "")) != tail(sp.policy)]
+
+
+def _labels_text(labels: Optional[dict]) -> str:
+    return ", ".join(f"{k}={v}" for k, v in sorted((labels or {}).items())) or "none"
 
 
 def _filters_of(template: dict) -> Any:

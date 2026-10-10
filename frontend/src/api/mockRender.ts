@@ -368,7 +368,7 @@ function enforcementOutputs(ctx: Ctx, w: World, i: Intent, all: Intent[]): { out
   const enf = g?.enforcement;
   const head = `# ${intentEnglish(i)}\n`;
   const warnings: string[] = [];
-  const notes = ["The enforcement mode lives on the IAP authz extension, not on the gateway.", "Typically takes effect within a few minutes; not yet measured."];
+  const notes = ["The enforcement mode lives on the IAP authz extension, not on the gateway.", "Takes effect in about 2–3 minutes (measured), sometimes before the operation reports done."];
   const api = "https://networkservices.googleapis.com/v1";
   if (i.kind === "set_enforcement") {
     const ext = i.extension ?? enf?.extension ?? "EXTENSION";
@@ -380,7 +380,7 @@ function enforcementOutputs(ctx: Ctx, w: World, i: Intent, all: Intent[]): { out
     const body = JSON.stringify({ metadata: md, failOpen: dry });
     if (shared.length && i.scope === "shared") warnings.push(`This extension also controls ${shared.join(", ")}: they switch to ${dry ? "dry run" : "enforce"} too.`);
     if (shared.length && i.scope !== "shared") warnings.push(`${id} also controls ${shared.join(", ")}, so they change too. Give ${g?.id} its own extension first.`);
-    if (dry) warnings.push(`Dry run: once applied, nothing is blocked on ${[g?.id, ...(i.scope === "shared" ? shared : [])].join(", ")}; IAP denials are only logged.`);
+    if (dry) warnings.push(`Dry run: once applied, nothing is blocked on ${[g?.id, ...(i.scope === "shared" ? shared : [])].join(", ")} (calls IAP would deny pass and are logged as allowed).`);
     const proj = ext.split("/")[1] ?? w.GP;
     const yaml = [`name: ${id}`, `service: iap.googleapis.com`, `timeout: 1s`, `failOpen: ${dry}`, `metadata:`, `  iapPolicyVersion: V1`, ...(dry ? [`  iamEnforcementMode: DRY_RUN`] : [])].join("\n");
     return {
@@ -400,7 +400,7 @@ function enforcementOutputs(ctx: Ctx, w: World, i: Intent, all: Intent[]): { out
   const copy = src.replace(/\/authzExtensions\/[^/]+$/, `/authzExtensions/${name}`);
   const policy = enf?.policy ?? "POLICY";
   const proj = src.split("/")[1] ?? w.GP;
-  const patch = `curl -sS --fail-with-body -X PATCH 'https://networksecurity.googleapis.com/v1/${policy}?updateMask=customProvider.authzExtension.resources' \\\n  -H "Authorization: Bearer $(gcloud auth print-access-token)" -H "Content-Type: application/json" \\\n  -d '{"customProvider":{"authzExtension":{"resources":["${i.revert ? src : copy}"]}}}'`;
+  const patch = `curl -sS --fail-with-body -X PATCH 'https://networksecurity.googleapis.com/v1/${policy}?updateMask=customProvider.authzExtension.resources,labels' \\\n  -H "Authorization: Bearer $(gcloud auth print-access-token)" -H "Content-Type: application/json" \\\n  -d '{"customProvider":{"authzExtension":{"resources":["${i.revert ? src : copy}"]}},"labels":{"team":"platform"}}'`;
   if (i.revert)
     return {
       resource: policy,

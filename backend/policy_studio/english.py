@@ -124,7 +124,7 @@ def intent_english(intent: Intent) -> str:
     if k == "set_enforcement":
         g = _short(gw.name) if gw else "?"
         return (f"Enforce IAP on gateway {g}." if intent.mode == "ENFORCE" else
-                f"Put gateway {g} in dry run: IAP denials are only logged, nothing is blocked.")
+                f"Put gateway {g} in dry run: nothing is blocked (calls IAP would deny pass and are logged as allowed).")
     if k == "dedicate_extension":
         g = _short(gw.name) if gw else "?"
         new = _short(intent.new_name or "") or "a new extension"

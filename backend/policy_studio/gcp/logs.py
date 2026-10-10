@@ -4,17 +4,19 @@
   filter: logName="projects/P/logs/networkservices.googleapis.com%2Fgateway_requests"
           AND resource.labels.gateway_name="GATEWAY" AND timestamp>="SINCE"
 
-Entry format, as seen live on an enforcing egress gateway (Oct 2026):
+Entry format, as seen live (Oct 2026):
   jsonPayload.authzPolicyInfo        {result: ALLOWED|DENIED, policies: [{name, result}]}  (absent on some entries)
   jsonPayload.agentGatewayInfo       {agentRegistryResource, mcpInfo?: {method: "tools/call", parameter: TOOL}}
   jsonPayload.enforcedGatewaySecurityPolicy.hostname, jsonPayload.tlsSniHostname
+  jsonPayload.mtls.clientCertSha256Fingerprint   the calling agent's client certificate (per engine; rotates)
   httpRequest.status                 403 when IAP denied the call
-The caller's identity isn't in the entry.
+The caller's identity isn't in the entry. In dry run a call IAP would deny is logged exactly like an allowed one
+(status 200, result ALLOWED, every policy ALLOWED), so the log alone can't tell them apart: dryrun.py computes it.
 
-Classification (tolerant; the dry-run format has NOT been seen live): a DENIED IAP result with a 2xx/3xx status is
-"would_deny" (dry run: IAP said no, the request went through); DENIED with a 4xx/5xx (or no status) is "denied";
-any result or policy entry that mentions DRY_RUN together with a deny is "would_deny" too; everything else is
-"allowed".
+Classification here is what the log says: a DENIED result (or status 403) is "denied", everything else "allowed".
+
+Caller: the fingerprint is the same on the engine's own platform calls through the gateway, whose URL names it
+(.../reasoningEngines/<id>/...), so caller_map learns {fingerprint: engine id} from those (a second entries:list).
 """
 from __future__ import annotations
 
@@ -65,39 +67,54 @@ def _short(name: str) -> str:
     return (name or "").rstrip("/").split("/")[-1]
 
 
-def _is_deny(v: Any) -> bool:
-    return "DEN" in str(v or "").upper()
-
-
-def _is_dry(v: Any) -> bool:
-    return "DRY" in str(v or "").upper()
-
-
 def classify(entry: dict[str, Any]) -> str:
-    """allowed | denied | would_deny (see the module docstring)."""
+    """allowed | denied, as logged (see the module docstring; would_deny is computed by dryrun.py)."""
     jp = entry.get("jsonPayload") or {}
     info = jp.get("authzPolicyInfo") or {}
     pols = [p for p in info.get("policies") or [] if isinstance(p, dict)]
-    results = [info.get("result")] + [p.get("result") for p in pols]
-    denied = any(_is_deny(r) for r in results)
-    if not denied:
-        return "allowed"
-    dry_marked = any(_is_dry(r) for r in results) or any(
-        _is_dry(p.get(k)) for p in pols for k in ("mode", "enforcementMode", "dryRun", "details")) or \
-        _is_dry(info.get("mode")) or info.get("dryRun") is True or any(p.get("dryRun") is True for p in pols)
-    status = (entry.get("httpRequest") or {}).get("status")
+    if any(str(r or "").upper() == "DENIED" for r in [info.get("result")] + [p.get("result") for p in pols]):
+        return "denied"
     try:
-        code = int(status) if status is not None else None
+        return "denied" if int((entry.get("httpRequest") or {}).get("status")) == 403 else "allowed"
     except (TypeError, ValueError):
-        code = None
-    if dry_marked or (code is not None and code < 400):
-        return "would_deny"
-    return "denied"
+        return "allowed"
+
+
+def fingerprint(entry: dict[str, Any]) -> Optional[str]:
+    return ((entry.get("jsonPayload") or {}).get("mtls") or {}).get("clientCertSha256Fingerprint") or None
+
+
+def caller_filter(projects: list[str], gateway: str, since_ts: str, engine_ids: list[str]) -> str:
+    """The engines' own platform calls through the gateway (their URL names the engine)."""
+    urls = " OR ".join(f'httpRequest.requestUrl:"reasoningEngines/{e}/"' for e in engine_ids)
+    return f"{log_filter(projects, gateway, since_ts)} AND ({urls})"
+
+
+def caller_map(entries: list[dict[str, Any]], engine_ids: list[str]) -> dict[str, str]:
+    """{client cert fingerprint: engine id} from platform entries; a fingerprint seen with more than one engine is
+    dropped (ambiguous)."""
+    seen: dict[str, set[str]] = {}
+    for e in entries:
+        fp, url = fingerprint(e), (e.get("httpRequest") or {}).get("requestUrl") or ""
+        for eid in engine_ids:
+            if fp and f"reasoningEngines/{eid}/" in url:
+                seen.setdefault(fp, set()).add(eid)
+    return {fp: next(iter(v)) for fp, v in seen.items() if len(v) == 1}
+
+
+def fetch_callers(r: Rest, projects: list[str], gateway: str, since_ts: str, engine_ids: list[str]) -> dict[str, str]:
+    """caller_map over the engines' platform calls since `since_ts` (one page of up to 500 entries)."""
+    if not engine_ids:
+        return {}
+    body = {"resourceNames": [f"projects/{p}" for p in dict.fromkeys(projects)],
+            "filter": caller_filter(projects, gateway, since_ts, engine_ids), "orderBy": "timestamp desc",
+            "pageSize": 500}
+    return caller_map((r.post(f"{LOGGING}/entries:list", json=body) or {}).get("entries") or [], engine_ids)
 
 
 def parse_entry(entry: dict[str, Any], project: str, labels: Optional[dict[str, str]] = None) -> dict[str, Any]:
     """One log entry -> {decision, status, host, mcp_tool, mcp_method, destination, registry_resource, policies,
-    timestamp, method, url, console_url, insert_id}. `labels`: {registry resource tail: display name}."""
+    timestamp, method, url, console_url, insert_id, client_cert}. `labels`: {registry resource tail: display name}."""
     jp = entry.get("jsonPayload") or {}
     http = entry.get("httpRequest") or {}
     gi = jp.get("agentGatewayInfo") or {}
@@ -129,12 +146,20 @@ def parse_entry(entry: dict[str, Any], project: str, labels: Optional[dict[str, 
         "url": url,
         "insert_id": entry.get("insertId"),
         "console_url": console_url(project, q, ts) if q else None,
+        "client_cert": fingerprint(entry),
     }
+
+
+def count(entries: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {"allowed": 0, "denied": 0, "would_deny": 0, "unknown": 0}
+    for e in entries:
+        counts[e["decision"]] = counts.get(e["decision"], 0) + 1
+    return counts
 
 
 def fetch(r: Rest, projects: list[str], gateway: str, since: str = "24h", limit: int = 200,
           labels: Optional[dict[str, str]] = None) -> dict[str, Any]:
-    """Recent request log entries of one gateway, newest first, classified."""
+    """Recent request log entries of one gateway, newest first, classified as logged (allowed / denied)."""
     limit = max(1, min(int(limit or 200), MAX_LIMIT))
     since_ts = parse_since(since)
     flt = log_filter(projects, gateway, since_ts)
@@ -152,8 +177,5 @@ def fetch(r: Rest, projects: list[str], gateway: str, since: str = "24h", limit:
             break
     project = projects[0]
     out = [parse_entry(e, project, labels) for e in entries[:limit]]
-    counts = {"allowed": 0, "denied": 0, "would_deny": 0}
-    for e in out:
-        counts[e["decision"]] += 1
-    return {"gateway": gateway, "since": since_ts, "filter": flt, "entries": out, "counts": counts,
+    return {"gateway": gateway, "since": since_ts, "filter": flt, "entries": out, "counts": count(out),
             "truncated": bool(token) or len(entries) > limit, "console_url": console_url(project, flt)}

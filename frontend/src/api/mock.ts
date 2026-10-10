@@ -10,8 +10,9 @@
 import type { ApplyConfirm, ApplyEvent, AuthInfo, Binding, Ctx, GatewayLogEntry, GatewayLogsResp, GatewaysResp, Intent, PreflightItem, PreflightResult } from "./types";
 import { buildWorld, MOCK_NUMBER, refreshEnforcement, templateFrom, type World } from "./mockData";
 import { mockDiff, mockRender } from "./mockRender";
-import { ROLE, conditionFor, intentEnglish, intentKey, newId } from "../lib/policy";
+import { ROLE, conditionFor, intentEnglish, intentKey, newId, projectPrincipalSet } from "../lib/policy";
 import { NO_IDENTITY_REASON } from "../components/Redeploy";
+import { accessFromCondition } from "../lib/grants";
 
 const clone = <T,>(x: T): T => JSON.parse(JSON.stringify(x));
 
@@ -155,50 +156,93 @@ export const gateways = (ctx: Ctx): GatewaysResp => ({
     "Agent Runtime agents created before 2026-04-29 can't be bound to a gateway.",
   ],
 });
-/** Mirrors GET /gateway-logs: a few would-be-denied calls on a dry-run gateway, denials on an enforcing one. */
+/** Like dryrun.check in the backend: would the caller's current roles/iap.egressor grants on the destination allow
+ *  this call? [decision, reason]. Conditions other than tools-by-name and read-only-by-hint give "unknown". */
+function mockCheck(w: World, caller: { display_name: string; principal: string } | null, destName: string, tool: string | null): ["allowed" | "would_deny" | "unknown", string] {
+  const inv = w.inventory;
+  const item = [...inv.agents, ...inv.mcp_servers, ...inv.endpoints].find((x) => x.name === destName);
+  const dest = item?.display_name ?? short(destName);
+  if (!caller) return ["unknown", "The log entry doesn't name the caller, and its client certificate didn't match an agent bound to this gateway."];
+  const projectSet = projectPrincipalSet(caller.principal, undefined);
+  const mcp = inv.mcp_servers.find((m) => m.name === destName);
+  const limited: string[] = [];
+  for (const b of inv.access[destName] ?? []) {
+    if (b.role !== ROLE) continue;
+    const through = b.member === caller.principal ? "" : b.member === projectSet || b.member === "allUsers" || b.member === "allAuthenticatedUsers" ? ` through ${b.member_label}` : null;
+    if (through === null) continue;
+    const acc = accessFromCondition(b.condition?.expression);
+    const ok =
+      acc?.mode === "all" ? true
+      : acc?.mode === "tools" ? !tool || (acc.tools ?? []).includes(tool)
+      : acc?.mode === "read_only_hint" ? (!tool ? true : (mcp?.tools.find((t) => t.name === tool)?.read_only ?? null))
+      : null;
+    const cond = b.condition ? ` (condition: ${b.condition.title || b.condition.expression})` : "";
+    if (ok) return ["allowed", `${caller.display_name} holds roles/iap.egressor on ${dest}${through}${cond}.`];
+    if (ok === null) return ["unknown", `The condition on ${caller.display_name}'s grant on ${dest} can't be evaluated here${cond}.`];
+    limited.push(b.condition?.title ?? "");
+  }
+  if (limited.length) return ["would_deny", `${caller.display_name}'s roles/iap.egressor grant on ${dest} is limited (${limited.join("; ")}) and doesn't cover ${tool ?? "this call"}.`];
+  return ["would_deny", `${caller.display_name} holds no roles/iap.egressor grant on ${dest} (or on the whole Agent Registry).`];
+}
+
+/** Mirrors GET /gateway-logs. Every call is logged as allowed on a dry-run gateway (as Google does); would-deny is
+ *  computed from the current grants. On an enforcing gateway the same calls are logged allowed / denied (403). */
 export function gatewayLogs(ctx: Ctx, gateway: string, since: string): GatewayLogsResp {
   const w = world(ctx);
   const g = w.gateways.find((x) => x.name === gateway || x.id === short(gateway));
-  const dry = g?.enforcement?.mode === "DRY_RUN";
+  const dry = g?.type === "egress" && g?.enforcement?.mode === "DRY_RUN";
   const bound = (g?.bound_engines ?? []).filter((b) => b.direction === g?.type);
-  const agent = bound.length === 1 ? bound[0].display_name : null;
-  const reg = (kind: string, id: string) => `projects/${MOCK_NUMBER}/locations/${w.R}/${kind}/${id}`;
+  const engines = bound.map((b) => w.inventory.engines.find((e) => e.name === b.engine)).filter((e): e is NonNullable<typeof e> => !!e);
   const now = Date.now();
-  const mk = (min: number, decision: GatewayLogEntry["decision"], kind: string, id: string, host: string, tool: string | null): GatewayLogEntry => {
-    const ts = new Date(now - min * 60_000).toISOString();
-    const insert = `mock${min}${decision}`;
-    return {
-      decision,
-      status: decision === "denied" ? 403 : 200,
-      host,
-      mcp_tool: tool,
-      mcp_method: tool ? "tools/call" : null,
-      registry_resource: reg(kind, id),
-      destination: id,
-      policies: [{ name: g?.enforcement?.policy ?? "", result: decision === "allowed" ? "ALLOWED" : "DENIED" }],
-      authz_result: decision === "allowed" ? "ALLOWED" : "DENIED",
-      timestamp: ts,
-      method: "POST",
-      url: `https://${host}/mcp`,
-      insert_id: insert,
-      console_url: `https://console.cloud.google.com/logs/query;query=insertId%3D%22${insert}%22?project=${encodeURIComponent(w.GP)}`,
-      agent,
-      agent_inferred: agent !== null,
-    };
-  };
-  const deny: GatewayLogEntry["decision"] = dry ? "would_deny" : "denied";
-  const entries: GatewayLogEntry[] = g
-    ? [
-        mk(4, deny, "mcpServers", "hr-directory-mcp-0f3c", "hr-directory-mcp-a1b2c3-uk.a.run.app", "delete_employee_record"),
-        mk(9, "allowed", "mcpServers", "tickets-mcp-6a21", "tickets-mcp-a1b2c3-uk.a.run.app", "list_tickets"),
-        mk(17, deny, "mcpServers", "tickets-mcp-6a21", "tickets-mcp-a1b2c3-uk.a.run.app", "close_ticket"),
-        mk(26, "allowed", "endpoints", "aiplatform-googleapis", `${w.R}-aiplatform.googleapis.com`, null),
-        mk(48, deny, "agents", "billing-agent-91d0", "billing-agent-d4e5f6-uk.a.run.app", null),
-        mk(95, deny, "mcpServers", "hr-directory-mcp-0f3c", "hr-directory-mcp-a1b2c3-uk.a.run.app", "update_employee_record"),
-        mk(240, "allowed", "agents", "kb-agent-4c1e", "kb-agent-a1b2c3-uk.a.run.app", null),
-      ]
-    : [];
-  const counts = { allowed: 0, denied: 0, would_deny: 0 };
+  const byId = (coll: { name: string; id: string }[], id: string) => coll.find((x) => x.id === id)?.name ?? "";
+  // [minutes ago, caller engine (index into the bound agents; -1 = certificate not recognized), destination, tool, host]
+  const calls: [number, number, string, string | null, string][] = [
+    [4, 0, byId(w.inventory.mcp_servers, "tickets-mcp-6a21"), "close_ticket", "tickets-mcp-a1b2c3-uk.a.run.app"],
+    [9, 1, byId(w.inventory.mcp_servers, "tickets-mcp-6a21"), "get_ticket", "tickets-mcp-a1b2c3-uk.a.run.app"],
+    [17, 1, byId(w.inventory.mcp_servers, "tickets-mcp-6a21"), "update_ticket", "tickets-mcp-a1b2c3-uk.a.run.app"],
+    [26, 0, byId(w.inventory.endpoints, "aiplatform-googleapis"), null, `${w.R}-aiplatform.googleapis.com`],
+    [48, 0, byId(w.inventory.agents, "billing-agent-91d0"), null, "billing-agent-d4e5f6-uk.a.run.app"],
+    [95, 1, byId(w.inventory.mcp_servers, "hr-directory-mcp-0f3c"), "delete_employee_record", "hr-directory-mcp-a1b2c3-uk.a.run.app"],
+    [130, -1, byId(w.inventory.mcp_servers, "tickets-mcp-6a21"), "list_tickets", "tickets-mcp-a1b2c3-uk.a.run.app"],
+    [240, 0, byId(w.inventory.agents, "kb-agent-4c1e"), null, "kb-agent-a1b2c3-uk.a.run.app"],
+  ];
+  const regRes = (name: string) => name.replace(/^projects\/[^/]+\//, `projects/${MOCK_NUMBER}/`);
+  const entries: GatewayLogEntry[] = !g
+    ? []
+    : calls
+        .filter(([, who]) => who < engines.length)
+        .map(([min, who, destName, tool, host]) => {
+          const eng = who >= 0 ? engines[who] : engines.length === 1 ? engines[0] : null;
+          const how = who >= 0 && engines.length > 1 ? ("mtls" as const) : ("only_bound_agent" as const);
+          const [verdict, reason] = mockCheck(w, eng ?? null, destName, tool);
+          const decision: GatewayLogEntry["decision"] = dry ? verdict : verdict === "would_deny" ? "denied" : "allowed";
+          const ts = new Date(now - min * 60_000).toISOString();
+          const insert = `mock${min}${decision}`;
+          const logged = decision === "denied" ? "DENIED" : "ALLOWED";
+          return {
+            decision,
+            status: decision === "denied" ? 403 : 200,
+            host,
+            mcp_tool: tool,
+            mcp_method: tool ? "tools/call" : null,
+            registry_resource: regRes(destName),
+            destination: short(destName),
+            policies: [{ name: g.enforcement?.policy ?? "", result: logged }],
+            authz_result: logged,
+            timestamp: ts,
+            method: "POST",
+            url: `https://${host}/mcp`,
+            insert_id: insert,
+            console_url: `https://console.cloud.google.com/logs/query;query=insertId%3D%22${insert}%22?project=${encodeURIComponent(w.GP)}`,
+            agent: eng?.display_name ?? null,
+            agent_inferred: !!eng,
+            caller: eng ? { engine: eng.name, display_name: eng.display_name, how } : null,
+            client_cert: who >= 0 ? `mock-cert-${who}` : "mock-cert-unknown",
+            computed: dry,
+            reason: dry ? reason : null,
+          };
+        });
+  const counts = { allowed: 0, denied: 0, would_deny: 0, unknown: 0 };
   for (const e of entries) counts[e.decision]++;
   const filter = `logName="projects/${w.GP}/logs/networkservices.googleapis.com%2Fgateway_requests" AND resource.labels.gateway_name="${short(gateway)}"`;
   return {
@@ -211,6 +255,7 @@ export function gatewayLogs(ctx: Ctx, gateway: string, since: string): GatewayLo
     console_url: `https://console.cloud.google.com/logs/query;query=${encodeURIComponent(filter)}?project=${encodeURIComponent(w.GP)}`,
     notes: [`Mock log entries (since ${since}).`],
     errors: [],
+    dry_run: dry,
   };
 }
 
@@ -460,10 +505,20 @@ export async function* applyStream(ctx: Ctx, intents: Intent[], confirm: ApplyCo
     }
   }
   intents = intents.filter((i) => pre.get(i.id)?.status === "ok" || !pre.get(i.id));
+  // Like the backend: a flip of a copy that a revert in this request deletes is skipped, and a flip of a copy that a
+  // dedicate in this request created gets no undo (the dedicate's revert undoes both).
+  const reverted = new Set(intents.filter((i) => i.kind === "dedicate_extension" && i.revert).map((i) => i.new_name));
+  const created = new Set<string>();
   for (const [n, i] of [...intents].sort((a, b) => runOrder(a) - runOrder(b)).entries()) {
     const w = world(ctx);
     const d = mockDiff(w, [i]).items[0];
     yield { intent_id: i.id, state: "running", detail: "Applying…" };
+    if (i.kind === "set_enforcement" && reverted.has(short(i.extension))) {
+      await sleep(300, signal);
+      counts.skipped++;
+      yield { intent_id: i.id, state: "skipped", detail: `Not needed: ${short(i.extension)} is deleted by the revert in this request.` };
+      continue;
+    }
     if (d.status === "present" || d.status === "absent") {
       await sleep(400, signal);
       counts.skipped++;
@@ -509,7 +564,9 @@ export async function* applyStream(ctx: Ctx, intents: Intent[], confirm: ApplyCo
           };
       continue;
     }
-    const undo = inverse(w, i);
+    const fresh = i.kind === "set_enforcement" && created.has(short(i.extension));
+    const undo = fresh ? null : inverse(w, i);
+    if (i.kind === "dedicate_extension" && !i.revert && i.new_name) created.add(i.new_name);
     applied.push(structuredClone(i));
     yield { intent_id: i.id, state: "done", detail: lro ? "Operation finished. Reading back…" : "setIamPolicy succeeded. Reading back…", operation: op };
     await sleep(lro ? 1300 : 600, signal);
@@ -525,7 +582,7 @@ export async function* applyStream(ctx: Ctx, intents: Intent[], confirm: ApplyCo
             : i.kind.endsWith("gateway")
               ? "Read back: agentGatewayConfig matches."
               : i.kind === "set_enforcement"
-                ? `Read back: ${short(i.extension)} is in ${i.mode === "DRY_RUN" ? "dry run (failOpen true)" : "enforce (failOpen false)"}. Typically takes effect within a few minutes; not yet measured.`
+                ? `Read back: ${short(i.extension)} is in ${i.mode === "DRY_RUN" ? "dry run (failOpen true)" : "enforce (failOpen false)"}. Takes effect in about 2–3 minutes (measured), sometimes before the operation reports done.${fresh ? ` Undo: revert giving the gateway its own extension (deletes ${short(i.extension)}).` : ""}`
                 : i.kind === "dedicate_extension"
                   ? i.revert
                     ? `Read back: ${short(i.gateway?.name)} uses ${short(i.source_extension)} again and ${i.new_name} is gone.`

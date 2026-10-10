@@ -96,7 +96,7 @@ function BindPicker({ gw, onDone }: { gw: Gateway; onDone: () => void }) {
 
 const EXT_NAME_RE = /^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$/;
 const MODE_TEXT: Record<EnforcementMode, string> = { ENFORCE: "Enforce", DRY_RUN: "Dry run" };
-const PROPAGATION = "Typically takes effect within a few minutes; not yet measured.";
+const PROPAGATION = "Takes effect in about 2–3 minutes (measured), sometimes before the operation reports done.";
 
 const extFull = (source: string, name: string) => source.replace(/\/authzExtensions\/[^/]+$/, `/authzExtensions/${name}`);
 const listText = (xs: string[]) => (xs.length <= 1 ? xs.join("") : `${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`);
@@ -157,7 +157,7 @@ function EnforcementChange({ gw, enf, target, onDone }: { gw: Gateway; enf: Gate
       </div>
       <p className="small">
         {dry
-          ? "IAP keeps deciding and logging, but every call goes through, including ones without a grant. Use it to see what enforcing would block, not as a steady state."
+          ? "Every call goes through, including ones without a grant. Google logs those as allowed; Policy Studio shows which ones enforcing would block, computed from the current grants. Use it for testing, not as a steady state."
           : "Calls without a matching roles/iap.egressor grant are blocked with 403. Check the “would have been denied” list first so enforcing doesn't break calls that should be allowed."}
       </p>
       {shared.length > 0 && (
@@ -266,17 +266,51 @@ function WouldDeny({ gw }: { gw: Gateway }) {
     void load(false);
   }, [load]);
   const rows = (data?.entries ?? []).filter((e) => e.decision === "would_deny");
+  const unknown = (data?.entries ?? []).filter((e) => e.decision === "unknown");
+  const checked = (data?.entries ?? []).filter((e) => e.computed).length;
   const shown = all ? rows : rows.slice(0, 6);
   const dest = (e: GatewayLogEntry) => {
     const r = e.registry_resource;
     const t = r && r.includes("/locations/") ? r.slice(r.indexOf("/locations/") + 1) : "";
     return labels.get(t) ?? e.destination ?? e.host;
   };
+  const how = (e: GatewayLogEntry) =>
+    e.caller?.how === "mtls"
+      ? "Request logs don't name the caller; matched by the agent's mTLS client certificate, seen on its own Agent Runtime calls through this gateway."
+      : "Request logs don't name the caller; this is the only agent bound to the gateway.";
+  const row = (e: GatewayLogEntry, n: number) => (
+    <li key={(e.insert_id ?? "") + n} className={e.decision === "unknown" ? "wd-unknown" : ""}>
+      <span className="wd-who">
+        <RobotIcon size={13} /> {e.agent ?? "unknown caller"}
+        {e.agent_inferred && (
+          <span className="tiny muted" title={how(e)}>
+            {" "}
+            (inferred)
+          </span>
+        )}
+      </span>
+      <ArrowIcon size={12} />
+      <span className="wd-what">
+        {dest(e)}
+        {e.mcp_tool && <span className="mono tiny"> · {e.mcp_tool}</span>}
+      </span>
+      <span className="grow" />
+      <span className="tiny muted" title={e.timestamp}>
+        {fmtTime(e.timestamp)}
+      </span>
+      {e.console_url && (
+        <a className="tiny" href={e.console_url} target="_blank" rel="noreferrer" aria-label="Open this entry in Cloud Logging">
+          log
+        </a>
+      )}
+      {e.reason && <span className="wd-why tiny muted">{e.reason}</span>}
+    </li>
+  );
   return (
     <section className="would-deny" aria-label="Would have been denied in the last 24 hours">
       <div className="would-deny-head">
         <h5>
-          Would have been denied <span className="muted">(last 24 h)</span>
+          Would have been denied <span className="muted">(last 24 h, computed)</span>
         </h5>
         {data && <Badge tone={rows.length ? "amber" : "neutral"}>{rows.length}{data.truncated ? "+" : ""}</Badge>}
         <span className="grow" />
@@ -293,6 +327,10 @@ function WouldDeny({ gw }: { gw: Gateway }) {
           </Tip>
         )}
       </div>
+      <p className="tiny muted wd-caveat">
+        Google logs these calls as allowed: in dry run the request log doesn't say what IAP would have denied. Policy Studio computes it from each caller's <b>current</b> roles/iap.egressor grants on the destination (not
+        project-level ones), and the caller is inferred, since the log doesn't name it.
+      </p>
       {err ? (
         <p className="small field-error">
           Couldn't read the gateway's request log: {err}
@@ -302,41 +340,23 @@ function WouldDeny({ gw }: { gw: Gateway }) {
         <Spinner label="Reading the request log…" />
       ) : rows.length === 0 ? (
         <p className="small muted">
-          Nothing would have been denied in the last 24 hours ({plural(data.entries.length, "request")} logged
-          {data.entries.length ? `, ${data.counts.denied} denied anyway` : ""}). Either every call had a grant, or there was little traffic. Dry-run entries are recognized as IAP “denied” on a call that went through; that hasn't been checked against real dry-run logs yet.
+          No call in the last 24 hours would have been denied by the current grants ({plural(checked, "allowed call")} checked
+          {data.entries.length > checked ? `, ${plural(data.entries.length - checked, "other entry", "other entries")}` : ""}). Either every call has a grant, or there was little traffic.
         </p>
       ) : (
         <>
-          <ul className="would-deny-list">
-            {shown.map((e, n) => (
-              <li key={(e.insert_id ?? "") + n}>
-                <span className="wd-who">
-                  <RobotIcon size={13} /> {e.agent ?? "an agent"}
-                  {e.agent_inferred && <span className="tiny muted" title="Request logs don't name the caller; this is the only agent bound to the gateway."> (inferred)</span>}
-                </span>
-                <ArrowIcon size={12} />
-                <span className="wd-what">
-                  {dest(e)}
-                  {e.mcp_tool && <span className="mono tiny"> · {e.mcp_tool}</span>}
-                </span>
-                <span className="grow" />
-                <span className="tiny muted" title={e.timestamp}>
-                  {fmtTime(e.timestamp)}
-                </span>
-                {e.console_url && (
-                  <a className="tiny" href={e.console_url} target="_blank" rel="noreferrer" aria-label="Open this entry in Cloud Logging">
-                    log
-                  </a>
-                )}
-              </li>
-            ))}
-          </ul>
+          <ul className="would-deny-list">{shown.map(row)}</ul>
           {rows.length > shown.length && (
             <button className="link-btn small" onClick={() => setAll(true)}>
               Show all {rows.length}
             </button>
           )}
         </>
+      )}
+      {data && unknown.length > 0 && (
+        <Disclosure summary={<span className="small">{plural(unknown.length, "call")} couldn't be checked</span>}>
+          <ul className="would-deny-list">{unknown.slice(0, 20).map(row)}</ul>
+        </Disclosure>
       )}
     </section>
   );
@@ -361,7 +381,7 @@ function Enforcement({ gw }: { gw: Gateway }) {
   const shared = enf.shared_with.map(shortName);
   const TIPS: Record<EnforcementMode, string> = {
     ENFORCE: `Enforce: IAP blocks calls from bound agents that don't hold roles/iap.egressor on the destination (403).${shared.length ? ` Shared with ${listText(shared)}.` : ""}`,
-    DRY_RUN: `Dry run: IAP still decides and logs, but lets every call through, so nothing is blocked.${shared.length ? ` Shared with ${listText(shared)}.` : ""}`,
+    DRY_RUN: `Dry run: IAP lets every call through, so nothing is blocked.${shared.length ? ` Shared with ${listText(shared)}.` : ""}`,
   };
   return (
     <div className="gw-section enf">
@@ -408,7 +428,12 @@ function Enforcement({ gw }: { gw: Gateway }) {
       </div>
       {disabledWhy && <p className="small muted">{disabledWhy}</p>}
       {target && enf.editable && target !== mode && <EnforcementChange gw={gw} enf={enf} target={target} onDone={() => setTarget(null)} />}
-      {mode === "DRY_RUN" && <WouldDeny gw={gw} />}
+      {mode === "DRY_RUN" &&
+        (gw.type === "egress" ? (
+          <WouldDeny gw={gw} />
+        ) : (
+          <p className="tiny muted">Would-be denials are computed for egress gateways only (from the callers' roles/iap.egressor grants); the request log doesn't mark them.</p>
+        ))}
     </div>
   );
 }

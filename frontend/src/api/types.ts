@@ -295,7 +295,9 @@ export type ApplyItemEvent = {
 export type PreflightItem = { intent_id: string; status: "ok" | "blocked" | "duplicate" | "invalid"; reason?: string; fix?: PreflightFix; duplicate_of?: string; /** ok, but it affects more than it names (a shared IAP extension). */ warning?: string };
 
 // ---- Gateway request logs (GET /gateway-logs) ----
-export type LogDecision = "allowed" | "denied" | "would_deny";
+/** allowed / denied as logged; on a dry-run egress gateway allowed entries are computed into would_deny / allowed /
+ *  unknown from the caller's current grants (computed: true, with a reason). Google doesn't report would-deny. */
+export type LogDecision = "allowed" | "denied" | "would_deny" | "unknown";
 export type GatewayLogEntry = {
   decision: LogDecision;
   status: number | null;
@@ -311,9 +313,16 @@ export type GatewayLogEntry = {
   url?: string;
   insert_id?: string | null;
   console_url: string | null;
-  /** Not in the log entry: inferred when exactly one agent is bound to the gateway. */
+  /** Not in the log entry: inferred from the mTLS client certificate, or the only agent bound to the gateway. */
   agent: string | null;
   agent_inferred: boolean;
+  caller?: { engine: string; display_name: string; how: "mtls" | "only_bound_agent" } | null;
+  /** The client certificate's SHA-256 fingerprint (jsonPayload.mtls). */
+  client_cert?: string | null;
+  /** True when `decision` was computed from the grants (dry run), not read from the log. */
+  computed?: boolean;
+  /** Why it was computed as would_deny / allowed / unknown. */
+  reason?: string | null;
 };
 export type GatewayLogsResp = {
   gateway: string;
@@ -325,6 +334,8 @@ export type GatewayLogsResp = {
   console_url: string;
   notes: string[];
   errors: string[];
+  /** The gateway is an egress gateway in dry run, so allowed entries were checked against the grants. */
+  dry_run?: boolean;
 };
 export type PreflightResult = { items: PreflightItem[] };
 export type ApplyDoneEvent = { type: "done"; summary?: unknown };

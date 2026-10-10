@@ -1,6 +1,7 @@
 // Apply (P3) helpers shared by the store, the Apply step and Review: run state types, which kinds are
 // destructive, typical durations and plain-English labels.
 import type { ApplyState, AuthInfo, Intent } from "../api/types";
+import { intentKey, shortName } from "./policy";
 
 export type RunItemState = ApplyState | "queued";
 export type RunItem = {
@@ -62,7 +63,7 @@ export const TYPICAL: Record<Intent["kind"], { label: string; seconds: number }>
   model_armor_template: { label: "a few seconds", seconds: 5 },
   model_armor_extension: { label: "about 1 min", seconds: 60 },
   iam_project_grant: { label: "a few seconds", seconds: 5 },
-  set_enforcement: { label: "about 1 min (+ propagation)", seconds: 60 },
+  set_enforcement: { label: "about 1 min (in effect in 2–3 min)", seconds: 60 },
   dedicate_extension: { label: "a few minutes", seconds: 180 },
 };
 export const isLongRunning = (i: Intent) => TYPICAL[i.kind].seconds >= 60;
@@ -117,3 +118,15 @@ export function kindBlockedReason(a: AuthInfo | null, kind: Intent["kind"]): str
 }
 
 export const toList = (u: Intent | Intent[] | null | undefined): Intent[] => (!u ? [] : Array.isArray(u) ? u : [u]);
+
+/** Do two intents make the same change? Used to tell an undo apart from an item already staged in the cart (e.g. an
+ *  "enforce" staged from Gateways and the undo of the dry run just applied). An enforcement change is the same when
+ *  it sets the same extension (or, without one, the same gateway) to the same mode, whatever its scope. */
+export function sameChange(a: Intent, b: Intent): boolean {
+  if (a.kind !== b.kind) return false;
+  if (a.kind === "set_enforcement") {
+    const target = (i: Intent) => (i.extension ? `x:${shortName(i.extension)}` : `g:${shortName(i.gateway?.name ?? "")}`);
+    return a.mode === b.mode && target(a) === target(b);
+  }
+  return intentKey(a) === intentKey(b);
+}

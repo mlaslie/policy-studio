@@ -12,7 +12,7 @@ import { ArrowIcon, CheckIcon, ClockIcon, CloseIcon, CopyIcon, LockIcon, PlayIco
 import { useApplyGate } from "../components/Mode";
 import { CopyButton } from "../components/Glass";
 import { KIND_LABEL, KIND_ORDER, intentEnglish } from "../lib/policy";
-import { CHANGE_KIND, DESTRUCTIVE_PHRASE, TYPICAL, fmtElapsed, isDestructive, isLongRunning, kindBlockedReason, type ApplyRun, type RunItem } from "../lib/apply";
+import { CHANGE_KIND, DESTRUCTIVE_PHRASE, TYPICAL, fmtElapsed, isDestructive, isLongRunning, kindBlockedReason, sameChange, type ApplyRun, type RunItem } from "../lib/apply";
 import { LocalSetup, projectMismatch } from "./CredentialsCard";
 
 const STATUS: Record<DiffItem["status"], { label: string; tone: "green" | "neutral" | "amber" | "red" }> = {
@@ -299,11 +299,14 @@ function counts(r: ApplyRun) {
 }
 
 function UndoList({ run }: { run: ApplyRun }) {
-  const { stageUndo } = useStudio();
+  const { stageUndo, cart } = useStudio();
   const withUndo = run.items.filter((i) => i.undo.length);
   if (!withUndo.length) return null;
   // Undo in reverse order, so later changes are reverted first.
   const all = [...withUndo].reverse().flatMap((i) => i.undo);
+  // An undo that is already in the cart (e.g. "enforce" staged again from Gateways) is the same change, not another one.
+  const staged = (u: Intent) => cart.some((c) => sameChange(c, u));
+  const fresh = all.filter((u) => !staged(u));
   return (
     <div className="card undo-card">
       <div className="card-title-row">
@@ -311,9 +314,9 @@ function UndoList({ run }: { run: ApplyRun }) {
           <RefreshIcon size={15} /> Undo
         </h3>
         <span className="grow" />
-        <Tip tip="Stage the reverse of every applied change in the cart and open Apply. Nothing changes in Google Cloud until you confirm.">
+        <Tip tip={`Stage the reverse of every applied change in the cart and open Apply. Nothing changes in Google Cloud until you confirm.${all.length > fresh.length ? ` ${all.length - fresh.length} of them ${all.length - fresh.length > 1 ? "are" : "is"} already in the cart and isn't staged twice.` : ""}`}>
           <button className="btn btn-tonal btn-small" onClick={() => stageUndo(all)}>
-            Undo all ({all.length})
+            {fresh.length ? `Undo all (${all.length})` : "Review the staged undo"}
           </button>
         </Tip>
       </div>
@@ -326,14 +329,27 @@ function UndoList({ run }: { run: ApplyRun }) {
               {i.undo.map((u) => (
                 <div key={u.id}>
                   <span className={`badge badge-${KIND_TONE[u.kind]}`}>{KIND_LABEL[u.kind]}</span> {intentEnglish(u)}
+                  {staged(u) && (
+                    <span className="badge badge-neutral undo-staged" title="The cart already has this change (staged after the apply); it's the same thing as this undo.">
+                      <CheckIcon size={11} /> Already staged
+                    </span>
+                  )}
                 </div>
               ))}
             </div>
-            <Tip tip="Stage the reverse of this change in the cart and open Apply. Nothing changes in Google Cloud until you confirm.">
-              <button className="btn btn-outline btn-small" onClick={() => stageUndo(i.undo)}>
-                Undo this
-              </button>
-            </Tip>
+            {i.undo.every(staged) ? (
+              <Tip tip="This undo is already in the cart. Open Apply focused on it.">
+                <button className="btn btn-text btn-small" onClick={() => stageUndo(i.undo)}>
+                  Review staged
+                </button>
+              </Tip>
+            ) : (
+              <Tip tip="Stage the reverse of this change in the cart and open Apply. Nothing changes in Google Cloud until you confirm.">
+                <button className="btn btn-outline btn-small" onClick={() => stageUndo(i.undo)}>
+                  Undo this
+                </button>
+              </Tip>
+            )}
           </li>
         ))}
       </ul>
@@ -517,8 +533,11 @@ export function ApplyStep() {
   const { cart, ctx, applyFocus, openApply, run, goto } = useStudio();
   const { canApply, loading } = useApplyGate();
   const sorted = useMemo(() => [...cart].sort((a, b) => KIND_ORDER[a.kind] - KIND_ORDER[b.kind]), [cart]);
-  const focused = applyFocus ? sorted.filter((i) => applyFocus.includes(i.id)) : [];
-  const items = focused.length ? focused : sorted;
+  const focused = applyFocus && !run ? sorted.filter((i) => applyFocus.includes(i.id)) : [];
+  // While a finished apply is shown, cart items staged after it (not part of it) get their own plan + confirm above
+  // it, so they can be applied without going "Back to the plan" first. Nothing is planned while an apply runs.
+  const inRun = useMemo(() => new Set(run?.items.map((i) => i.intent.id) ?? []), [run]);
+  const items = run ? (run.done ? sorted.filter((i) => !inRun.has(i.id)) : []) : focused.length ? focused : sorted;
   const [diff, setDiff] = useState<DiffItem[] | null>(null);
   const [diffErr, setDiffErr] = useState<string | null>(null);
   const [pre, setPre] = useState<PreflightItem[] | null>(null);
@@ -560,11 +579,56 @@ export function ApplyStep() {
     <>Applying changes needs Policy Studio running locally with working credentials. You can always copy the commands and run them yourself.</>
   );
 
+  const plan = (
+    <>
+      <section className="card plan-card" aria-label="Changes to apply">
+        <div className="card-title-row">
+          <h3 className="card-title">{run ? "Staged since this apply" : canApply ? "What will change" : "What would change"}</h3>
+          <span className="small muted">
+            {run ? `${items.length} new cart item${items.length > 1 ? "s" : ""}` : focused.length ? `${items.length} of ${sorted.length} cart items` : `${items.length} item${items.length > 1 ? "s" : ""} in the cart`}
+          </span>
+          <span className="grow" />
+          {focused.length > 0 && sorted.length > focused.length && (
+            <button className="link-btn small" onClick={() => openApply(null)}>
+              Show the whole cart ({sorted.length})
+            </button>
+          )}
+        </div>
+        {diffErr && (
+          <Callout tone="danger" title="Couldn't compare with the project">
+            <span className="mono small">{diffErr}</span>
+          </Callout>
+        )}
+        {blockedN > 0 && (
+          <Callout tone="warn" title={`${blockedN} blocked`}>
+            {blockedN > 1 ? "These items" : "This item"} would certainly fail (or repeat another one), so Apply leaves {blockedN > 1 ? "them" : "it"} out. Each one says why and how to fix it.
+          </Callout>
+        )}
+        <ol className="plan-list">
+          {items.map((i, n) => (
+            <PlanRow key={i.id} intent={i} n={n + 1} d={diff?.find((d) => d.intent_id === i.id)} p={pre?.find((x) => x.intent_id === i.id)} />
+          ))}
+        </ol>
+      </section>
+      {canApply && (pre ? <ConfirmCard items={runnable} diff={diff} blocked={blockedN} /> : <Spinner label="Checking what can be applied…" />)}
+    </>
+  );
+
   return (
     <>
       <StepHeader title="Apply" lead={lead} />
       {run ? (
-        <RunPanel run={run} />
+        <>
+          {run.done && items.length > 0 && (
+            <div className="staged-since" id="staged-since">
+              <Callout tone="info" title={`${items.length} staged change${items.length > 1 ? "s" : ""} ready to apply`}>
+                {items.length > 1 ? "These were" : "This was"} added to the cart after the apply below. Review and apply {items.length > 1 ? "them" : "it"} here; the finished apply and its Undo are further down.
+              </Callout>
+              {canApply ? plan : <Unavailable />}
+            </div>
+          )}
+          <RunPanel run={run} />
+        </>
       ) : (
         <>
           {!canApply && !loading && <Unavailable />}
@@ -583,38 +647,7 @@ export function ApplyStep() {
               </div>
             </div>
           ) : (
-            <>
-              <section className="card plan-card" aria-label="Changes to apply">
-                <div className="card-title-row">
-                  <h3 className="card-title">{canApply ? "What will change" : "What would change"}</h3>
-                  <span className="small muted">
-                    {focused.length ? `${items.length} of ${sorted.length} cart items` : `${items.length} item${items.length > 1 ? "s" : ""} in the cart`}
-                  </span>
-                  <span className="grow" />
-                  {focused.length > 0 && sorted.length > focused.length && (
-                    <button className="link-btn small" onClick={() => openApply(null)}>
-                      Show the whole cart ({sorted.length})
-                    </button>
-                  )}
-                </div>
-                {diffErr && (
-                  <Callout tone="danger" title="Couldn't compare with the project">
-                    <span className="mono small">{diffErr}</span>
-                  </Callout>
-                )}
-                {blockedN > 0 && (
-                  <Callout tone="warn" title={`${blockedN} blocked`}>
-                    {blockedN > 1 ? "These items" : "This item"} would certainly fail (or repeat another one), so Apply leaves {blockedN > 1 ? "them" : "it"} out. Each one says why and how to fix it.
-                  </Callout>
-                )}
-                <ol className="plan-list">
-                  {items.map((i, n) => (
-                    <PlanRow key={i.id} intent={i} n={n + 1} d={diff?.find((d) => d.intent_id === i.id)} p={pre?.find((x) => x.intent_id === i.id)} />
-                  ))}
-                </ol>
-              </section>
-              {canApply && (pre ? <ConfirmCard items={runnable} diff={diff} blocked={blockedN} /> : <Spinner label="Checking what can be applied…" />)}
-            </>
+            plan
           )}
         </>
       )}

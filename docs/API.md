@@ -116,14 +116,16 @@ Intent = { id, kind: "grant"|"revoke"|"bind_gateway"|"unbind_gateway"|"model_arm
   //   extension); Terraform google_network_services_authz_extension with an import block; Python
   //   DepServiceClient.update_authz_extension + FieldMask. DRY_RUN is destructive (stops blocking), ENFORCE isn't.
   // dedicate_extension: create a copy of the extension (same service, timeout, failOpen, metadata, labels), then
-  //   PATCH the gateway's REQUEST_AUTHZ policy ?updateMask=customProvider.authzExtension.resources (customProvider
-  //   isn't marked immutable in the networksecurity v1 discovery doc). Terraform: the copy + an imported
-  //   google_network_security_authz_policy (check the plan is an in-place update). The UI stages it with a
+  //   PATCH the gateway's REQUEST_AUTHZ policy ?updateMask=customProvider.authzExtension.resources,labels with body
+  //   {customProvider: {authzExtension: {resources: [COPY]}}, labels: <the policy's current labels>}: a PATCH of
+  //   customProvider alone clears the policy's labels (seen live), so labels is in the mask and re-sent (REST, Python
+  //   and the gcloud YAML; Terraform's imported google_network_security_authz_policy repeats them). Verified live: the
+  //   PATCH updates the policy in place (~20 s operation); Terraform plans 1 import, 1 add, 1 change, 0 destroy. Not
+  //   verified: gcloud authz-policies import updating the existing policy in place. The UI stages it with a
   //   set_enforcement of the copy (extension = the copy's name, scope "dedicated"); render folds that into the copy's
   //   Terraform resource. revert is destructive (deletes the copy; kept if another policy still uses it).
-  // Not verified live yet: flipping an existing extension, how long it takes to take effect ("typically within a few
-  // minutes; not yet measured"), and the PATCH of an existing policy's provider. If that PATCH were refused, the
-  // fallback is delete + recreate of the policy (the gateway is unchecked in between); not done automatically.
+  // A mode change takes effect in about 2–3 minutes (measured), and can take effect before the operation reports
+  // done.
 SetupParams = { project? /* default: the gateway project */, delete?: boolean /* the inverse (undo) */,
   // model_armor_template
   template_id?, block_message?, inspect_template? /* sdp "advanced" */,
@@ -173,19 +175,35 @@ DiffItem = { intent_id, status: "add"|"present"|"replace"|"remove"|"absent", det
   // mode), with current_mode / target_mode. dedicate_extension: "add" / "present"; revert: "remove" / "absent".
 
 GatewayLogs = { gateway, since /* RFC 3339 */, filter, console_url, truncated, notes: [str], errors: [str],
-                counts: {allowed, denied, would_deny},
-                entries: [{ decision: "allowed"|"denied"|"would_deny", status, host, mcp_tool, mcp_method,
+                dry_run /* egress gateway in dry run: allowed entries were checked against the grants */,
+                counts: {allowed, denied, would_deny, unknown},
+                entries: [{ decision: "allowed"|"denied"|"would_deny"|"unknown", status, host, mcp_tool, mcp_method,
                             registry_resource, destination, policies: [{name, result}], authz_result, timestamp,
                             method, url, insert_id, console_url /* this entry in Cloud Logging */,
-                            agent /* null unless exactly one agent is bound: logs don't name the caller */,
-                            agent_inferred }] }
+                            client_cert /* jsonPayload.mtls.clientCertSha256Fingerprint */,
+                            caller: {engine, display_name, how: "mtls"|"only_bound_agent"} | null,
+                            agent /* = caller.display_name (inferred: logs don't name the caller) */,
+                            agent_inferred, computed /* decision computed from the grants */,
+                            reason /* why would_deny / allowed / unknown, when computed */ }] }
   // filter: logName="projects/P/logs/networkservices.googleapis.com%2Fgateway_requests"
   //         AND resource.labels.gateway_name="GATEWAY" AND timestamp>="SINCE"   (since: 24h, 30m, 7d or RFC 3339)
   // Live format (enforcing gateway): jsonPayload.authzPolicyInfo {result ALLOWED|DENIED, policies[{name, result}]},
   // jsonPayload.agentGatewayInfo {agentRegistryResource, mcpInfo {method "tools/call", parameter TOOL}},
-  // httpRequest.status 403 on an IAP denial. would_deny = a DENIED result on a request that went through (status
-  // < 400), or a result/policy marked DRY_RUN; this dry-run format hasn't been seen live yet. Needs
-  // logging.logEntries.list (roles/logging.viewer).
+  // httpRequest.status 403 on an IAP denial, jsonPayload.mtls.clientCertSha256Fingerprint. Logged decision: denied =
+  // a DENIED result or status 403, else allowed.
+  // Dry run (seen live): calls IAP would deny are logged exactly like allowed ones (status 200, result ALLOWED, every
+  // policy ALLOWED, matchedRules default_denied in every mode), so would_deny is NOT reported by Google. On an egress
+  // gateway whose IAP extension is in DRY_RUN, each allowed entry is computed (computed: true) from current grants:
+  //   caller   the fingerprint matched to an engine by a second entries:list over the bound engines' own platform
+  //            calls (httpRequest.requestUrl:"reasoningEngines/ID/", from 2 h before `since`; only when more than one
+  //            agent is bound), else the only bound agent, else unknown.
+  //   grants   roles/iap.egressor on the destination (agentRegistryResource) and registry-wide, matching the caller's
+  //            principal, its project's "all agents" principalSet, allUsers / allAuthenticatedUsers. Conditions:
+  //            toolName in [...] and the read-only-hint form are evaluated (the tool from mcpInfo.parameter on
+  //            tools/call, '' otherwise); other conditions, tools missing from the inventory, group / domain members,
+  //            unreadable IAP policies and destinations outside the inventory give "unknown", never would_deny.
+  //            Project-level (and higher) grants aren't read.
+  // Needs logging.logEntries.list (roles/logging.viewer).
 ```
 
 ## Conditions
@@ -252,7 +270,7 @@ Each intent is applied, then read back and verified:
 - **model_armor_template:** create (or delete) the template on `modelarmor.<R>.rep.googleapis.com`; read back.
 - **model_armor_extension:** create (or delete) the authz extension (long-running; waited for, so a `model_armor_on` in the same request can use it); read back that it names the template.
 - **set_enforcement:** GET the extension (must be `iap.googleapis.com`; skipped if already in the mode) → PATCH `?updateMask=metadata,failOpen` with the live metadata (only `iamEnforcementMode` added or removed) → wait for the operation → read back mode and failOpen. Undo: the previous mode.
-- **dedicate_extension:** GET the source extension and the gateway's REQUEST_AUTHZ policy (must use the source and target only this gateway) → create the copy (waited for) → PATCH the policy `?updateMask=customProvider.authzExtension.resources` (waited for) → read back. Runs before other kinds, so a `set_enforcement` of the copy in the same request finds it (and is skipped if the copy failed). Undo: `revert` (PATCH back, delete the copy unless another policy uses it). The writer allows only these two PATCH masks, with bodies limited to those fields.
+- **dedicate_extension:** GET the source extension and the gateway's REQUEST_AUTHZ policy (must use the source and target only this gateway) → create the copy (waited for) → PATCH the policy `?updateMask=customProvider.authzExtension.resources` (waited for) → read back. Runs before other kinds, so a `set_enforcement` of the copy in the same request finds it (and is skipped if the copy failed). Undo: `revert` (PATCH back, delete the copy unless another policy uses it). The policy PATCH uses `?updateMask=customProvider.authzExtension.resources,labels` with the current labels re-sent (a PATCH without labels in the mask clears them), and the read-back checks the labels are unchanged. A `set_enforcement` of the copy a dedicate created in the same request gets no undo of its own (the revert deletes the copy); and a `set_enforcement` of a copy that a revert in the same request deletes is skipped (it still runs when the copy is kept because another policy uses it). The writer allows only these two PATCH masks, with bodies limited to those fields.
 - **iam_project_grant:** project getIamPolicy → add (or remove) the member in the Model Armor roles only → setIamPolicy with the etag (retried on a conflict); read back. The writer refuses any other change to the project policy.
 
 Every applied intent returns its inverse in `undo`, which the UI keeps as an "Undo last apply" list. An apply log is appended to `~/.policy-studio/apply-log.jsonl` (locally).

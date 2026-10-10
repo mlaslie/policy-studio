@@ -63,12 +63,12 @@ const LESSONS: Record<StepN, { title: string; body: ReactNode; flow: ReactNode }
         <p><b>Egress</b> checks calls your agents make. It is <b>deny by default</b>: an agent can only reach destinations it was granted. <b>Ingress</b> checks calls coming in, for example from Gemini Enterprise.</p>
         <p>An agent only gets these checks once it is <b>bound</b> to the gateway. Unbound agents call out directly, unchecked.</p>
         <p>
-          <b>Enforce or dry run.</b> The IAP check runs in one of two modes. <b>Enforce</b> blocks calls without a grant. <b>Dry run</b> only logs what it would have blocked and lets everything through, so it's a way to test grants before
-          enforcing them, not a place to stay. The mode isn't a gateway setting: it lives on the IAP <b>authz extension</b> the gateway's policy calls.
+          <b>Enforce or dry run.</b> The IAP check runs in one of two modes. <b>Enforce</b> blocks calls without a grant. <b>Dry run</b> lets everything through, so it's a way to test grants before enforcing them, not a place to stay.
+          Google doesn't mark the calls it would have blocked (they're logged as allowed), so Policy Studio works them out from the current grants. The mode isn't a gateway setting: it lives on the IAP <b>authz extension</b> the gateway's policy calls.
         </p>
         <p>
           <b>Shared extensions.</b> Several gateways can use the same extension, and then they switch together. To change one gateway only, give it <b>its own extension</b> (a copy) first; Policy Studio stages both steps. A change
-          typically takes effect within a few minutes (not yet measured).
+          takes effect in about 2–3 minutes (measured), sometimes before the operation reports done.
         </p>
       </>
     ),
