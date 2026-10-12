@@ -48,6 +48,7 @@ const TYPE: Record<PNodeKind, string> = {
   registry: "dest",
   mcp: "mcp",
   endpoint_group: "group",
+  google_apis: "google",
 };
 
 export const VERDICT_LABEL: Record<Verdict, string> = {
@@ -95,6 +96,7 @@ export function nodeAria(n: PNode, lines?: number, pinned?: boolean): string {
     mcp: "MCP server",
     endpoint: "API endpoint",
     endpoint_group: "Grouped destinations",
+    google_apis: `Google API endpoints, collapsed: press Enter to show the ${n.grouped?.length ?? 0}`,
     registry: "Agent Registry",
   };
   const where = n.kind === "engine" ? (n.gateway ? `, behind ${n.gateway.split("/").pop()}` : ", no gateway") : "";
@@ -141,7 +143,7 @@ export function toFlow(
       }
   }
   const lines = new Map<string, number>();
-  for (const e of view.edges) if (e.verdict !== "path") for (const id of new Set([e.source, e.target, ...(e.parts ?? [e]).map((p) => p.caller ?? "")])) lines.set(id, (lines.get(id) ?? 0) + 1);
+  for (const e of view.edges) if (e.verdict !== "path") for (const id of new Set([e.source, e.target, ...(e.members ?? [e]).flatMap((m) => m.parts ?? [m]).map((p) => p.caller ?? "")])) lines.set(id, (lines.get(id) ?? 0) + 1);
   const intoBy = new Map<string, PEdge>();
   if (view.focus) for (const e of view.edges) if (e.verdict !== "path") intoBy.set(e.target, e);
 

@@ -4474,6 +4474,11 @@ body.resizing * {
   background: var(--surface-3);
   color: var(--text-2);
 }
+/* table view: "Google API" next to an endpoint */
+.pmap .pmap-tag {
+  margin-left: 6px;
+  vertical-align: 1px;
+}
 .pmap .chip-red {
   background: var(--red-weak);
   color: var(--red);
@@ -4594,7 +4599,22 @@ body.resizing * {
   width: 270px;
 }
 .pmap .node-endpoint {
-  width: 260px;
+  width: 330px;
+}
+/* endpoint titles are hosts, shortened from the middle to 32 characters (labels.ts): mono, a little smaller, so they
+   fit whole (with the selected-agent dot too) */
+.pmap .node-title.mono-title {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 600;
+}
+.pmap .node-google {
+  border-style: dashed;
+  background: var(--surface-2);
+  cursor: pointer;
+}
+.pmap .node-google:hover {
+  border-color: var(--blue);
 }
 .pmap .node-registry {
   width: 260px;

@@ -23,7 +23,7 @@ import { ClockIcon, CloseIcon, ExpandIcon, SearchIcon, ShieldIcon } from "../com
 import { useStudio } from "../store";
 import { plural } from "../lib/util";
 import { buildPolicyGraph, type Direction, type PEdge, type PolicyGraph, type Verdict } from "./graph";
-import { DEFAULT_DIRECTION, DEFAULT_FILTERS, TOO_MANY_LINES, type Affiliation, type DestType, type MapFilters, viewOf } from "./view";
+import { DEFAULT_DIRECTION, DEFAULT_FILTERS, TOO_MANY_LINES, expandGroup, revealPatch, type Affiliation, type DestType, type MapFilters, viewOf } from "./view";
 import { layoutView } from "./layout";
 import { VERDICT_LABEL, edgeAria, expandedMcp, toFlow, type MNode } from "./toFlow";
 import { nodeTypes, MapActions } from "./nodes";
@@ -133,7 +133,7 @@ const ARIA = {
 /** The line now: a selected line is re-found in the current view (by id, then as the same caller and destination), so
  *  the panel follows it into the staged-change view after something is staged. */
 function resolveEdge(edges: PEdge[], e: PEdge): PEdge {
-  const all = edges.flatMap((x) => [x, ...(x.parts ?? [])]);
+  const all = edges.flatMap((x) => [x, ...(x.members ?? []), ...(x.members ?? [x]).flatMap((m) => m.parts ?? [])]);
   return all.find((x) => x.id === e.id) ?? all.find((x) => pairKey(x) === pairKey(e)) ?? e;
 }
 
@@ -237,7 +237,8 @@ function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
   }, [cartKey, reduced]);
 
   // ---------- selection ----------
-  const nodeById = useMemo(() => new Map(graph.nodes.map((n) => [n.id, n])), [graph]);
+  // the graph's nodes, plus the view's group nodes (lines into the Google APIs group need its label)
+  const nodeById = useMemo(() => new Map([...view.nodes, ...graph.nodes].map((n) => [n.id, n])), [graph, view]);
   const label = useCallback((id: string) => nodeById.get(id)?.label ?? id.split("/").pop() ?? id, [nodeById]);
   const nodeOf = useCallback((id: string) => nodeById.get(id), [nodeById]);
   const edgeNow = useMemo(() => (selEdge ? resolveEdge(view.edges, selEdge) : null), [selEdge, view]);
@@ -318,9 +319,10 @@ function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
   const focusOn = (id: string) => {
     const inView = view.nodes.find((n) => n.id === id);
     if (!inView) {
-      const grp = view.nodes.find((n) => n.grouped?.includes(id));
-      if (!grp) return false;
-      set({ expanded: [...filters.expanded, grp.section] });
+      // inside the Google APIs group and/or a "no grants" group: expand what hides it
+      const patch = revealPatch(graph, filters, selected, id, { changesOnly: show === "changes" });
+      if (!patch) return false;
+      set(patch);
     }
     if (table) setTable(false);
     setHit(id);
@@ -362,9 +364,10 @@ function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
   useEffect(() => {
     if (!focusReq) return;
     const id = focusReq.target && !focusReq.node ? focusReq.target : focusReq.node;
-    // a destination grouped under "+N with no grants" is shown first
-    const grouped = [focusReq.node, focusReq.target].map((x) => x && view.nodes.find((n) => n.grouped?.includes(x))).find(Boolean);
-    if (grouped) return set({ expanded: [...filters.expanded, grouped.section] });
+    // a destination grouped under "Google APIs" or "+N with no grants" is shown first
+    const grouped = [focusReq.node, focusReq.target].find((x) => x && view.nodes.some((n) => n.grouped?.includes(x)));
+    const patch = grouped ? revealPatch(graph, filters, selected, grouped, { changesOnly: show === "changes" }) : null;
+    if (patch && Object.keys(patch).length) return set(patch);
     setFocusReq(null);
     const e = findFocusEdge(view.edges, focusReq);
     if (e) {
@@ -394,7 +397,7 @@ function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
         return;
       }
       const n = rfNodes.find((x) => x.id === id);
-      if (n?.type === "group") return set({ expanded: [...filters.expanded, n.data.node.section] });
+      if (n?.type === "group" || n?.type === "google") return set(expandGroup(n.data.node, filters));
       if (n && n.type !== "section") selectNode(id);
       return;
     }
@@ -412,7 +415,8 @@ function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
   const fitKey = `${direction}|${filters.affiliation}|${filters.gateway}|${JSON.stringify(filters.types)}|${filters.hideEmpty}|${table}|${show === "changes"}`;
   const counts = {
     agents: view.nodes.filter((n) => n.kind === "engine").length,
-    dests: view.nodes.filter((n) => n.column === "dests" && n.kind !== "endpoint_group" && n.kind !== "engine").length,
+    // the collapsed Google APIs node counts its endpoints
+    dests: view.nodes.filter((n) => n.column === "dests" && n.kind !== "endpoint_group" && n.kind !== "engine").reduce((k, n) => k + (n.kind === "google_apis" ? (n.grouped?.length ?? 0) : 1), 0),
   };
 
   return (
@@ -494,6 +498,12 @@ function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
                   <input type="checkbox" checked={filters.hideEmpty} onChange={(e) => set({ hideEmpty: e.target.checked, expanded: [] })} />
                   Hide destinations with no grants
                 </label>
+                <Tip tip="Endpoints on *.googleapis.com (often a platform allowlist registered as host, host.mtls and host:443). Off: one collapsed “Google APIs” node with their lines merged. Clicking that node, or searching for one of them, turns this on." placement="bottom">
+                  <label className="pmap-check plain">
+                    <input type="checkbox" checked={filters.googleApis} disabled={!filters.types.api} onChange={(e) => set({ googleApis: e.target.checked })} />
+                    Show Google API endpoints
+                  </label>
+                </Tip>
               </div>
             )}
             <div className="seg seg-small" role="group" aria-label="Show staged changes">
@@ -576,7 +586,7 @@ function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
                 onNodesChange={onNodesChange}
                 onNodeClick={(_, n) => {
                   if (n.type === "section") return;
-                  if (n.type === "group") return set({ expanded: [...filters.expanded, n.data.node.section] });
+                  if (n.type === "group" || n.type === "google") return set(expandGroup(n.data.node, filters));
                   remember();
                   selectNode(n.id);
                 }}

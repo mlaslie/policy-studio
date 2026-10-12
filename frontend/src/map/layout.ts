@@ -28,8 +28,9 @@ export const W: Record<PNodeKind, number> = {
   a2a: 270,
   runtime_dest: 270,
   mcp: 290,
-  endpoint: 260,
+  endpoint: 330,
   endpoint_group: 260,
+  google_apis: 330,
   registry: 260,
 };
 
@@ -102,7 +103,7 @@ export function layoutView(view: Pick<MapView, "nodes" | "edges">, opts: { expan
   const gwCallers = new Map<string, string[]>();
   for (const e of edges) {
     if (callerIds.has(e.source) && gwOrder.has(e.target)) gwCallers.set(e.target, [...(gwCallers.get(e.target) ?? []), e.source]);
-    for (const p of e.parts ?? [e]) {
+    for (const p of (e.members ?? [e]).flatMap((m) => m.parts ?? [m])) {
       const c = callerIds.has(p.source) ? p.source : p.caller && callerIds.has(p.caller) ? p.caller : null;
       if (c && destIds.has(e.target)) links.push([c, e.target]);
       // ingress: clients reach the agents through the gateway lanes
@@ -228,4 +229,4 @@ export function layoutView(view: Pick<MapView, "nodes" | "edges">, opts: { expan
 }
 
 /** Edges that belong to a node (incident, or a combined line one of whose parts is that caller's). */
-export const touches = (e: PEdge, id: string) => e.source === id || e.target === id || e.caller === id || !!e.parts?.some((p) => p.caller === id);
+export const touches = (e: PEdge, id: string): boolean => e.source === id || e.target === id || e.caller === id || !!e.parts?.some((p) => p.caller === id) || !!e.members?.some((m) => touches(m, id));

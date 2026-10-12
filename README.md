@@ -125,11 +125,18 @@ per binding, with the member, the resource, the condition (plain English and CEL
 it allows.
 
 **Filters.** Direction (Agent-to-Anywhere or Client-to-Agent); All agents, Behind a gateway or No gateway; one gateway
-(when there's more than one); destination types; "Hide destinations with no grants"; search; Today, With staged
+(when there's more than one); destination types; "Hide destinations with no grants"; "Show Google API endpoints"; search; Today, With staged
 changes or Changes only. With an agent selected: Inherited grants and Implicit denies. Each legend entry hides or
 shows that kind of line. Table view lists the same lines as a table. Past 400 lines a banner suggests narrowing the
 filters. Nodes you drag keep their place (saved in the browser per project, region and direction; Reset layout
 forgets them).
+
+**Google APIs.** Endpoints on `*.googleapis.com` (a platform allowlist is often each API registered as host, host.mtls
+and host:443) are collapsed by default into one "Google APIs (N)" node, with their lines merged per caller and a count
+("16 APIs"). Click it, tick "Show Google API endpoints", or search for one of them to show them one by one; untick to
+collapse. Endpoint cards are titled by host (a display name that only repeats the host is dropped), shortened from the
+middle so the service name and port show (`iamcredentials.mtls…apis.com:443`); hover or the details panel shows the
+full display name and URL. The table view always lists each endpoint, tagged "Google API".
 
 **Blocked lines.** Default deny isn't drawn for everyone (that would be one line per agent and destination). Each
 agent behind a gateway shows a count ("Denied by default: 18"); select it to draw its default-deny lines (red,

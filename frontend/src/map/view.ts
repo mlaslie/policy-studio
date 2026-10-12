@@ -1,7 +1,13 @@
 // What the map shows of a PolicyGraph: the toolbar filters (direction is the graph's), the selected-agent view, the
 // legend's verdict filter and the "no grants" groups (docs/VISUALIZATION_PLAN.md §5). Pure, shared by the canvas and
 // the table view.
-import { DEST_SECTIONS, NOGW, PSEUDO, SECTION_LABEL, combineParts, type Direction, type PEdge, type PNode, type PolicyGraph, type Verdict } from "./graph";
+//
+// Google API endpoints (*.googleapis.com, often a platform allowlist registered as host, host.mtls and host:443) are
+// collapsed into one "Google APIs (N)" node unless "Show Google API endpoints" is on. That checkbox is the group's
+// only state: clicking the group (or a search or "Show on map" match inside it) ticks it, unticking it collapses the
+// group again. Lines into the collapsed group are merged per source (and per kind: granted or default deny), with
+// the best verdict and a count; the table still lists every endpoint.
+import { DEST_SECTIONS, NOGW, PSEUDO, SECTION_LABEL, bestVerdict, combineParts, type Chip, type Direction, type PEdge, type PNode, type PolicyGraph, type Verdict } from "./graph";
 
 /** The map opens on Agent-to-Anywhere. */
 export const DEFAULT_DIRECTION: Direction = "egress";
@@ -16,6 +22,8 @@ export interface MapFilters {
   hideEmpty: boolean;
   /** Sections whose grouped destinations are shown anyway. */
   expanded: string[];
+  /** Show Google API endpoints one by one; off = one collapsed "Google APIs (N)" node. */
+  googleApis: boolean;
   /** Verdicts hidden from the legend. */
   hidden: Verdict[];
   /** Selected agent: add group / public / registry-wide grants, and default-deny lines. */
@@ -28,6 +36,7 @@ export const DEFAULT_FILTERS: MapFilters = {
   types: { a2a: true, runtime: true, mcp: true, api: true },
   hideEmpty: true,
   expanded: [],
+  googleApis: false,
   hidden: [],
   inherited: true,
   implicit: true,
@@ -47,6 +56,9 @@ export interface MapView {
   /** Lines other than trunks (for the "too many lines" banner). */
   lines: number;
 }
+
+/** The collapsed Google APIs node. */
+export const GOOGLE_GROUP = "group:google-apis";
 
 const SECTION_TYPE: Record<string, DestType | null> = { registry: null, a2a: "a2a", runtime: "runtime", mcp: "mcp", api: "api" };
 const sectionOrder = (s: string) => {
@@ -83,6 +95,11 @@ export function viewOf(g: PolicyGraph, f: MapFilters, selected: string | null, o
       if (t === null || t === undefined || f.types[t] || n.id === selected) shown.add(n.id);
     }
   }
+  // Google API endpoints collapsed into one node (a selected one stays on its own, like the "no grants" groups).
+  const gIds = new Set(
+    g.direction === "egress" && !f.googleApis ? g.nodes.filter((n) => n.kind === "endpoint" && n.googleApi && shown.has(n.id) && n.id !== selected).map((n) => n.id) : [],
+  );
+  const gNode: PNode | null = gIds.size ? googleGroupNode(g.nodes.filter((n) => gIds.has(n.id))) : null;
   const unboundShown = g.nodes.some((n) => n.kind === "engine" && !n.gateway && shown.has(n.id));
   if (unboundShown) {
     shown.add(g.direction === "egress" ? NOGW.egress : NOGW.ingress);
@@ -119,12 +136,15 @@ export function viewOf(g: PolicyGraph, f: MapFilters, selected: string | null, o
     }
   }
 
+  // Lines into collapsed Google API endpoints: one per source (and kind) into the group.
+  if (gNode) edges.splice(0, edges.length, ...mergeIntoGroup(edges, gIds, gNode.id));
+
   // Default-deny lines on the selected agent: capped, in destination order.
   let more = 0;
   const implicit = edges.filter((e) => e.implicit);
   if (implicit.length > IMPLICIT_CAP) {
     const order = (e: PEdge) => {
-      const n = byId.get(e.target)!;
+      const n = byId.get(e.target) ?? gNode!;
       return `${String(sectionOrder(n.section)).padStart(2, "0")}|${n.label}|${n.id}`;
     };
     const keep = new Set(implicit.sort((a, b) => order(a).localeCompare(order(b))).slice(0, IMPLICIT_CAP).map((e) => e.id));
@@ -137,7 +157,7 @@ export function viewOf(g: PolicyGraph, f: MapFilters, selected: string | null, o
   const nodes: PNode[] = [];
   const groups = new Map<string, PNode[]>();
   for (const n of g.nodes) {
-    if (!shown.has(n.id)) continue;
+    if (!shown.has(n.id) || gIds.has(n.id)) continue;
     const empty = g.direction === "egress" && n.column === "dests" && !into.has(n.id) && !n.unreadable && n.id !== selected;
     if (empty && n.kind === "registry") continue; // no registry-wide grants: nothing to show
     if (empty && opts.changesOnly) continue;
@@ -146,6 +166,11 @@ export function viewOf(g: PolicyGraph, f: MapFilters, selected: string | null, o
       continue;
     }
     nodes.push(n);
+  }
+  if (gNode && (!opts.changesOnly || into.has(gNode.id))) {
+    // how many of its endpoints have a granted line in this view
+    const reached = new Set(edges.filter((e) => e.target === gNode.id && !e.implicit).flatMap((e) => (e.members ?? []).map((m) => m.target))).size;
+    nodes.push({ ...gNode, sub: `${reached ? `${reached} with grants · ` : "No grants · "}click to show them` });
   }
   for (const [section, ns] of groups) {
     const what = SECTION_LABEL[section] ?? section;
@@ -169,8 +194,98 @@ export function viewOf(g: PolicyGraph, f: MapFilters, selected: string | null, o
   return { nodes: out, edges, more, focus, lines: edges.filter((e) => e.verdict !== "path").length };
 }
 
-/** The visible lines as table rows: a combined line gives one row per agent. */
+/** The visible lines as table rows: a combined line gives one row per agent, a line into the Google APIs group one
+ *  row per endpoint (and agent). */
 export function tableRows(v: MapView): PEdge[] {
   // No gateway → Anywhere is each unbound agent's own "direct" row already.
-  return v.edges.filter((e) => e.verdict !== "path" && e.id !== "direct:nogw").flatMap((e) => e.parts ?? [e]);
+  return v.edges
+    .filter((e) => e.verdict !== "path" && e.id !== "direct:nogw")
+    .flatMap((e) => e.members ?? [e])
+    .flatMap((e) => e.parts ?? [e]);
+}
+
+/** The collapsed "Google APIs (N)" node for these endpoints. */
+function googleGroupNode(ns: PNode[]): PNode {
+  const unreadable = ns.filter((n) => n.unreadable).length;
+  const chips: Chip[] = unreadable ? [{ text: unreadable > 1 ? `${unreadable} IAP policies couldn't be read` : "1 IAP policy couldn't be read", tone: "red" }] : [];
+  const pending = ns.filter((n) => n.pending);
+  return {
+    id: GOOGLE_GROUP,
+    kind: "google_apis",
+    label: `Google APIs (${ns.length})`,
+    sub: "Click to show them",
+    column: "dests",
+    section: "api",
+    chips,
+    destKind: "endpoint",
+    googleApi: true,
+    grouped: ns.map((n) => n.id),
+    search: `google apis ${ns.map((n) => n.search).join(" ")}`,
+    pending: pending.length ? { text: pending.flatMap((n) => n.pending!.text.map((t) => `${n.label}: ${t}`)), intents: [...new Set(pending.flatMap((n) => n.pending!.intents))] } : undefined,
+  };
+}
+
+/** Lines into the grouped endpoints, merged into one line per (source, granted or default deny) into the group: the
+ *  best verdict, the endpoint count (and agent count), the merged lines kept as `members`. */
+export function mergeIntoGroup(edges: PEdge[], ids: Set<string>, groupId: string): PEdge[] {
+  const out: PEdge[] = [];
+  const by = new Map<string, PEdge[]>();
+  for (const e of edges) {
+    if (!ids.has(e.target)) out.push(e);
+    else {
+      const k = `${e.source}|${e.implicit ? "x" : "a"}`;
+      by.set(k, [...(by.get(k) ?? []), e]);
+    }
+  }
+  for (const [k, ms] of by) {
+    const first = ms[0];
+    const targets = new Set(ms.map((m) => m.target)).size;
+    const callers = new Set(ms.flatMap((m) => (m.parts ?? [m]).map((p) => p.caller ?? p.source)));
+    const same = <T>(f: (e: PEdge) => T) => (ms.every((m) => f(m) === f(first)) ? f(first) : undefined);
+    const pendings = ms.filter((m) => m.pending);
+    const intents = [...new Set(ms.flatMap((m) => m.intents ?? []))];
+    out.push({
+      id: `g:${k}|${groupId}`,
+      source: first.source,
+      target: groupId,
+      direction: first.direction,
+      verdict: bestVerdict(ms.map((m) => m.verdict)),
+      reasons: ms.flatMap((m) => m.reasons),
+      gateway: same((m) => m.gateway),
+      mode: same((m) => m.mode),
+      modelArmor: same((m) => m.modelArmor),
+      modelArmorDryRun: same((m) => m.modelArmorDryRun),
+      implicit: first.implicit,
+      inherited: ms.every((m) => m.inherited) || undefined,
+      caller: same((m) => m.caller),
+      members: ms,
+      label: `${targets} ${targets === 1 ? "API" : "APIs"}${callers.size > 1 && !first.source.startsWith("pseudo:") ? ` · ${callers.size} agents` : ""}`,
+      pending: pendings.length ? (pendings.length === ms.length && pendings.every((m) => m.pending === pendings[0].pending) ? pendings[0].pending : "change") : undefined,
+      intents: intents.length ? intents : undefined,
+      before: same((m) => m.before),
+      after: same((m) => m.after),
+    });
+  }
+  return out;
+}
+
+/** What expanding a group node changes: the Google APIs group ticks "Show Google API endpoints", a "no grants" group
+ *  shows its section. */
+export function expandGroup(n: Pick<PNode, "kind" | "section">, f: MapFilters): Partial<MapFilters> {
+  return n.kind === "google_apis" ? { googleApis: true } : { expanded: [...new Set([...f.expanded, n.section])] };
+}
+
+/** The filter change that puts node `id` on the map as itself (expanding the Google APIs group and then, if it has
+ *  no grants, its "no grants" group); {} when it's already there, null when other filters hide it. */
+export function revealPatch(g: PolicyGraph, f: MapFilters, selected: string | null, id: string, opts: { changesOnly?: boolean } = {}): Partial<MapFilters> | null {
+  let patch: Partial<MapFilters> = {};
+  for (let i = 0; i < 3; i++) {
+    const cur = { ...f, ...patch };
+    const v = viewOf(g, cur, selected, opts);
+    if (v.nodes.some((n) => n.id === id)) return patch;
+    const grp = v.nodes.find((n) => n.grouped?.includes(id));
+    if (!grp) return null;
+    patch = { ...patch, ...expandGroup(grp, cur) };
+  }
+  return null;
 }

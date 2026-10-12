@@ -7,6 +7,7 @@ import type { CSSProperties } from "react";
 import { ApiIcon, ArrowIcon, BookIcon, ClockIcon, CloudIcon, GatewayIcon, PencilIcon, PersonIcon, PinIcon, RegistryIcon, RobotIcon, ServerIcon, ShieldIcon, WarnIcon } from "../components/Icons";
 import type { Chip } from "./graph";
 import type { MNode, ToolState } from "./toFlow";
+import { TITLE_MAX, shortLabel } from "./labels";
 
 /** Actions a node can trigger (kept out of node data so it stays plain). */
 export const MapActions = createContext<{ jump: (id: string) => void; unpin: (id: string) => void }>({ jump: () => undefined, unpin: () => undefined });
@@ -173,6 +174,10 @@ const DestNode = memo(({ id, data }: NodeProps<MNode>) => {
   const n = data.node;
   const icon = n.kind === "endpoint" ? <ApiIcon size={20} /> : n.kind === "registry" ? <RegistryIcon size={20} /> : <RobotIcon size={20} />;
   const skills = n.skills ?? [];
+  // Endpoints: shortened from the middle (the service name and the port both show); the full display name and URL on
+  // hover and in the details panel.
+  const ep = n.kind === "endpoint";
+  const full = ep ? [n.displayName, n.url].filter(Boolean).join("\n") : n.label;
   return (
     <div className={cls(data, `node-dest node-${n.kind}`, n.unreadable && "unreadable")}>
       <Handles />
@@ -184,11 +189,11 @@ const DestNode = memo(({ id, data }: NodeProps<MNode>) => {
       <div className="node-head">
         <span className={`node-icon icon-${n.kind === "endpoint" ? "api" : n.kind === "registry" ? "registry" : "a2a"}`}>{icon}</span>
         <div className="node-titles">
-          <div className="node-title" title={n.label}>
-            {n.label}
+          <div className={`node-title ${ep ? "mono-title" : ""}`} title={full}>
+            {ep ? shortLabel(n.label, TITLE_MAX) : n.label}
           </div>
-          <div className="node-sub mono" title={n.sub}>
-            {n.sub}
+          <div className="node-sub mono" title={ep ? full : n.sub}>
+            {ep && n.sub ? shortLabel(n.sub, TITLE_MAX + 1) : n.sub}
           </div>
         </div>
         {data.ring && <span className={`state-dot st-${data.ring}`} />}
@@ -291,6 +296,29 @@ const GroupNode = memo(({ id, data }: NodeProps<MNode>) => (
   </div>
 ));
 
+/** The collapsed Google API endpoints (view.ts): click (or Enter) ticks "Show Google API endpoints". */
+const GoogleGroupNode = memo(({ id, data }: NodeProps<MNode>) => {
+  const n = data.node;
+  return (
+    <div className={cls(data, "node-dest node-endpoint node-google")} title={`Show the ${n.grouped?.length ?? 0} Google API endpoints one by one`}>
+      <Handles />
+      <Pin id={id} data={data} />
+      <div className="node-badge badge-cloudrun">API endpoints · collapsed</div>
+      <div className="node-head">
+        <span className="node-icon icon-api">
+          <ApiIcon size={20} />
+        </span>
+        <div className="node-titles">
+          <div className="node-title">{n.label}</div>
+          <div className="node-sub">{n.sub}</div>
+        </div>
+        {data.ring && <span className={`state-dot st-${data.ring}`} />}
+      </div>
+      <Chips chips={n.chips} />
+    </div>
+  );
+});
+
 const SinkNode = memo(({ id, data }: NodeProps<MNode>) => (
   <div className={cls(data, "node-sink")}>
     <Handles />
@@ -320,6 +348,7 @@ export const nodeTypes = {
   dest: DestNode,
   mcp: McpNode,
   group: GroupNode,
+  google: GoogleGroupNode,
   sink: SinkNode,
   section: SectionNode,
 };

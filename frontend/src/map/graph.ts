@@ -9,6 +9,7 @@ import type { Access, Binding, ContextInfo, Ctx, EnforcementMode, Engine, Gatewa
 import { ROLE, accessFromCondition } from "../lib/policy";
 import { ENGINE_PRINCIPAL_RE, EVERYONE, PROJECT_AGENTS_RE, conditionAllows, evaluateTools, isReadOnlyHint, memberMatches, parseTools } from "./evaluate";
 import { CLIENT, NOGW, PSEUDO, pseudoOf } from "./ids";
+import { endpointLabel, isGoogleApi } from "./labels";
 
 export { CLIENT, NOGW, PSEUDO };
 
@@ -25,6 +26,7 @@ export type PNodeKind =
   | "mcp"
   | "endpoint"
   | "endpoint_group" // destinations with no grants, grouped (one per section)
+  | "google_apis" // Google API endpoints (*.googleapis.com), collapsed into one node (view.ts)
   | "registry";
 export type Verdict =
   | "allowed" // an unconditional matching grant
@@ -92,8 +94,13 @@ export interface PNode {
   deniedCount?: number;
   /** Pseudo callers: the members drawn from this node. */
   members?: { member: string; label: string; deleted?: boolean }[];
-  /** endpoint_group: the grouped destinations. */
+  /** endpoint_group / google_apis: the grouped destinations. */
   grouped?: string[];
+  /** Endpoint: the registry entry's display name and URL as registered (the label may be just the host), and whether
+   *  its host is *.googleapis.com (grouped into "Google APIs" on the map). */
+  displayName?: string;
+  url?: string;
+  googleApi?: boolean;
   /** Lowercase label + id + sub, for search. */
   search: string;
   /** Staged-change view (diff.ts): what the cart changes on this node, and the cart intents that do it. */
@@ -120,6 +127,8 @@ export interface PEdge {
   caller?: string;
   /** A combined line: the per-agent lines it stands for (count badge = parts.length). */
   parts?: PEdge[];
+  /** A line into the "Google APIs" group: the per-endpoint lines it stands for (view.ts). */
+  members?: PEdge[];
   /** Short text on the line ("read-only", "3/6 tools", "?"). */
   label?: string;
   /** Non-MCP destination with a tool condition: calls carry toolName '', which the condition allows. */
@@ -343,7 +352,14 @@ function buildEgress(input: GraphInput): PolicyGraph {
     addDest(a.name, "agent", a.kind === "a2a" ? "a2a" : "runtime_dest", a.kind === "a2a" ? "a2a" : "runtime", a.display_name, a.kind === "a2a" ? (a.url?.replace(/^https?:\/\//, "") ?? a.id) : a.id, { skills: a.skills.map((s) => s.name), sameAs: a.engine }, null);
   for (const m of inv.mcp_servers)
     addDest(m.name, "mcp_server", "mcp", "mcp", m.display_name, m.url?.replace(/^https?:\/\//, "") ?? m.id, { tools: m.tools.map((t) => ({ name: t.name, readOnly: t.read_only, destructive: t.destructive })) }, Object.fromEntries(m.tools.map((t) => [t.name, t.read_only])));
-  for (const p of inv.endpoints) addDest(p.name, "endpoint", "endpoint", "api", p.display_name, p.url.replace(/^https?:\/\//, ""), {}, null);
+  for (const p of inv.endpoints) {
+    const label = endpointLabel(p.display_name, p.url);
+    const bare = p.url.replace(/^https?:\/\//, "");
+    // the card title is the host when the display name only repeats it; the sub then shows the display name
+    const sub = p.display_name && p.display_name !== label ? p.display_name : bare !== label ? bare : "";
+    addDest(p.name, "endpoint", "endpoint", "api", label, sub, { displayName: p.display_name, url: p.url, googleApi: isGoogleApi(p.url) }, null);
+    dests[dests.length - 1].node.search += ` ${p.display_name} ${p.url}`.toLowerCase();
+  }
 
   // Every egressor binding, as a Reason (registry-wide ones keyed by the registry).
   const reasonsOn = new Map<string, Reason[]>();

@@ -113,7 +113,8 @@ export default function PolicyPanel({ edge, node, inv, gateways, nodeOf, label, 
 // ------------------------------------------------------------------ a line
 function EdgeDetails({ edge, inv, gateways, nodeOf, label }: { edge: PEdge; inv: Inventory; gateways: Gateway[]; nodeOf: (id: string) => PNode | undefined; label: (id: string) => string }) {
   const openGateway = useOpenGateway();
-  const parts = edge.parts ?? [edge];
+  // a line into the collapsed Google APIs group stands for one line per endpoint (each maybe combined per agent)
+  const parts = edge.members ? edge.members.flatMap((m) => m.parts ?? [m]) : (edge.parts ?? [edge]);
   const gwNode = edge.gateway ? nodeOf(edge.gateway) : undefined;
   const caller = edge.caller ? inv.engines.find((e) => e.name === edge.caller) : undefined;
   const dest = nodeOf(edge.target);
@@ -181,8 +182,26 @@ function EdgeDetails({ edge, inv, gateways, nodeOf, label }: { edge: PEdge; inv:
       )}
       {edge.direction === "ingress" && <IngressDetails edge={edge} inv={inv} gateways={gateways} />}
 
+      {edge.members && (
+        <Disclosure summary={`${plural(new Set(edge.members.map((m) => m.target)).size, "Google API endpoint")} on this line`}>
+          <ul className="plain-list small">
+            {[...new Set(edge.members.map((m) => m.target))].map((t) => {
+              const n = nodeOf(t);
+              return (
+                <li key={t} title={[n?.displayName, n?.url].filter(Boolean).join("\n")}>
+                  <span className="mono">{label(t)}</span> · {VERDICT_LABEL[edge.members!.find((m) => m.target === t)!.verdict]}
+                </li>
+              );
+            })}
+          </ul>
+        </Disclosure>
+      )}
+      {edge.implicit && edge.members && caller && (
+        <p className="small">No grant names {caller.display_name} on these endpoints, so the gateway denies them by default{edge.mode === "DRY_RUN" ? " (once it enforces; in dry run the calls pass and are logged)" : ""}. Show Google API endpoints to allow one.</p>
+      )}
+
       {/* default deny: Allow… */}
-      {edge.implicit && caller && dest && (
+      {edge.implicit && !edge.members && caller && dest && (
         <>
           <p className="small">
             No grant names {caller.display_name} on {dest.label}, so the gateway denies it by default{edge.mode === "DRY_RUN" ? " (once it enforces; in dry run the call passes and is logged)" : ""}.
@@ -201,9 +220,11 @@ function EdgeDetails({ edge, inv, gateways, nodeOf, label }: { edge: PEdge; inv:
 
       {parts.some((p) => p.reasons.length) && (
         <>
-          <h4 className="pmap-h4">{parts.length > 1 ? `Why: ${plural(parts.length, "agent")} on this line` : "Why"}</h4>
+          <h4 className="pmap-h4">{edge.members ? `Why: ${plural(parts.reduce((k, p) => k + p.reasons.length, 0), "grant")} on this line` : parts.length > 1 ? `Why: ${plural(parts.length, "agent")} on this line` : "Why"}</h4>
           {parts.map((p) =>
-            p.reasons.map((r, i) => <ReasonCard key={`${p.caller}|${i}|${r.binding.member}|${r.resource}`} r={r} part={p} multi={parts.length > 1} inv={inv} label={label} />),
+            p.reasons.map((r, i) => (
+              <ReasonCard key={`${p.caller}|${p.target}|${i}|${r.binding.member}|${r.resource}`} r={r} part={p} multi={parts.length > 1} head={edge.members ? `${label(p.caller ?? p.source)} → ${label(p.target)}` : undefined} inv={inv} label={label} />
+            )),
           )}
         </>
       )}
@@ -426,7 +447,7 @@ const VIA_TEXT: Record<Reason["via"], string> = { member: "a grant to this princ
 const TOOL_MARK = { allowed: "✓", denied: "✕", unknown: "?" } as const;
 
 /** One binding behind a line: the sentence, the binding, the condition, and the actions on it. */
-function ReasonCard({ r, part, multi, inv, label }: { r: Reason; part: PEdge; multi: boolean; inv: Inventory; label: (id: string) => string }) {
+function ReasonCard({ r, part, multi, head, inv, label }: { r: Reason; part: PEdge; multi: boolean; head?: string; inv: Inventory; label: (id: string) => string }) {
   const { cart, addIntents, openBuilder } = useStudio();
   const { engineByPrincipal } = useLookup();
   const [open, setOpen] = useState<"change" | null>(null);
@@ -443,7 +464,7 @@ function ReasonCard({ r, part, multi, inv, label }: { r: Reason; part: PEdge; mu
   const access = accessFromCondition(cond?.expression);
   return (
     <section className="pmap-reason" aria-label={`Grant: ${r.binding.english || r.binding.member_label}`}>
-      {multi && <div className="small muted">{label(part.caller ?? part.source)}</div>}
+      {multi && <div className="small muted">{head ?? label(part.caller ?? part.source)}</div>}
       <p className="pmap-sentence">{r.binding.english || `${r.binding.member_label || r.binding.member} holds ${r.binding.role} on ${r.resourceLabel}.`}</p>
       <dl className="pmap-dl">
         <dt>Role</dt>
@@ -799,7 +820,22 @@ function NodeDetails({ node, inv, gateways, label }: { node: PNode; inv: Invento
   }
   return (
     <div className="small">
-      {node.sub && <p className="muted">{node.sub}</p>}
+      {node.kind === "endpoint" ? (
+        <dl className="pmap-dl">
+          <dt>Display name</dt>
+          <dd className="pmap-wrap">{node.displayName || "(none)"}</dd>
+          <dt>URL</dt>
+          <dd className="mono tiny pmap-wrap">{node.url}</dd>
+          {node.googleApi && (
+            <>
+              <dt>Kind</dt>
+              <dd>Google API (*.googleapis.com)</dd>
+            </>
+          )}
+        </dl>
+      ) : (
+        node.sub && <p className="muted">{node.sub}</p>
+      )}
       {node.pending && (
         <div className="pmap-staged">
           <div>

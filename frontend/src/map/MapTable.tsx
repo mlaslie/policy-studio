@@ -35,12 +35,12 @@ export function rowCells(e: PEdge, label: (id: string) => string, line?: PEdge):
 
 export default function MapTable({ view, nodes, selected, onSelect }: { view: MapView; nodes: PNode[]; selected: string | null; onSelect: (e: PEdge) => void }) {
   const [sort, setSort] = useState<{ key: Key; dir: 1 | -1 }>({ key: "caller", dir: 1 });
-  const label = useMemo(() => {
-    const m = new Map(nodes.map((n) => [n.id, n.label]));
-    return (id: string) => m.get(id) ?? id.split("/").pop() ?? id;
-  }, [nodes]);
+  const byId = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
+  // endpoint labels are the map's (labels.ts: the host when the display name only repeats it), shown in full here
+  const label = useMemo(() => (id: string) => byId.get(id)?.label ?? id.split("/").pop() ?? id, [byId]);
   const rows = useMemo(() => {
-    const lineOf = new Map(view.edges.flatMap((l) => (l.parts ?? []).map((p) => [p.id, l] as const)));
+    // a row's combined line (for its pending mark): through the Google APIs group's merged lines too
+    const lineOf = new Map(view.edges.flatMap((l) => l.members ?? [l]).flatMap((l) => (l.parts ?? []).map((p) => [p.id, l] as const)));
     const rs = tableRows(view).map((e, i) => ({ e, i, c: rowCells(e, label, lineOf.get(e.id)) }));
     return rs.sort((a, b) => sort.dir * a.c[sort.key].localeCompare(b.c[sort.key]) || a.c.dest.localeCompare(b.c.dest) || a.i - b.i);
   }, [view, label, sort]);
@@ -62,14 +62,25 @@ export default function MapTable({ view, nodes, selected, onSelect }: { view: Ma
         </thead>
         <tbody>
           {rows.map(({ e, c }) => (
-            <tr key={`${e.id}|${e.caller ?? ""}`} className={selected === e.id ? "sel" : ""} onClick={() => onSelect(e)}>
+            // a staged bind can show the same agent's line twice (removed from one lane, added on another)
+            <tr key={`${e.id}|${e.caller ?? ""}|${e.source}`} className={selected === e.id ? "sel" : ""} onClick={() => onSelect(e)}>
               <td>
                 <button type="button" className="link-btn" onClick={(ev) => (ev.stopPropagation(), onSelect(e))}>
                   {c.caller}
                 </button>
               </td>
               <td>{c.gateway}</td>
-              <td>{c.dest}</td>
+              <td>
+                {(() => {
+                  const d = byId.get(e.target);
+                  return (
+                    <span title={d?.kind === "endpoint" ? [d.displayName, d.url].filter(Boolean).join("\n") : undefined}>
+                      {c.dest}
+                      {d?.googleApi && <span className="chip chip-neutral pmap-tag">Google API</span>}
+                    </span>
+                  );
+                })()}
+              </td>
               <td>
                 <span className={`pmap-verdict st-${e.verdict}`}>{c.verdict}</span>
               </td>

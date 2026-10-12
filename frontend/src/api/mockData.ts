@@ -7,7 +7,9 @@
 // corp-ingress has no IAP policy (switch disabled).
 // Policy map cases (docs/VISUALIZATION_PLAN.md §11): a registry-wide grant (a service account on the whole Agent
 // Registry), a custom-CEL grant, a group grant, an endpoint whose IAP policy can't be read, and two agents bound for
-// ingress. Region us-west1 is the scale scenario (mockScale.ts): about 50 agents and 500 grants, two egress gateways
+// ingress. A platform allowlist of Google APIs (PLATFORM_HOSTS: each API registered as host, host.mtls and host:443,
+// named "acme-prod <host>", all granted to every agent in the project) shows the map's "Google APIs" group, next to
+// two endpoints that aren't Google APIs. Region us-west1 is the scale scenario (mockScale.ts): about 50 agents and 500 grants, two egress gateways
 // (one in dry run), and corp-ingress with Model Armor on (screened Client-to-Agent lines).
 import type { AuditResp, Binding, ContextInfo, Ctx, EnforcementMode, Finding, Gateway, Grant, Inventory, MaSetup, McpTool, ModelArmorResp, ServiceAgent, Template, TemplateFilters } from "./types";
 import { READ_ONLY_EXPR, ROLE, toolsExpr } from "../lib/policy";
@@ -59,6 +61,25 @@ const ENDPOINT_HOSTS = [
   ["sheets", "Google Sheets"],
   ["people", "People"],
   ["iamcredentials", "IAM Credentials"],
+] as const;
+
+/** A platform allowlist of Google APIs, as an organization registers it: the same API in several forms (plain, .mtls,
+ *  .mtls with :443). `{R}` is the region. */
+export const PLATFORM_PREFIX = "acme-prod";
+const PLATFORM_HOSTS = [
+  "agentregistry.googleapis.com",
+  "agentregistry.mtls.googleapis.com",
+  "aiplatform.{R}.rep.googleapis.com",
+  "cloudresourcemanager.googleapis.com",
+  "cloudresourcemanager.mtls.googleapis.com",
+  "cloudresourcemanager.mtls.googleapis.com:443",
+  "cloudtrace.mtls.googleapis.com",
+  "cloudtrace.mtls.googleapis.com:443",
+  "iamcredentials.mtls.googleapis.com",
+  "iamcredentials.mtls.googleapis.com:443",
+  "sts.googleapis.com",
+  "sts.mtls.googleapis.com",
+  "telemetry.mtls.googleapis.com",
 ] as const;
 
 export const MA_ROLES = ["roles/modelarmor.calloutUser", "roles/modelarmor.user", "roles/serviceusage.serviceUsageConsumer"];
@@ -394,6 +415,15 @@ export function buildWorld(ctx: Ctx) {
     display_name: `${label} API`,
     url: `https://${h}.googleapis.com`,
   }));
+  const platform: Inventory["endpoints"] = PLATFORM_HOSTS.map((t) => {
+    const host = t.replace("{R}", R);
+    const id = `platform-${host.replace(/[.:]/g, "-")}`;
+    return { name: regName("endpoints", id), id, display_name: `${PLATFORM_PREFIX} ${host}`, url: `https://${host}` };
+  });
+  // Endpoints that aren't Google APIs: never grouped on the map.
+  const weather = { name: regName("endpoints", "weather-api"), id: "weather-api", display_name: "Weather API", url: "https://api.weather.example.com/v1" };
+  const payments = { name: regName("endpoints", "partner-payments"), id: "partner-payments", display_name: "Partner payments", url: "https://payments.partner.example.net:8443" };
+  endpoints.push(...platform, weather, payments);
 
   const projectSet = `principalSet://agents.global.org-${ORG}.system.id.goog/attribute.platformContainer/aiplatform/projects/${MOCK_NUMBER}`;
   const deleted = principalOf(R, "9001772810240000");
@@ -428,6 +458,9 @@ export function buildWorld(ctx: Ctx) {
     const e = endpoints.find((x) => x.id === `${h}-googleapis`)!;
     access[e.name] = [b(projectSet, "All agents in project (Agent Identity)", `All agents in this project can call ${e.display_name}.`)];
   }
+
+  for (const e of platform) access[e.name] = [b(projectSet, "All agents in project (Agent Identity)", `All agents in this project can call ${e.display_name}.`)];
+  access[weather.name] = [b(travel.principal, "Travel Planner (Agent Identity)", "Travel Planner can call Weather API (full access).")];
 
   for (const x of [...agents, ...mcp_servers, ...endpoints]) access[x.name] ??= [];
   // One endpoint whose IAP policy couldn't be read: no key in `access`, the reason in `access_errors` (API.md).

@@ -5,7 +5,7 @@ import { buildWorld } from "../api/mockData";
 import type { Binding, Ctx, Gateway } from "../api/types";
 import { ROLE } from "../lib/policy";
 import { CLIENT, NOGW, PSEUDO, buildPolicyGraph, type Direction, type GraphInput, type PEdge } from "./graph";
-import { DEFAULT_DIRECTION, DEFAULT_FILTERS, IMPLICIT_CAP, tableRows, viewOf, type MapFilters } from "./view";
+import { DEFAULT_DIRECTION, DEFAULT_FILTERS, GOOGLE_GROUP, IMPLICIT_CAP, tableRows, viewOf, type MapFilters } from "./view";
 import { WRAP, layoutView } from "./layout";
 
 const CTX: Ctx = { project: "my-demo-project", region: "us-east4" };
@@ -109,7 +109,7 @@ describe("egress verdicts (§4.4), us-east4: corp-egress in dry run", () => {
 
   it("engine summary chips: inherited reach and would-be-denied count", () => {
     const hd = g.nodes.find((n) => n.id === eng("Helpdesk Agent").name)!;
-    expect(hd.inheritedCount).toBe(4); // three project-wide endpoints and the public Calendar Agent
+    expect(hd.inheritedCount).toBe(17); // 3 + 13 platform project-wide endpoints and the public Calendar Agent
     expect(hd.chips.some((c) => c.text.startsWith("Would be denied:"))).toBe(true);
   });
 });
@@ -176,7 +176,8 @@ describe("selected agent: inherited and implicit lines", () => {
     for (let i = 0; i < 80; i++)
       w.inventory.endpoints.push({ name: `${REG}/endpoints/extra-${String(i).padStart(3, "0")}`, id: `extra-${i}`, display_name: `Extra API ${String(i).padStart(3, "0")}`, url: `https://extra${i}.example.com` });
     const g = buildPolicyGraph(input(w, "egress", { focus: hd.name }));
-    const v = viewOf(g, filters(), hd.name);
+    // Google API endpoints shown one by one (collapsed, their default-deny lines are one line into the group)
+    const v = viewOf(g, filters({ googleApis: true }), hd.name);
     const implicit = v.edges.filter((e) => e.implicit);
     expect(implicit).toHaveLength(IMPLICIT_CAP);
     expect(v.more).toBe(g.focusLines!.filter((l) => l.implicit).length - IMPLICIT_CAP);
@@ -192,12 +193,16 @@ describe("filters (§5.1)", () => {
   it("defaults to Agent-to-Anywhere, every agent, empty destinations grouped", () => {
     expect(DEFAULT_DIRECTION).toBe("egress");
     const v = viewOf(g, filters(), null);
-    const group = v.nodes.find((n) => n.id === "group:api")!;
-    // 25 endpoints: 3 with project-wide grants, 1 unreadable (always shown), 21 grouped
-    expect(group.grouped).toHaveLength(21);
-    expect(group.label).toBe("+21 API endpoints with no grants");
-    expect(viewOf(g, filters({ expanded: ["api"] }), null).nodes.some((n) => n.id === "group:api")).toBe(false);
-    expect(viewOf(g, filters({ hideEmpty: false }), null).nodes.filter((n) => n.kind === "endpoint")).toHaveLength(25);
+    // by default the 38 Google API endpoints are one node: only Partner payments is left with no grants
+    expect(v.nodes.find((n) => n.id === "group:api")!.grouped).toHaveLength(1);
+    // shown one by one: 25 + 13 platform Google APIs + 2 others; 16 with project-wide grants, Weather API granted,
+    // 1 unreadable (always shown), 22 grouped
+    const all = viewOf(g, filters({ googleApis: true }), null);
+    const group = all.nodes.find((n) => n.id === "group:api")!;
+    expect(group.grouped).toHaveLength(22);
+    expect(group.label).toBe("+22 API endpoints with no grants");
+    expect(viewOf(g, filters({ googleApis: true, expanded: ["api"] }), null).nodes.some((n) => n.id === "group:api")).toBe(false);
+    expect(viewOf(g, filters({ googleApis: true, hideEmpty: false }), null).nodes.filter((n) => n.kind === "endpoint")).toHaveLength(40);
   });
 
   it("No gateway: only unbound agents, their direct traffic and dormant grants", () => {
@@ -206,7 +211,8 @@ describe("filters (§5.1)", () => {
     expect(s.has(eng("Helpdesk Agent").name) || s.has(EGRESS) || s.has(PSEUDO.public)).toBe(false);
     expect(s.has(NOGW.egress) && s.has(PSEUDO.anywhere)).toBe(true);
     const v = viewOf(g, filters({ affiliation: "none" }), null);
-    expect(v.edges.filter((e) => e.verdict !== "direct").map((e) => e.verdict)).toEqual(["dormant"]);
+    // Travel Planner's Calendar Agent and Weather API grants
+    expect(v.edges.filter((e) => e.verdict !== "direct").map((e) => e.verdict)).toEqual(["dormant", "dormant"]);
   });
 
   it("Behind a gateway: no unbound agents and no No-gateway lane", () => {
@@ -261,8 +267,10 @@ describe("filters (§5.1)", () => {
   });
 
   it("a pseudo caller selected: only its lines", () => {
-    const v = viewOf(g, filters(), PSEUDO.project);
-    expect(v.edges.map((e) => e.source)).toEqual([PSEUDO.project, PSEUDO.project, PSEUDO.project]);
+    const v = viewOf(g, filters({ googleApis: true }), PSEUDO.project);
+    expect(v.edges.map((e) => e.source)).toEqual(Array(16).fill(PSEUDO.project));
+    // collapsed: its 16 Google API lines are one line into the group
+    expect(viewOf(g, filters(), PSEUDO.project).edges.map((e) => [e.source, e.target, e.label])).toEqual([[PSEUDO.project, GOOGLE_GROUP, "16 APIs"]]);
   });
 });
 

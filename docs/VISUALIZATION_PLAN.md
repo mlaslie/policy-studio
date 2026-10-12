@@ -145,7 +145,9 @@ The direction is always left to right: callers, then gateway, then destinations,
   - `No gateway`: these agents have no policy at all; traffic goes straight out. Each node offers "Stage: bind to <egress gateway>" (a `bind_gateway` intent, as in GatewaysStep). It is disabled when `bindable` is false, with the `Redeploy` help.
 - **Gateway** dropdown (only when there's more than one gateway in that direction).
 - **Destination types:** A2A, Agent Runtime, MCP, APIs (the same categories as `DEST_TYPES` in BuilderStep), plus "Hide destinations with no grants" (default on; groups them into an `endpoint_group` node "+22 API endpoints with no grants", which expands on click).
-- **Search:** matches node labels and ids, centers on and briefly highlights the matching node.
+- **Show Google API endpoints** (default off). Endpoints whose URL host is `*.googleapis.com` (any port) are often a platform allowlist, each API registered as host, host.mtls and host:443 and granted project-wide; one by one they crowd out the real destinations. Off, they're one `google_apis` node, "Google APIs (N)", in the API endpoints section, and lines into them are merged per source and kind (granted, default deny) with the best verdict and a count ("16 APIs"); the selected-agent view gets one inherited line and one default-deny line into it. The checkbox is the group's only state: clicking the group, or a search or "Show on map" match inside it, ticks it; unticking collapses it. A selected Google API endpoint stays on its own. Other endpoints are never grouped this way (`view.ts`, `labels.ts`).
+- **Endpoint labels** (`labels.ts`): the card title is the host (plus the port when the URL spells one out, since host and host:443 are separate entries) when the display name is empty, equals the host or ends with it ("acme-prod cloudtrace.googleapis.com" → "cloudtrace.googleapis.com"), else the display name. Long hosts are shortened from the middle, eliding the shared domain first (`iamcredentials.mtls…apis.com:443`), in a mono title on a wider card. The full display name and URL are on hover and in the details panel; the table view uses the same labels, in full, with a "Google API" tag.
+- **Search:** matches node labels and ids (endpoints also their display name and URL), centers on and briefly highlights the matching node, expanding the Google APIs group and then the "no grants" group when they hide it.
 - **Show:** `Today` | `With staged changes` (default when the cart isn't empty) | `Changes only`.
 - **Toggles:** "Inherited grants" (project-wide / public / registry-wide on the selected agent), "Implicit denies".
 - The **legend** doubles as a verdict filter (click to hide or show `allowed`, `partial`, `would_deny`, and so on).
@@ -291,6 +293,7 @@ The current mock world already covers a lot:
 - **Gateways and enforcement:** corp-egress, which is dry run in us-east4 on a shared extension and enforcing in us-central1, and corp-ingress.
 - **Agents:** a bound helpdesk agent (egress and ingress), an HR agent (egress only), an unbound Travel Planner, and an agent that can't be bound (it uses a service account).
 - **Grants:** read-only-hint and tools conditions, project-wide principalSet grants on three endpoints, `allAuthenticatedUsers`, and a deleted-agent grant.
+- **Google API platform allowlist** (added with the Google APIs group): 13 `acme-prod <host>` endpoints (plain, .mtls and .mtls:443 forms, plus a regional `aiplatform.<region>.rep` host) with a project-wide grant, and two endpoints that aren't Google APIs (Weather API, granted to Travel Planner; Partner payments, no grants).
 
 Add:
 1. A **registry-wide** binding in one region (for example a service account `serviceAccount:ops-bot@my-demo-project.iam.gserviceaccount.com` on `projects/<P>/locations/<R>`).
@@ -323,6 +326,7 @@ New, under `frontend/src/map/`:
 - `PolicyPanel.tsx`: line and node details and actions.
 - `MapTable.tsx`: the table view.
 - `usePositions.ts`: localStorage pins.
+- `labels.ts`: endpoint labels (host title, middle ellipsis) and Google API detection; tested in `google.test.ts` with the Google APIs group.
 
 Also new: `components/AccessChooser.tsx` and `lib/checks.ts` (pulled out of BuilderStep).
 
