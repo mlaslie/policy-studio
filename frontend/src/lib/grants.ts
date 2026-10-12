@@ -25,6 +25,9 @@ export function grantToIntent(g: Grant, engineByPrincipal: Map<string, Engine>, 
   };
 }
 
+/** The revoke of exactly this grant: it carries the binding's exact condition (see exactAccess). */
+export const grantToRevoke = (g: Grant, engineByPrincipal: Map<string, Engine>): Intent => grantToIntent(g, engineByPrincipal, "revoke");
+
 /** One `modify` intent that changes this grant's access to `access`: access_from is the grant's exact condition (as
  *  a revoke carries it), so the backend replaces exactly that binding, in one read-modify-write. */
 export function grantToModify(g: Grant, engineByPrincipal: Map<string, Engine>, access: Access): Intent {

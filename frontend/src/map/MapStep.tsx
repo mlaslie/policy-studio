@@ -1,8 +1,8 @@
 // Policy map step (lazy-loaded chunk with React Flow): who can reach what, and why, drawn from the policy state Policy
-// Studio already reads (docs/VISUALIZATION_PLAN.md). Phases 1–2: the read-only canvas (zoom, pan, drag), the toolbar
-// filters, the selected-agent view, the legend as a verdict filter, the table view and Client-to-Agent basics. The
-// policy panel and its actions (revoke, change access, allow), staged changes and saved positions come later; a click
-// on a line shows a read-only summary.
+// Studio already reads (docs/VISUALIZATION_PLAN.md). The canvas (zoom, pan, drag), the toolbar filters, the
+// selected-agent view, the legend as a verdict filter and the table view; the policy panel (PolicyPanel.tsx) whose
+// actions only stage into the cart; the staged-change view (Today / With staged changes / Changes only: simulate.ts,
+// diff.ts); saved positions for dragged nodes (usePositions.ts); keyboard use and "Show on map" focus.
 import {
   Background,
   BackgroundVariant,
@@ -19,16 +19,21 @@ import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent a
 import type { GatewaysResp, Inventory } from "../api/types";
 import { Callout, Disclosure, Load, StepHeader } from "../components/ui";
 import { Tip } from "../components/Tooltip";
-import { CloseIcon, ExpandIcon, SearchIcon, ShieldIcon } from "../components/Icons";
+import { ClockIcon, CloseIcon, ExpandIcon, SearchIcon, ShieldIcon } from "../components/Icons";
 import { useStudio } from "../store";
 import { plural } from "../lib/util";
-import { buildPolicyGraph, type Direction, type PEdge, type PNode, type Verdict } from "./graph";
+import { buildPolicyGraph, type Direction, type PEdge, type PolicyGraph, type Verdict } from "./graph";
 import { DEFAULT_DIRECTION, DEFAULT_FILTERS, type Affiliation, type DestType, type MapFilters, viewOf } from "./view";
 import { layoutView } from "./layout";
-import { VERDICT_LABEL, expandedMcp, toFlow, type MNode } from "./toFlow";
+import { VERDICT_LABEL, edgeAria, expandedMcp, toFlow, type MNode } from "./toFlow";
 import { nodeTypes, MapActions } from "./nodes";
-import { EdgeMarkers, edgeTitle, edgeTypes, viaText } from "./edges";
+import { EdgeMarkers, edgeTypes } from "./edges";
 import MapTable from "./MapTable";
+import PolicyPanel from "./PolicyPanel";
+import { simulate } from "./simulate";
+import { diffGraphs, mergeStaged, pairKey, pendingCount } from "./diff";
+import { posKey, usePositions } from "./usePositions";
+import { findFocusEdge, type MapFocus } from "./focus";
 
 const PAD = { top: "40px", bottom: "40px", left: "24px", right: "40px" } as const;
 /** Combined lines past this suggest narrowing the filters (§7). */
@@ -111,8 +116,29 @@ function Fitter({ fitKey, wrap }: { fitKey: string; wrap: RefObject<HTMLDivEleme
   return null;
 }
 
+type Show = "today" | "staged" | "changes";
+const SHOW: { id: Show; label: string; tip: string }[] = [
+  { id: "today", label: "Today", tip: "The policy in your project now." },
+  { id: "staged", label: "With staged changes", tip: "Today's policy with the cart applied: pending lines have a clock. A preview; Review's diff is the authority." },
+  { id: "changes", label: "Changes only", tip: "Only the lines and nodes the cart changes." },
+];
+/** Node and line descriptions read by screen readers when they get focus (React Flow's ariaLabelConfig). */
+const ARIA = {
+  "node.a11yDescription.default": "Press Enter or Space to select it and show its details. Arrow keys then move it (its place is saved); Escape clears the selection.",
+  "node.a11yDescription.keyboardDisabled": "Press Enter or Space to select it and show its details.",
+  "node.a11yDescription.ariaLiveMessage": ({ direction }: { direction: string; x: number; y: number }) => `Moved ${direction}. Its place is saved.`,
+  "edge.a11yDescription.default": "Press Enter or Space to show the policy behind this line; Escape closes it.",
+};
+
+/** The line now: a selected line is re-found in the current view (by id, then as the same caller and destination), so
+ *  the panel follows it into the staged-change view after something is staged. */
+function resolveEdge(edges: PEdge[], e: PEdge): PEdge {
+  const all = edges.flatMap((x) => [x, ...(x.parts ?? [])]);
+  return all.find((x) => x.id === e.id) ?? all.find((x) => pairKey(x) === pairKey(e)) ?? e;
+}
+
 function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
-  const { modelArmor, ctxInfo, ctx } = useStudio();
+  const { modelArmor, ctxInfo, ctx, cart, mapFocus, clearMapFocus } = useStudio();
   const rf = useReactFlow();
   const [direction, setDirection] = useState<Direction>(DEFAULT_DIRECTION);
   const [filters, setFilters] = useState<MapFilters>(DEFAULT_FILTERS);
@@ -122,66 +148,148 @@ function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
   const [query, setQuery] = useState("");
   const [hit, setHit] = useState<string | null>(null);
   const [searchMsg, setSearchMsg] = useState("");
+  const [announce, setAnnounce] = useState("");
   const [measured, setMeasured] = useState<Record<string, number>>({});
-  const [moved, setMoved] = useState(0);
-  const dragged = useRef<Record<string, { x: number; y: number }>>({});
+  const [showPref, setShowPref] = useState<Show | null>(null);
+  const [focusReq, setFocusReq] = useState<MapFocus | null>(null);
+  const [glide, setGlide] = useState(false);
   const wrap = useRef<HTMLDivElement>(null);
+  const opener = useRef<HTMLElement | null>(null);
   const reduced = usePrefersReducedMotion();
   const set = (p: Partial<MapFilters>) => setFilters((f) => ({ ...f, ...p }));
+  // With staged changes is the default while the cart isn't empty; a choice you make sticks.
+  const show: Show = cart.length ? (showPref ?? "staged") : "today";
 
-  // ---------- graph → view → layout → React Flow ----------
+  // ---------- graph (today, and with the cart applied) → view → layout → React Flow ----------
   const focusEngine = direction === "egress" && selected && inv.engines.some((e) => e.name === selected) ? selected : null;
-  const graph = useMemo(
+  const base = useMemo(
     () => buildPolicyGraph({ inventory: inv, gateways: gw.gateways, modelArmor: modelArmor.data, context: ctxInfo.data, ctx, direction, focus: focusEngine, inherited: filters.inherited }),
     [inv, gw, modelArmor.data, ctxInfo.data, ctx, direction, focusEngine, filters.inherited],
   );
-  const view = useMemo(() => viewOf(graph, filters, selected), [graph, filters, selected]);
+  const graph: PolicyGraph = useMemo(() => {
+    if (show === "today" || !cart.length) return base;
+    const sim = simulate({ inventory: inv, gateways: gw.gateways, modelArmor: modelArmor.data }, cart);
+    const after = buildPolicyGraph({ inventory: sim.inventory, gateways: sim.gateways, modelArmor: sim.modelArmor, context: ctxInfo.data, ctx, direction, focus: focusEngine, inherited: filters.inherited });
+    return mergeStaged(base, after, diffGraphs(base, after), cart, inv, sim.effects);
+  }, [base, show, cart, inv, gw, modelArmor.data, ctxInfo.data, ctx, direction, focusEngine, filters.inherited]);
+  const staged = show !== "today" ? pendingCount(graph) + graph.nodes.filter((n) => n.pending).length : 0;
+  const view = useMemo(() => viewOf(graph, filters, selected, { changesOnly: show === "changes" }), [graph, filters, selected, show]);
   const expanded = useMemo(() => expandedMcp(view, selected), [view, selected]);
   const hkey = useCallback((id: string) => `${id}|${expanded.has(id) ? 1 : 0}`, [expanded]);
   const heights = useMemo(() => Object.fromEntries(view.nodes.map((n) => [n.id, measured[hkey(n.id)]]).filter(([, h]) => h !== undefined)), [view, measured, hkey]);
   const layout = useMemo(() => layoutView(view, { expanded, heights }), [view, expanded, heights]);
-  const flow = useMemo(() => toFlow(view, layout, { node: selected, edge: selEdge?.id ?? null, hit }, expanded, reduced), [view, layout, selected, selEdge, hit, expanded, reduced]);
 
-  // Nodes are controlled so they can be dragged; a dragged node keeps its place until Reset layout or a direction
-  // change (saving positions is phase 4). Measured sizes are kept so nodes don't flash while React Flow re-measures.
+  // Saved positions: only dragged nodes, per project, region and direction. Ids are checked against today's graph
+  // (and the "no grants" groups), so ids that left the project are dropped on load.
+  const known = useMemo(() => new Set(base.nodes.map((n) => n.id)), [base]);
+  const { pins, pin, unpin, reset } = usePositions(posKey(ctx.project, ctx.region, direction), (id) => known.has(id) || id.startsWith("group:"), true);
+  const pinned = useMemo(() => new Set(Object.keys(pins)), [pins]);
+  const flow = useMemo(() => toFlow(view, layout, { node: selected, edge: selEdge?.id ?? null, hit }, expanded, reduced, pinned), [view, layout, selected, selEdge, hit, expanded, reduced, pinned]);
+
+  // Nodes are controlled so they can be dragged: a pinned node takes its saved place, the rest the auto layout.
+  // Measured sizes are kept so nodes don't flash while React Flow re-measures.
   const [rfNodes, setRfNodes] = useState<MNode[]>([]);
   useEffect(() => {
     setRfNodes((prev) => {
       const old = new Map(prev.map((n) => [n.id, n]));
-      return flow.nodes.map((n) => ({ ...n, measured: old.get(n.id)?.measured, position: dragged.current[n.id] ?? n.position }));
+      return flow.nodes.map((n) => ({ ...n, measured: old.get(n.id)?.measured, position: pins[n.id] ?? n.position }));
     });
-  }, [flow.nodes, moved]);
+  }, [flow.nodes, pins]);
   const hkeyRef = useRef(hkey);
   hkeyRef.current = hkey;
   const measuredRef = useRef(measured);
   measuredRef.current = measured;
-  const onNodesChange = useCallback((changes: NodeChange<MNode>[]) => {
-    setRfNodes((ns) => applyNodeChanges(changes, ns));
-    const upd: Record<string, number> = {};
-    for (const c of changes) {
-      if (c.type === "dimensions" && c.dimensions && !c.id.startsWith("hdr:")) {
-        const k = hkeyRef.current(c.id);
-        if (Math.abs((measuredRef.current[k] ?? -99) - c.dimensions.height) > 1) upd[k] = Math.round(c.dimensions.height);
+  const placedRef = useRef<Record<string, { x: number; y: number }>>({});
+  // where each node sits before a drag (its pin, or the auto layout): a drop elsewhere pins it
+  placedRef.current = Object.fromEntries(flow.nodes.map((n) => [n.id, pins[n.id] ?? n.position]));
+  const onNodesChange = useCallback(
+    (changes: NodeChange<MNode>[]) => {
+      // Drops and arrow-key moves (dragging false) pin the node where it is; a click that didn't move it doesn't.
+      for (const c of changes)
+        if (c.type === "position" && c.position && c.dragging === false && !c.id.startsWith("hdr:")) {
+          const was = placedRef.current[c.id];
+          if (!was || Math.abs(was.x - c.position.x) > 0.5 || Math.abs(was.y - c.position.y) > 0.5) pin(c.id, c.position);
+        }
+      setRfNodes((ns) => applyNodeChanges(changes.filter((c) => c.type !== "remove"), ns));
+      const upd: Record<string, number> = {};
+      for (const c of changes) {
+        if (c.type === "dimensions" && c.dimensions && !c.id.startsWith("hdr:")) {
+          const k = hkeyRef.current(c.id);
+          if (Math.abs((measuredRef.current[k] ?? -99) - c.dimensions.height) > 1) upd[k] = Math.round(c.dimensions.height);
+        }
       }
-      if (c.type === "position" && c.position) dragged.current[c.id] = c.position;
+      if (Object.keys(upd).length) setMeasured((m) => ({ ...m, ...upd }));
+    },
+    [pin],
+  );
+  // Lane moves (a staged bind or unbind, a change of view) glide; drags never do, nor anything under reduced motion.
+  const cartKey = `${show}|${cart.length}`;
+  const firstCart = useRef(true);
+  useEffect(() => {
+    if (firstCart.current) {
+      firstCart.current = false;
+      return;
     }
-    if (Object.keys(upd).length) setMeasured((m) => ({ ...m, ...upd }));
-  }, []);
+    if (reduced) return;
+    setGlide(true);
+    const t = setTimeout(() => setGlide(false), 650);
+    return () => clearTimeout(t);
+  }, [cartKey, reduced]);
 
   // ---------- selection ----------
+  const nodeById = useMemo(() => new Map(graph.nodes.map((n) => [n.id, n])), [graph]);
+  const label = useCallback((id: string) => nodeById.get(id)?.label ?? id.split("/").pop() ?? id, [nodeById]);
+  const nodeOf = useCallback((id: string) => nodeById.get(id), [nodeById]);
+  const edgeNow = useMemo(() => (selEdge ? resolveEdge(view.edges, selEdge) : null), [selEdge, view]);
+  /** Remember what had focus, so closing the panel can return there. */
+  const remember = () => {
+    const a = document.activeElement as HTMLElement | null;
+    opener.current = a && a !== document.body ? a : null;
+  };
+  const selectNode = useCallback(
+    (id: string) => {
+      setSelected(id);
+      setSelEdge(null);
+      const n = nodeById.get(id);
+      if (n) setAnnounce(`${n.label} selected: its details are in the panel after the map. Arrow keys move it; Escape clears.`);
+    },
+    [nodeById],
+  );
+  const selectEdge = useCallback(
+    (e: PEdge) => {
+      setSelEdge(e);
+      setAnnounce(`Policy details: ${edgeAria(e, label)}.`);
+    },
+    [label],
+  );
+  // after the panel's own effects (it focuses itself when it switches to the node that stays selected)
+  const returnFocus = (id: string) =>
+    setTimeout(() => {
+      const el = opener.current && document.contains(opener.current) ? opener.current : wrap.current?.querySelector<HTMLElement>(`[data-id="${CSS.escape(id)}"]`);
+      el?.focus({ preventScroll: true });
+      opener.current = null;
+    }, 60);
   const clear = useCallback(() => {
     setSelected(null);
     setSelEdge(null);
   }, []);
+  const closePanel = () => {
+    if (selEdge) {
+      const id = selEdge.id;
+      setSelEdge(null);
+      returnFocus(id);
+    } else if (selected) {
+      const id = selected;
+      clear();
+      returnFocus(id);
+    }
+  };
   const changeDirection = (d: Direction) => {
     if (d === direction) return;
     setDirection(d);
     setFilters((f) => ({ ...f, gateway: "all", expanded: [], hidden: [] }));
     clear();
-    dragged.current = {};
   };
-  const nodeById = useMemo(() => new Map(graph.nodes.map((n) => [n.id, n])), [graph]);
-  const label = useCallback((id: string) => nodeById.get(id)?.label ?? id.split("/").pop() ?? id, [nodeById]);
 
   // ---------- search: center on the match and highlight it ----------
   const center = useCallback(
@@ -237,12 +345,62 @@ function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
     setHit(id);
     pendingCenter.current = id;
   }, []);
-  const actions = useMemo(() => ({ jump }), [jump]);
+  const actions = useMemo(() => ({ jump, unpin }), [jump, unpin]);
 
+  // ---------- "Show on map" from another step: direction, filters that show it, the node, then the line ----------
+  useEffect(() => {
+    if (!mapFocus) return;
+    clearMapFocus();
+    const f: MapFocus = { direction: mapFocus.direction, node: mapFocus.node, target: mapFocus.target };
+    if (f.direction) setDirection(f.direction);
+    setFilters((x) => ({ ...x, affiliation: "all", gateway: "all", types: DEFAULT_FILTERS.types, hidden: [], expanded: [] }));
+    setTable(false);
+    setSelected(f.node ?? f.target ?? null);
+    setSelEdge(null);
+    setFocusReq(f);
+  }, [mapFocus, clearMapFocus]);
+  useEffect(() => {
+    if (!focusReq) return;
+    const id = focusReq.target && !focusReq.node ? focusReq.target : focusReq.node;
+    // a destination grouped under "+N with no grants" is shown first
+    const grouped = [focusReq.node, focusReq.target].map((x) => x && view.nodes.find((n) => n.grouped?.includes(x))).find(Boolean);
+    if (grouped) return set({ expanded: [...filters.expanded, grouped.section] });
+    setFocusReq(null);
+    const e = findFocusEdge(view.edges, focusReq);
+    if (e) {
+      opener.current = null;
+      selectEdge(e);
+    } else if (id) {
+      const n = nodeById.get(id);
+      setAnnounce(n ? `${n.label} selected.` : "Not on the map with these filters.");
+    }
+    if (id) {
+      setHit(id);
+      pendingCenter.current = id;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusReq, view]);
+
+  // ---------- keyboard: Enter / Space select (and open the panel), Esc closes the panel, then clears ----------
   const onKey = (e: ReactKeyboardEvent) => {
+    const t = e.target as HTMLElement;
+    if ((e.key === "Enter" || e.key === " ") && (t.classList.contains("react-flow__node") || t.classList.contains("react-flow__edge"))) {
+      const id = t.getAttribute("data-id") ?? "";
+      e.preventDefault();
+      opener.current = t;
+      if (t.classList.contains("react-flow__edge")) {
+        const ed = flow.edges.find((x) => x.id === id)?.data?.edge;
+        if (ed) selectEdge(ed);
+        return;
+      }
+      const n = rfNodes.find((x) => x.id === id);
+      if (n?.type === "group") return set({ expanded: [...filters.expanded, n.data.node.section] });
+      if (n && n.type !== "section") selectNode(id);
+      return;
+    }
     if (e.key === "Escape" && (selected || selEdge)) {
       e.stopPropagation();
-      clear();
+      closePanel();
     }
   };
 
@@ -251,7 +409,7 @@ function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
   const selNode = selected ? nodeById.get(selected) : undefined;
   const legend = LEGEND[direction].filter((v) => v !== "unchecked" || dirGws.some((g) => !g.enforcement?.mode));
   // Not refit when a group is expanded (a click, or a search that centers on its match).
-  const fitKey = `${direction}|${filters.affiliation}|${filters.gateway}|${JSON.stringify(filters.types)}|${filters.hideEmpty}|${table}`;
+  const fitKey = `${direction}|${filters.affiliation}|${filters.gateway}|${JSON.stringify(filters.types)}|${filters.hideEmpty}|${table}|${show === "changes"}`;
   const counts = {
     agents: view.nodes.filter((n) => n.kind === "engine").length,
     dests: view.nodes.filter((n) => n.column === "dests" && n.kind !== "endpoint_group" && n.kind !== "engine").length,
@@ -309,20 +467,12 @@ function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
             </form>
             <span className="pmap-tools-end">
               <Tip tip="Zoom to fit the whole map." placement="bottom">
-                <button type="button" className="btn btn-tonal btn-small" onClick={() => void rf.fitView({ padding: PAD, duration: 300, maxZoom: 1.15 })} disabled={table}>
+                <button type="button" className="btn btn-tonal btn-small" onClick={() => void rf.fitView({ padding: PAD, duration: reduced ? 0 : 300, maxZoom: 1.15 })} disabled={table}>
                   <ExpandIcon size={14} /> Fit
                 </button>
               </Tip>
-              <Tip tip="Put dragged nodes back in their automatic place." placement="bottom">
-                <button
-                  type="button"
-                  className="btn btn-tonal btn-small"
-                  disabled={table}
-                  onClick={() => {
-                    dragged.current = {};
-                    setMoved((m) => m + 1);
-                  }}
-                >
+              <Tip tip={pinned.size ? `Put the ${plural(pinned.size, "node")} you dragged back in their automatic place and forget the saved layout.` : "Nothing is pinned: drag a node to keep it where you drop it."} placement="bottom">
+                <button type="button" className="btn btn-tonal btn-small" disabled={table || !pinned.size} onClick={reset}>
                   Reset layout
                 </button>
               </Tip>
@@ -346,12 +496,20 @@ function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
                 </label>
               </div>
             )}
-            <Tip tip="Before / after with the cart's staged changes: coming in the next phase." placement="bottom">
-              <label className="pmap-check plain disabled">
-                <input type="checkbox" disabled checked={false} readOnly />
-                Show staged changes
-              </label>
-            </Tip>
+            <div className="seg seg-small" role="group" aria-label="Show staged changes">
+              {SHOW.map((o) => (
+                <Tip key={o.id} tip={!cart.length && o.id !== "today" ? "The cart is empty: nothing is staged." : o.tip} placement="bottom">
+                  <button type="button" className={`seg-btn ${show === o.id ? "on" : ""}`} aria-pressed={show === o.id} disabled={!cart.length && o.id !== "today"} onClick={() => setShowPref(o.id)}>
+                    {o.label}
+                  </button>
+                </Tip>
+              ))}
+            </div>
+            {show !== "today" && (
+              <span className="pmap-more">
+                <ClockIcon size={12} /> {staged ? `${plural(staged, "staged change")} on the map` : "Nothing in the cart changes this view"}
+              </span>
+            )}
             {searchMsg && (
               <span className="small muted" role="status">
                 {searchMsg}
@@ -399,9 +557,17 @@ function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
 
         <div className={`pmap-stage ${table ? "is-table" : ""}`}>
           {table ? (
-            <MapTable view={view} nodes={graph.nodes} selected={selEdge?.id ?? null} onSelect={(e) => setSelEdge(e)} />
+            <MapTable
+              view={view}
+              nodes={graph.nodes}
+              selected={edgeNow?.id ?? null}
+              onSelect={(e) => {
+                remember();
+                selectEdge(e);
+              }}
+            />
           ) : (
-            <div className="pmap-canvas" ref={wrap}>
+            <div className={`pmap-canvas ${glide ? "glide" : ""}`} ref={wrap}>
               <ReactFlow
                 nodes={rfNodes}
                 edges={flow.edges}
@@ -411,17 +577,23 @@ function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
                 onNodeClick={(_, n) => {
                   if (n.type === "section") return;
                   if (n.type === "group") return set({ expanded: [...filters.expanded, n.data.node.section] });
-                  setSelected(n.id);
-                  setSelEdge(null);
+                  remember();
+                  selectNode(n.id);
                 }}
                 onNodeDoubleClick={clear}
-                onEdgeClick={(_, e) => setSelEdge(e.data?.edge ?? null)}
+                onEdgeClick={(_, e) => {
+                  if (!e.data?.edge) return;
+                  remember();
+                  selectEdge(e.data.edge);
+                }}
                 onPaneClick={() => setSelEdge(null)}
                 nodesConnectable={false}
                 nodesDraggable
                 nodesFocusable
                 edgesFocusable
                 elementsSelectable
+                deleteKeyCode={null}
+                ariaLabelConfig={ARIA}
                 fitView
                 fitViewOptions={{ padding: PAD, maxZoom: 1.15 }}
                 minZoom={0.2}
@@ -437,7 +609,7 @@ function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
               </ReactFlow>
             </div>
           )}
-          {(selEdge || selNode) && <DetailsStub edge={selEdge} node={selEdge ? undefined : selNode} label={label} onClose={selEdge ? () => setSelEdge(null) : clear} />}
+          {(edgeNow || selNode) && <PolicyPanel edge={edgeNow} node={edgeNow ? null : (selNode ?? null)} inv={inv} gateways={gw.gateways} nodeOf={nodeOf} label={label} onClose={closePanel} />}
           <div className="legend" role="group" aria-label="Legend: click to hide or show a kind of line">
             {legend.map((v) => {
               const off = filters.hidden.includes(v);
@@ -477,12 +649,24 @@ function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
                 Inherited (selected agent)
               </span>
             )}
+            {show !== "today" && (
+              <span className="legend-item static">
+                <span className="legend-icon li-pending">
+                  <ClockIcon size={10} />
+                </span>
+                Staged: dashed = added, red overlay = removed
+              </span>
+            )}
           </div>
         </div>
         <p className="small muted pmap-foot" aria-live="polite">
           {counts.agents ? plural(counts.agents, "agent") : "No agents"} · {plural(counts.dests, "destination")} · {plural(view.lines, "line")}
-          {direction === "egress" && graph.stats.unreadable ? ` · ${plural(graph.stats.unreadable, "IAP policy", "IAP policies")} couldn't be read` : ""}. Drag nodes to move them; scroll or pinch to zoom.
+          {direction === "egress" && graph.stats.unreadable ? ` · ${plural(graph.stats.unreadable, "IAP policy", "IAP policies")} couldn't be read` : ""}. Drag nodes (or select one and use the arrow keys) to move them: they keep
+          their place; scroll or pinch to zoom.
         </p>
+        <div className="sr-only" role="status" aria-live="polite">
+          {announce}
+        </div>
         {graph.notes.length > (direction === "ingress" ? 1 : 0) && (
           <Disclosure summary={`Notes (${graph.notes.length - (direction === "ingress" ? 1 : 0)})`}>
             <ul className="plain-list small">
@@ -494,108 +678,5 @@ function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
         )}
       </div>
     </MapActions.Provider>
-  );
-}
-
-/** Read-only details of a clicked line or node. The full policy panel with its actions is phase 3. */
-function DetailsStub({ edge, node, label, onClose }: { edge: PEdge | null; node?: PNode; label: (id: string) => string; onClose: () => void }) {
-  const ref = useRef<HTMLElement>(null);
-  useEffect(() => ref.current?.focus({ preventScroll: true }), [edge, node]);
-  const parts = edge?.parts ?? (edge ? [edge] : []);
-  return (
-    <aside className="pmap-panel glass" ref={ref} tabIndex={-1} aria-label="Details">
-      <div className="pmap-panel-head">
-        <div className="grow">
-          {edge ? (
-            <>
-              <div className="small muted">{edge.direction === "egress" ? "Line" : "Client-to-Agent line"}</div>
-              <h3>
-                {label(edge.caller && edge.caller !== edge.target ? edge.caller : edge.source)} → {label(edge.target)}
-              </h3>
-            </>
-          ) : (
-            node && (
-              <>
-                <div className="small muted">Selected</div>
-                <h3>{node.label}</h3>
-              </>
-            )
-          )}
-        </div>
-        <button type="button" className="icon-btn" onClick={onClose} aria-label="Close details">
-          <CloseIcon size={16} />
-        </button>
-      </div>
-      {edge && (
-        <>
-          <p>
-            <span className={`pmap-verdict st-${edge.verdict}`}>{VERDICT_LABEL[edge.verdict]}</span>
-          </p>
-          <p className="small muted">{edgeTitle(edge)}</p>
-          {edge.gateway && (
-            <p className="small">
-              Gateway <b>{label(edge.gateway)}</b>
-              {edge.mode === "DRY_RUN" ? " · dry run: nothing is blocked" : edge.mode === "ENFORCE" ? " · enforcing" : edge.direction === "egress" ? " · no IAP policy" : ""}
-            </p>
-          )}
-          {edge.implicit && (
-            <p className="small">
-              No grant names this agent on {label(edge.target)}, so the gateway denies it by default{edge.mode === "DRY_RUN" ? " (once it enforces; in dry run the call passes and is logged)" : ""}.
-            </p>
-          )}
-          {edge.direction === "ingress" && <p className="small">There's no allow policy to show: a Client-to-Agent gateway screens content, it doesn't check who calls.</p>}
-          {parts.length > 1 && <div className="small muted">{plural(parts.length, "agent")} on this line:</div>}
-          <ul className="pmap-reasons">
-            {parts.flatMap((p) =>
-              p.reasons.map((r, i) => (
-                <li key={`${p.caller}|${i}|${r.binding.member}`}>
-                  {parts.length > 1 && <div className="small muted">{label(p.caller ?? p.source)}</div>}
-                  <div>{r.binding.english || `${r.binding.member_label} holds ${r.binding.role}`}</div>
-                  <div className="tiny muted">
-                    {r.binding.member_label || r.binding.member} · {r.resourceKind === "registry" ? "registry-wide" : r.resourceLabel} ·{" "}
-                    {r.binding.condition ? `condition: ${r.binding.condition.title || "custom"}` : "no condition"}
-                    {p.inherited && viaText(p) ? ` · via ${viaText(p)} grant` : ""}
-                  </div>
-                  {p.tools && (
-                    <div className="tiny">
-                      Tools: {p.tools.allowed.length} allowed
-                      {p.tools.denied.length ? `, ${p.tools.denied.length} denied` : ""}
-                      {p.tools.unknown.length ? `, ${p.tools.unknown.length} can't be told here` : ""}
-                    </div>
-                  )}
-                </li>
-              )),
-            )}
-          </ul>
-        </>
-      )}
-      {!edge && node && (
-        <div className="small">
-          <p className="muted">{node.sub}</p>
-          {node.kind === "engine" && (
-            <p>
-              {node.gateway ? (
-                <>
-                  Behind <b>{label(node.gateway)}</b>.
-                </>
-              ) : (
-                <>No gateway: {node.bindable ? "it can be bound to one." : (node.bindableReason ?? "it can't be bound.")}</>
-              )}
-              {node.identityType ? ` Identity: ${node.identityType === "AGENT_IDENTITY" ? "Agent Identity" : "service account"}.` : ""}
-            </p>
-          )}
-          {node.unreadable && <p className="warn-text">IAP policy couldn't be read: {node.unreadable}</p>}
-          {node.members?.length ? (
-            <ul className="plain-list">
-              {node.members.map((m) => (
-                <li key={m.member}>{m.label}</li>
-              ))}
-            </ul>
-          ) : null}
-          {node.chips.length > 0 && <p className="muted">{node.chips.map((c) => c.text).join(" · ")}</p>}
-        </div>
-      )}
-      <p className="tiny muted pmap-panel-foot">Read-only. Policy details and actions (revoke, change access, allow) come in the next phase.</p>
-    </aside>
   );
 }

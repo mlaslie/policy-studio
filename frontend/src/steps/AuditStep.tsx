@@ -13,6 +13,8 @@ import { downloadBlob, makeZip } from "../lib/zip";
 import { ago } from "../lib/util";
 import { KIND_LABEL, intentEnglish, intentKey } from "../lib/policy";
 import { RedeployHelp } from "../components/Redeploy";
+import { ShowOnMap } from "../components/ShowOnMap";
+import { focusForGrant } from "../map/focus";
 
 const SEV: Record<Finding["severity"], { tone: "red" | "amber" | "neutral"; label: string }> = {
   high: { tone: "red", label: "High" },
@@ -161,6 +163,9 @@ export function AuditStep() {
                           </div>
                           <p className="small">{f.detail}</p>
                           {f.redeploy && <RedeployHelp code={f.redeploy} />}
+                          {f.resource && (
+                            <ShowOnMap focus={{ direction: gateways.data?.gateways.find((x) => x.name === f.resource)?.type ?? "egress", node: f.resource }} what={f.resource.split("/").pop() ?? "it"} />
+                          )}
                           {f.fix && (
                             <div className="row">
                               {staged(f) ? (
@@ -257,6 +262,7 @@ export function AuditStep() {
                           </td>
                           <td>{g.condition ? <Badge tone="blue" title={g.condition.expression}>{g.condition.title}</Badge> : <Badge tone="neutral">Unconditional</Badge>}</td>
                           <td className="actions-cell">
+                            <ShowOnMap focus={focusForGrant(g, inventory.data)} what={`${g.member_label.replace(/ \(Agent Identity\)$/, "")} → ${g.resource_label}`} compact />
                             <Tip tip="Open this grant in the builder to stage a changed version.">
                               <button className="icon-btn" aria-label={`Edit: ${g.english}`} onClick={() => openBuilder(grantToIntent(g, engineByPrincipal, "grant"), { mode: "grant" })}>
                                 <PencilIcon size={14} />

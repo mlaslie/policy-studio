@@ -62,7 +62,8 @@ function callerShown(n: PNode, f: MapFilters): boolean {
   return true;
 }
 
-export function viewOf(g: PolicyGraph, f: MapFilters, selected: string | null): MapView {
+/** "Changes only": just the lines the cart changes (and the trunks that lead to them), and their nodes. */
+export function viewOf(g: PolicyGraph, f: MapFilters, selected: string | null, opts: { changesOnly?: boolean } = {}): MapView {
   const byId = new Map(g.nodes.map((n) => [n.id, n]));
   const sel = selected ? byId.get(selected) : undefined;
   const callerCol = g.direction === "egress" ? "callers" : "dests";
@@ -98,11 +99,22 @@ export function viewOf(g: PolicyGraph, f: MapFilters, selected: string | null): 
     let x: PEdge | null = e;
     if (e.parts) {
       const parts = e.parts.filter((p) => shown.has(p.caller ?? ""));
-      x = !parts.length ? null : parts.length === e.parts.length ? e : combineParts(e.id, parts);
+      // the combined line's own pending mark is kept when it's recombined from the visible agents
+      x = !parts.length ? null : parts.length === e.parts.length ? e : { ...combineParts(e.id, parts), pending: e.pending, before: e.before, beforeLabel: e.beforeLabel, after: e.after, intents: e.intents };
     }
     if (!x || !shown.has(x.source) || !shown.has(x.target)) continue;
     if (x.verdict !== "path" && f.hidden.includes(x.verdict)) continue;
     edges.push(x);
+  }
+
+  if (opts.changesOnly) {
+    const callers = new Set(edges.filter((e) => e.pending).flatMap((e) => (e.parts ?? [e]).map((p) => p.caller ?? p.source)));
+    const gws = new Set(edges.filter((e) => e.pending).map((e) => e.source));
+    for (let i = edges.length - 1; i >= 0; i--) {
+      const e = edges[i];
+      const lane = e.verdict === "path" && callers.has(e.source) && gws.has(e.target);
+      if (!e.pending && !lane) edges.splice(i, 1);
+    }
   }
 
   // Default-deny lines on the selected agent: capped, in destination order.
@@ -126,6 +138,7 @@ export function viewOf(g: PolicyGraph, f: MapFilters, selected: string | null): 
     if (!shown.has(n.id)) continue;
     const empty = g.direction === "egress" && n.column === "dests" && !into.has(n.id) && !n.unreadable && n.id !== selected;
     if (empty && n.kind === "registry") continue; // no registry-wide grants: nothing to show
+    if (empty && opts.changesOnly) continue;
     if (empty && f.hideEmpty && !f.expanded.includes(n.section)) {
       groups.set(n.section, [...(groups.get(n.section) ?? []), n]);
       continue;
@@ -148,7 +161,9 @@ export function viewOf(g: PolicyGraph, f: MapFilters, selected: string | null): 
   }
   // Pseudo callers and gateway lanes with nothing to draw are left out (they'd only add noise).
   const touched = new Set(edges.flatMap((e) => [e.source, e.target]));
-  const out = nodes.filter((n) => n.kind !== "principal_group" || touched.has(n.id) || n.id === selected);
+  const out = opts.changesOnly
+    ? nodes.filter((n) => touched.has(n.id) || n.pending || n.id === selected)
+    : nodes.filter((n) => n.kind !== "principal_group" || touched.has(n.id) || n.id === selected);
   return { nodes: out, edges, more, focus, lines: edges.filter((e) => e.verdict !== "path").length };
 }
 

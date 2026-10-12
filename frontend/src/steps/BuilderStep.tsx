@@ -1,27 +1,18 @@
 // Build step: the guided policy builder (Who → What → How much) with a live preview, IAM anatomy,
 // prerequisite checks and a Revoke mode.
 import { Tip } from "../components/Tooltip";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useLookup, useStudio } from "../store";
 import { api } from "../api/client";
-import type { AccessMode, Binding, Grant, Intent, RenderItem, SourceType } from "../api/types";
+import type { AccessMode, Grant, Intent, RenderItem, SourceType } from "../api/types";
 import { Badge, Callout, KindIcon, Load, StepHeader, Tabs, Term } from "../components/ui";
-import { ToolBadge, useDestinations } from "./InventoryStep";
+import { useDestinations } from "./InventoryStep";
 import { WarningCallouts } from "./ModelArmorSetup";
-import { grantToIntent, grantToModify, revokesGrant } from "../lib/grants";
+import { grantToIntent, revokesGrant } from "../lib/grants";
+import { useChecks } from "../lib/checks";
+import { AccessChooser, Choice, blocking, draftLint } from "../components/AccessChooser";
 import { CheckIcon, PlusIcon, RobotIcon, SearchIcon, WarnIcon } from "../components/Icons";
-import {
-  READ_ONLY_EXPR,
-  ROLE,
-  conditionFor,
-  intentEnglish,
-  kindNoun,
-  lintExpression,
-  newId,
-  projectPrincipalSet,
-  readOnlyTools,
-  validateMember,
-} from "../lib/policy";
+import { READ_ONLY_EXPR, ROLE, conditionFor, intentEnglish, kindNoun, newId, projectPrincipalSet, validateMember } from "../lib/policy";
 
 type DestType = "all" | "a2a" | "runtime" | "mcp" | "api";
 const DEST_TYPES: { id: DestType; label: string; tip: string }[] = [
@@ -52,85 +43,6 @@ function Section({ n, title, sub, done, children }: { n: number; title: string; 
       {children}
     </section>
   );
-}
-
-function Choice({ name, checked, onChange, title, desc, badge, disabled, children, label }: { label?: string; name: string; checked: boolean; onChange: () => void; title: React.ReactNode; desc?: React.ReactNode; badge?: React.ReactNode; disabled?: boolean; children?: React.ReactNode }) {
-  return (
-    <label className={`choice ${checked ? "checked" : ""} ${disabled ? "disabled" : ""}`}>
-      <input type="radio" name={name} checked={checked} onChange={onChange} disabled={disabled} aria-label={label ?? (typeof title === "string" ? title : undefined)} />
-      <span className="choice-body">
-        <span className="choice-title">
-          {title} {badge}
-        </span>
-        {desc && <span className="choice-desc">{desc}</span>}
-        {checked && children && <span className="choice-extra" onClick={(e) => e.stopPropagation()}>{children}</span>}
-      </span>
-    </label>
-  );
-}
-
-/** Prerequisite / redundancy checks shown as amber chips with an optional "also stage fix", or an intent to stage
- *  instead of this one (`instead`, e.g. a modify of the existing grant). */
-type Check = { id: string; tone: "amber" | "info" | "red"; text: React.ReactNode; fix?: Intent; fixLabel?: string; instead?: Intent; insteadLabel?: string; insteadTip?: string };
-
-function useChecks(intent: Intent | null): Check[] {
-  const { inventory, cart } = useStudio();
-  const { engineByName, engineByPrincipal, egress } = useLookup();
-  return useMemo(() => {
-    const out: Check[] = [];
-    const inv = inventory.data;
-    if (!intent || !inv || intent.kind !== "grant" || !intent.source || !intent.destination) return out;
-    const src = intent.source;
-    const dest = intent.destination;
-    if (src.type === "engine" && src.engine) {
-      const e = engineByName.get(src.engine);
-      if (e && !e.gateways.egress) {
-        const staged = cart.some((i) => i.kind === "bind_gateway" && i.engine === e.name && i.gateway?.direction === "egress");
-        if (!e.bindable) out.push({ id: "nobind", tone: "red", text: <>{e.display_name} isn't behind an egress gateway and can't be bound ({e.bindable_reason ?? "created before 2026-04-29"}). This grant won't be checked until it is redeployed.</> });
-        else if (staged) out.push({ id: "bindstaged", tone: "info", text: <>{e.display_name} will be bound to an egress gateway (already in your cart).</> });
-        else
-          out.push({
-            id: "bind",
-            tone: "amber",
-            text: <>{e.display_name} isn't behind an egress gateway, so its calls go out directly and this grant is never checked.</>,
-            fix: egress ? { id: newId(), kind: "bind_gateway", gateway: { name: egress.name, direction: "egress" }, engine: e.name, engine_label: e.display_name } : undefined,
-            fixLabel: egress ? `Also stage: bind to ${egress.id}` : undefined,
-          });
-      }
-    }
-    const all = [...inv.agents.map((a) => a.name), ...inv.mcp_servers.map((m) => m.name), ...inv.endpoints.map((x) => x.name)];
-    if (!all.includes(dest.name)) out.push({ id: "unreg", tone: "amber", text: <>{dest.label} isn't in the Agent Registry for this region. The gateway can't route to unregistered destinations; register it first.</> });
-
-    const current: Binding[] = inv.access[dest.name] ?? [];
-    const cond = conditionFor(intent.access);
-    const mine = current.filter((b) => b.member === src.principal && b.role === ROLE);
-    if (mine.some((b) => (b.condition?.expression ?? "") === (cond?.expression ?? ""))) out.push({ id: "dup", tone: "info", text: <>This exact grant already exists. Adding it again changes nothing.</> });
-    else if (mine.length) {
-      // IAM adds bindings rather than replacing them: a grant would sit next to the existing one, which keeps its
-      // access. A modify swaps the existing binding (its exact condition) for this access in one change.
-      const g: Grant = { ...mine[0], resource: dest.name, resource_kind: dest.kind, resource_label: dest.label };
-      out.push({
-        id: "replace",
-        tone: "amber",
-        text: (
-          <>
-            {src.label} already has {mine[0].condition ? "conditional" : "unconditional"} access here (“{mine[0].english}”){mine.length > 1 ? ` and ${mine.length - 1} more grant${mine.length > 2 ? "s" : ""}` : ""}. IAM adds this grant as a second binding next to it, so the existing access stays as it is.
-          </>
-        ),
-        instead: { ...grantToModify(g, engineByPrincipal, intent.access ?? { mode: "all" }), source: src, destination: dest },
-        insteadLabel: "Change the existing grant instead",
-        insteadTip: "Stage one change that replaces the existing grant's access with this one (a single IAM update, so there's no moment with both or neither). Nothing changes in Google Cloud until you apply.",
-      });
-    }
-    const broader = current.find((b) => b.role === ROLE && !b.condition && b.member !== src.principal && (b.member.startsWith("principalSet://") || b.member.startsWith("all")) && src.type !== "project_agents");
-    if (broader) out.push({ id: "broader", tone: "amber", text: <>An existing broader grant already allows this: “{broader.english}”. Your narrower grant won't restrict it.</> });
-    if (intent.access?.mode === "all" && dest.kind === "mcp_server") {
-      const d = inv.mcp_servers.find((m) => m.name === dest.name)?.tools.filter((t) => t.destructive) ?? [];
-      if (d.length) out.push({ id: "destructive", tone: "amber", text: <>Full access includes destructive tools ({d.map((t) => t.name).join(", ")}). Consider “Read-only by MCP hint”.</> });
-    }
-    if (src.type === "project_agents") out.push({ id: "broad", tone: "info", text: <>Every agent in the project gets this, including agents created later.</> });
-    return out;
-  }, [intent, inventory.data, engineByName, engineByPrincipal, egress, cart]);
 }
 
 function AnatomyRow({ k, v, meaning, mono = true }: { k: string; v: React.ReactNode; meaning: React.ReactNode; mono?: boolean }) {
@@ -293,7 +205,7 @@ export function BuilderStep() {
   const projectSet = projectPrincipalSet(inv?.engines[0]?.principal, ctxInfo.data?.project_number);
   const customErr = srcType === "custom" ? validateMember(custom) : null;
   const effMode: AccessMode = dest && dest.kind !== "mcp_server" ? "all" : access;
-  const lint = effMode === "custom" ? lintExpression(expr) : [];
+  const lint = dest ? draftLint({ mode: access, tools, expr }, dest.kind) : [];
 
   const source: Intent["source"] | undefined =
     srcType === "engine" && eng
@@ -531,65 +443,18 @@ export function BuilderStep() {
               <Section n={3} title="How much of it?" sub={dest?.kind === "mcp_server" ? "MCP servers can be limited to some of their tools." : "A2A agents and APIs are all-or-nothing."} done={!!dest && howDone}>
                 {!dest ? (
                   <p className="muted">Pick a destination first.</p>
-                ) : dest.kind !== "mcp_server" ? (
-                  <div className="choices">
-                    <Choice name="how" checked onChange={() => undefined} title="Full access" desc={`The gateway checks who calls ${dest.label}, not which ${dest.kind === "agent" ? "skill" : "path"} they use, so access is all or nothing.`} />
-                  </div>
                 ) : (
-                  <div className="choices">
-                    <Choice name="how" checked={access === "read_only_hint"} onChange={() => setAccess("read_only_hint")} title="Read-only tools (by MCP hint)" badge={<Badge tone="green">Recommended</Badge>} desc={<>Allows tools the server marks <Term k="mcp-hints">readOnlyHint</Term>. New read-only tools are covered automatically; new write tools are not.</>}>
-                      <div className="tool-preview">
-                        Today that's: {readOnlyTools(mcp).map((t) => <span key={t} className="mono-chip">{t}</span>)}
-                      </div>
-                    </Choice>
-                    <Choice name="how" checked={access === "tools"} onChange={() => setAccess("tools")} title="Specific tools" desc="Pick tools by name. Tools added later are not included.">
-                      {mcp && (
-                        <div className="tool-check">
-                          <div className="tool-check-bar">
-                            <Tip tip="Tick every tool this MCP server marks readOnlyHint.">
-                              <button type="button" className="link-btn" onClick={() => setTools(readOnlyTools(mcp))}>
-                                Select all read-only
-                              </button>
-                            </Tip>
-                            <Tip tip="Untick every tool.">
-                              <button type="button" className="link-btn" onClick={() => setTools([])}>
-                                Clear
-                              </button>
-                            </Tip>
-                            <span className="muted small">{tools.length} selected</span>
-                          </div>
-                          {mcp.tools.map((t) => (
-                            <label key={t.name} className="tool-row">
-                              <input type="checkbox" checked={tools.includes(t.name)} onChange={(e) => setTools(e.target.checked ? [...tools, t.name] : tools.filter((x) => x !== t.name))} />
-                              <span className="mono small">{t.name}</span>
-                              <span className="muted small grow">{t.description}</span>
-                              <ToolBadge t={t} />
-                            </label>
-                          ))}
-                        </div>
-                      )}
-                    </Choice>
-                    <Choice name="how" checked={access === "all"} onChange={() => setAccess("all")} title="All tools" desc="Everything the server offers, including write and destructive tools." />
-                    <Choice name="how" checked={access === "custom"} onChange={() => setAccess("custom")} title="Custom expression" badge={<Badge tone="neutral">Advanced</Badge>} desc={<>Write your own <Term k="iam-condition">IAM condition</Term> (CEL).</>}>
-                      <textarea className="mono expr" rows={4} value={expr} onChange={(e) => setExpr(e.target.value)} spellCheck={false} aria-label="Custom condition" />
-                      {lint.length > 0 ? (
-                        <ul className="lint">
-                          {lint.map((l) => (
-                            <li key={l}>
-                              <WarnIcon size={13} /> {l}
-                            </li>
-                          ))}
-                        </ul>
-                      ) : (
-                        <div className="small ok-text">
-                          <CheckIcon size={13} /> Looks well-formed. IAM validates it for real when it's applied.
-                        </div>
-                      )}
-                      <div className="muted tiny">
-                        Attributes: <span className="mono">iap.googleapis.com/mcp.toolName</span>, <span className="mono">iap.googleapis.com/mcp.tool.isReadOnly</span>
-                      </div>
-                    </Choice>
-                  </div>
+                  <AccessChooser
+                    name="how"
+                    dest={dest}
+                    mcp={mcp}
+                    value={{ mode: access, tools, expr }}
+                    onChange={(d) => {
+                      setAccess(d.mode);
+                      setTools(d.tools);
+                      setExpr(d.expr);
+                    }}
+                  />
                 )}
               </Section>
 
@@ -642,12 +507,12 @@ export function BuilderStep() {
                     tip={
                       !intent
                         ? "Answer the questions above first."
-                        : lint.some((l) => /unbalanced|not closed|empty/.test(l))
+                        : blocking(lint)
                           ? "Fix the condition expression first."
                           : `${editId && cart.some((c) => c.id === editId) ? "Replace the staged item with this policy" : "Stage this policy in the cart"}${extraFixes.length ? ` plus ${extraFixes.length} fix` : ""}, then open Review & output. Nothing changes in Google Cloud until you apply.`
                     }
                   >
-                    <button className="btn btn-primary" disabled={!intent || lint.some((l) => /unbalanced|not closed|empty/.test(l))} onClick={() => commit(false)}>
+                    <button className="btn btn-primary" disabled={!intent || blocking(lint)} onClick={() => commit(false)}>
                       {editId && cart.some((c) => c.id === editId) ? "Save changes" : "Add to cart"}
                       {extraFixes.length > 0 && ` (+${extraFixes.length} fix)`}
                     </button>

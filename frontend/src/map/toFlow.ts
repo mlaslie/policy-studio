@@ -17,6 +17,8 @@ export interface MapNodeData extends Record<string, unknown> {
   toolStates?: Record<string, ToolState>;
   /** Selected-agent view: the verdict of the line into this destination. */
   ring?: Verdict;
+  /** Dragged into place by the user (saved): shows a pin with Unpin. */
+  pinned?: boolean;
   /** Section title nodes only. */
   title?: string;
   width?: number;
@@ -27,6 +29,8 @@ export interface MapEdgeData extends Record<string, unknown> {
   selected: boolean;
   /** Particles along the line (the clicked line only; never under reduced motion). */
   animate: boolean;
+  /** No dash animation on pending lines either. */
+  reducedMotion: boolean;
 }
 export type MNode = Node<MapNodeData>;
 export type MEdge = Edge<MapEdgeData>;
@@ -77,7 +81,8 @@ function toolStatesOf(e: PEdge | undefined, n: PNode): Record<string, ToolState>
   return { ...Object.fromEntries(e.tools.allowed.map((t) => [t, "allowed" as const])), ...Object.fromEntries(e.tools.denied.map((t) => [t, "denied" as const])), ...Object.fromEntries(e.tools.unknown.map((t) => [t, "unknown" as const])) };
 }
 
-export function nodeAria(n: PNode): string {
+/** The node's accessible name: label, kind, where it sits, how many lines, and what's pinned or staged on it. */
+export function nodeAria(n: PNode, lines?: number, pinned?: boolean): string {
   const kind: Record<PNodeKind, string> = {
     engine: "Agent Runtime agent",
     principal_group: "Callers",
@@ -93,7 +98,9 @@ export function nodeAria(n: PNode): string {
     registry: "Agent Registry",
   };
   const where = n.kind === "engine" ? (n.gateway ? `, behind ${n.gateway.split("/").pop()}` : ", no gateway") : "";
-  return `${n.label}, ${kind[n.kind]}${where}${n.unreadable ? ", IAP policy couldn't be read" : ""}`;
+  const count = lines === undefined || n.kind === "endpoint_group" ? "" : `, ${lines} ${lines === 1 ? "line" : "lines"}`;
+  const staged = n.pending?.text.length ? `, staged: ${n.pending.text.join("; ")}` : "";
+  return `${n.label}, ${kind[n.kind]}${where}${count}${n.unreadable ? ", IAP policy couldn't be read" : ""}${staged}${pinned ? ", pinned" : ""}`;
 }
 
 export const VIA_LABEL: Record<string, string> = { project_agents: "project-wide", public: "public", registry_wide: "registry-wide", other: "group or other" };
@@ -108,10 +115,20 @@ export function viaText(e: PEdge): string | null {
 export function edgeAria(e: PEdge, label: (id: string) => string): string {
   const from = e.caller && e.caller !== e.target ? label(e.caller) : label(e.source);
   const via = viaText(e);
-  return `${from} to ${label(e.target)}: ${VERDICT_LABEL[e.verdict]}${e.label ? ` (${e.label})` : ""}${via ? `, inherited via ${via} grant` : ""}`;
+  const staged = e.pending ? `, staged change: ${PENDING_WORD[e.pending]}${e.pending === "remove" && e.after ? `, then ${VERDICT_LABEL[e.after].toLowerCase()}` : e.before ? `, today ${VERDICT_LABEL[e.before].toLowerCase()}` : ""}` : "";
+  return `${from} to ${label(e.target)}: ${VERDICT_LABEL[e.verdict]}${e.label ? ` (${e.label})` : ""}${via ? `, inherited via ${via} grant` : ""}${staged}`;
 }
 
-export function toFlow(view: MapView, layout: Layout, sel: { node: string | null; edge: string | null; hit: string | null }, expanded: Set<string>, reducedMotion = false): { nodes: MNode[]; edges: MEdge[] } {
+export const PENDING_WORD = { add: "will be added", remove: "will be removed", change: "will change" } as const;
+
+export function toFlow(
+  view: MapView,
+  layout: Layout,
+  sel: { node: string | null; edge: string | null; hit: string | null },
+  expanded: Set<string>,
+  reducedMotion = false,
+  pinned: Set<string> = new Set(),
+): { nodes: MNode[]; edges: MEdge[] } {
   const label = new Map(view.nodes.map((n) => [n.id, n.label]));
   const lit = new Set<string>();
   if (sel.node) {
@@ -123,6 +140,8 @@ export function toFlow(view: MapView, layout: Layout, sel: { node: string | null
         if (e.caller) lit.add(e.caller);
       }
   }
+  const lines = new Map<string, number>();
+  for (const e of view.edges) if (e.verdict !== "path") for (const id of new Set([e.source, e.target, ...(e.parts ?? [e]).map((p) => p.caller ?? "")])) lines.set(id, (lines.get(id) ?? 0) + 1);
   const intoBy = new Map<string, PEdge>();
   if (view.focus) for (const e of view.edges) if (e.verdict !== "path") intoBy.set(e.target, e);
 
@@ -137,9 +156,10 @@ export function toFlow(view: MapView, layout: Layout, sel: { node: string | null
       expanded: expanded.has(n.id),
       toolStates: view.focus ? toolStatesOf(intoBy.get(n.id), n) : undefined,
       ring: view.focus ? intoBy.get(n.id)?.verdict : undefined,
+      pinned: pinned.has(n.id),
     },
     selected: sel.node === n.id,
-    ariaLabel: nodeAria(n),
+    ariaLabel: nodeAria(n, lines.get(n.id) ?? 0, pinned.has(n.id)),
     draggable: true,
   }));
   for (const h of layout.headers)
@@ -154,10 +174,10 @@ export function toFlow(view: MapView, layout: Layout, sel: { node: string | null
     sourceHandle: "out",
     targetHandle: "in",
     type: "policy",
-    className: [!!sel.node && !touches(e, sel.node) && "dim", sel.edge === e.id && "sel", e.implicit && "implicit"].filter(Boolean).join(" "),
+    className: [!!sel.node && !touches(e, sel.node) && "dim", sel.edge === e.id && "sel", e.implicit && "implicit", e.pending && `pending-${e.pending}`].filter(Boolean).join(" "),
     selected: sel.edge === e.id,
     ariaLabel: edgeAria(e, (id) => label.get(id) ?? id),
-    data: { edge: e, dim: !!sel.node && !touches(e, sel.node), selected: sel.edge === e.id, animate: !reducedMotion && sel.edge === e.id },
+    data: { edge: e, dim: !!sel.node && !touches(e, sel.node), selected: sel.edge === e.id, animate: !reducedMotion && sel.edge === e.id, reducedMotion },
   }));
   return { nodes, edges };
 }

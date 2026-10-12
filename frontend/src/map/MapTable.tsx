@@ -2,10 +2,10 @@
 // same MapView as the canvas, so the filters apply; also the screen-reader alternative to the canvas.
 import { useMemo, useState } from "react";
 import { NOGW, type PEdge, type PNode } from "./graph";
-import { VERDICT_LABEL, VIA_LABEL, viaText } from "./toFlow";
+import { PENDING_WORD, VERDICT_LABEL, VIA_LABEL, viaText } from "./toFlow";
 import { tableRows, type MapView } from "./view";
 
-type Key = "caller" | "gateway" | "dest" | "verdict" | "via" | "condition";
+type Key = "caller" | "gateway" | "dest" | "verdict" | "via" | "condition" | "pending";
 const COLS: { key: Key; label: string }[] = [
   { key: "caller", label: "Caller" },
   { key: "gateway", label: "Gateway" },
@@ -13,9 +13,11 @@ const COLS: { key: Key; label: string }[] = [
   { key: "verdict", label: "Verdict" },
   { key: "via", label: "Via" },
   { key: "condition", label: "Condition" },
+  { key: "pending", label: "Staged" },
 ];
 
-export function rowCells(e: PEdge, label: (id: string) => string): Record<Key, string> {
+/** A row of a combined line: the agent's own part, with the combined line's pending mark when it has none. */
+export function rowCells(e: PEdge, label: (id: string) => string, line?: PEdge): Record<Key, string> {
   const ingress = e.direction === "ingress";
   // A pseudo caller (project-wide, public, other principals) isn't behind one gateway: each agent's own is used.
   const pseudo = e.source.startsWith("pseudo:");
@@ -27,6 +29,7 @@ export function rowCells(e: PEdge, label: (id: string) => string): Record<Key, s
     verdict: VERDICT_LABEL[e.verdict] + (e.label && e.label !== "?" && !e.parts ? ` (${e.label})` : ""),
     via: e.implicit ? "No grant" : pseudo ? [...new Set(e.reasons.map((r) => VIA_LABEL[r.via] ?? r.via))].join(", ") : (viaText(e) ?? (e.reasons.length ? "Direct grant" : "")),
     condition: e.implicit ? "" : conds.join("; "),
+    pending: (e.pending ?? line?.pending) ? `Will ${PENDING_WORD[(e.pending ?? line!.pending)!].replace(/^will /, "")}` : "",
   };
 }
 
@@ -37,7 +40,8 @@ export default function MapTable({ view, nodes, selected, onSelect }: { view: Ma
     return (id: string) => m.get(id) ?? id.split("/").pop() ?? id;
   }, [nodes]);
   const rows = useMemo(() => {
-    const rs = tableRows(view).map((e, i) => ({ e, i, c: rowCells(e, label) }));
+    const lineOf = new Map(view.edges.flatMap((l) => (l.parts ?? []).map((p) => [p.id, l] as const)));
+    const rs = tableRows(view).map((e, i) => ({ e, i, c: rowCells(e, label, lineOf.get(e.id)) }));
     return rs.sort((a, b) => sort.dir * a.c[sort.key].localeCompare(b.c[sort.key]) || a.c.dest.localeCompare(b.c.dest) || a.i - b.i);
   }, [view, label, sort]);
   return (
@@ -71,6 +75,7 @@ export default function MapTable({ view, nodes, selected, onSelect }: { view: Ma
               </td>
               <td>{c.via}</td>
               <td className="small">{c.condition}</td>
+              <td className="small">{c.pending}</td>
             </tr>
           ))}
           {!rows.length && (

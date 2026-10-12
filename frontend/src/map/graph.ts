@@ -8,6 +8,9 @@
 import type { Access, Binding, ContextInfo, Ctx, EnforcementMode, Engine, Gateway, Inventory, ModelArmorResp } from "../api/types";
 import { ROLE, accessFromCondition } from "../lib/policy";
 import { ENGINE_PRINCIPAL_RE, EVERYONE, PROJECT_AGENTS_RE, conditionAllows, evaluateTools, isReadOnlyHint, memberMatches, parseTools } from "./evaluate";
+import { CLIENT, NOGW, PSEUDO, pseudoOf } from "./ids";
+
+export { CLIENT, NOGW, PSEUDO };
 
 export type Direction = "egress" | "ingress";
 export type PNodeKind =
@@ -39,7 +42,9 @@ export type Via = "member" | "project_agents" | "public" | "registry_wide" | "ot
 export type ResourceKind = "agent" | "mcp_server" | "endpoint" | "registry";
 export type Column = "callers" | "gateways" | "dests" | "sink";
 export type Tone = "neutral" | "blue" | "red" | "green" | "amber" | "orange";
-export type Chip = { text: string; tone: Tone; title?: string };
+/** pending: a staged change (drawn with a clock). */
+export type Chip = { text: string; tone: Tone; title?: string; pending?: boolean };
+export type Pending = "add" | "remove" | "change";
 export type ToolSplit = { allowed: string[]; denied: string[]; unknown: string[] };
 
 /** One binding that contributes to a line. */
@@ -89,6 +94,8 @@ export interface PNode {
   grouped?: string[];
   /** Lowercase label + id + sub, for search. */
   search: string;
+  /** Staged-change view (diff.ts): what the cart changes on this node, and the cart intents that do it. */
+  pending?: { text: string[]; removed?: boolean; intents: string[] };
 }
 
 export interface PEdge {
@@ -114,6 +121,13 @@ export interface PEdge {
   label?: string;
   /** Non-MCP destination with a tool condition: calls carry toolName '', which the condition allows. */
   note?: string;
+  /** Staged-change view (diff.ts, §8): the line is added, removed or changed by the cart. `before` / `after` are the
+   *  verdicts today and after Apply (the line itself is drawn as it will be, or as it is today when removed). */
+  pending?: Pending;
+  before?: Verdict;
+  beforeLabel?: string;
+  after?: Verdict;
+  intents?: string[];
 }
 
 export interface PolicyGraph {
@@ -141,9 +155,6 @@ export interface GraphInput {
   inherited?: boolean;
 }
 
-export const PSEUDO = { project: "pseudo:project_agents", public: "pseudo:public", other: "pseudo:other", anywhere: "pseudo:anywhere" } as const;
-export const NOGW = { egress: "nogw:egress", ingress: "nogw:ingress" } as const;
-export const CLIENT = { any: "client:any", ge: "client:ge" } as const;
 /** Registry-wide IAM key: projects/<GP>/locations/<R>. */
 export const REGISTRY_KEY_RE = /^projects\/[^/]+\/locations\/[^/]+$/;
 
@@ -200,13 +211,6 @@ function evaluateBindings(ms: { reason: Reason; match: boolean | null }[], dest:
     if (ok === null) unknown = true;
   }
   return unknown ? { verdict: "conditional", label: "?" } : { verdict: null };
-}
-
-/** Which pseudo caller draws a binding whose member isn't an engine in the inventory. */
-function pseudoOf(member: string, projectSet: string | null): string {
-  if (EVERYONE.includes(member)) return PSEUDO.public;
-  if (member === projectSet || PROJECT_AGENTS_RE.test(member)) return PSEUDO.project;
-  return PSEUDO.other;
 }
 
 function viaOf(member: string, principal: string | null, registry: boolean): Via {

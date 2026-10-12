@@ -16,6 +16,8 @@ import { WarningCallouts } from "./ModelArmorSetup";
 import { RedeployHelp } from "../components/Redeploy";
 import { PlayIcon } from "../components/Icons";
 import { DESTRUCTIVE_PHRASE, MODIFY_STATUS, isDestructive } from "../lib/apply";
+import { ShowOnMap } from "../components/ShowOnMap";
+import { focusForIntent } from "../map/focus";
 
 function ApplyButton({ ids, label, small }: { ids: string[] | null; label: string; small?: boolean }) {
   const { openApply, cart, ctx } = useStudio();
@@ -103,7 +105,7 @@ function DiffColumn({ intent, d }: { intent: Intent; d: DiffItem | undefined }) 
 }
 
 function ItemCard({ intent, idx, res, diff, fmt, setFmt }: { intent: Intent; idx: number; res: RenderResult | null; diff: DiffItem | undefined; fmt: Fmt; setFmt: (f: Fmt) => void }) {
-  const { removeIntent, openBuilder } = useStudio();
+  const { removeIntent, openBuilder, inventory } = useStudio();
   const item = res?.items.find((x) => x.intent_id === intent.id);
   const f = FMT.find((x) => x.id === fmt)!;
   return (
@@ -124,6 +126,7 @@ function ItemCard({ intent, idx, res, diff, fmt, setFmt }: { intent: Intent; idx
           </div>
           <h3>{item?.english ?? intentEnglish(intent)}</h3>
         </div>
+        <ShowOnMap focus={focusForIntent(intent, inventory.data)} what="this pending change" compact />
         {(intent.kind === "grant" || intent.kind === "revoke") && (
           <Tip tip="Open this item in the builder to change it. Saving replaces it in the cart.">
             <button className="icon-btn" aria-label="Edit in builder" onClick={() => openBuilder(intent, { editId: intent.id, mode: intent.kind === "revoke" ? "revoke" : "grant" })}>

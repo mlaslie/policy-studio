@@ -9,6 +9,8 @@ import { useApplyGate } from "../components/Mode";
 import { Tip, unavailable } from "../components/Tooltip";
 import { CartIcon, CloseIcon, DuplicateIcon, PencilIcon, PlayIcon, TrashIcon, ArrowIcon } from "../components/Icons";
 import type { Intent } from "../api/types";
+import { ShowOnMap } from "../components/ShowOnMap";
+import { focusForIntent } from "../map/focus";
 
 const TONE: Record<Intent["kind"], string> = {
   grant: "green",
@@ -102,7 +104,7 @@ export function CartButton() {
 }
 
 function CartPopover({ id, panelRef, onClose }: { id: string; panelRef: RefObject<HTMLDivElement | null>; onClose: (returnFocus: boolean) => void }) {
-  const { cart, ctx, removeIntent, duplicateIntent, openBuilder, openReview, openApply, clearCart, reviewFocus, step } = useStudio();
+  const { cart, ctx, removeIntent, duplicateIntent, openBuilder, openReview, openApply, clearCart, reviewFocus, step, inventory } = useStudio();
   const gate = useApplyGate();
   const [confirmClear, setConfirmClear] = useState(false);
   const sorted = [...cart].sort((a, b) => KIND_ORDER[a.kind] - KIND_ORDER[b.kind]);
@@ -170,6 +172,7 @@ function CartPopover({ id, panelRef, onClose }: { id: string; panelRef: RefObjec
                   </button>
                 </Tip>
                 <div className="cart-actions">
+                  <ShowOnMap focus={focusForIntent(i, inventory.data)} what="this pending change" compact onOpen={() => onClose(false)} />
                   {(i.kind === "grant" || i.kind === "revoke") && (
                     <Tip tip="Open this item in the builder to change it. Saving replaces it in the cart.">
                       <button

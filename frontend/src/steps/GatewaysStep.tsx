@@ -11,6 +11,8 @@ import { intentKey, newId, shortName } from "../lib/policy";
 import { RedeployHelp } from "../components/Redeploy";
 import { useApplyGate } from "../components/Mode";
 import { fmtDate, plural } from "../lib/util";
+import { ShowOnMap } from "../components/ShowOnMap";
+import { focusForGateway } from "../map/focus";
 
 export function ProviderChip({ p }: { p: Gateway["authz_policies"][number] }) {
   const label = p.provider === "iap" ? "IAP" : p.provider === "model_armor" ? "Model Armor" : "Other";
@@ -476,7 +478,7 @@ function GatewayCard({ gw }: { gw: Gateway }) {
   const staged = (e: string) => cart.some((i) => i.kind === "unbind_gateway" && i.engine === e && i.gateway?.name === gw.name);
   const hasIap = gw.authz_policies.some((p) => p.provider === "iap");
   return (
-    <article className={`card gw-card ${gw.enforcement?.mode === "DRY_RUN" ? "gw-dry" : ""}`}>
+    <article className={`card gw-card ${gw.enforcement?.mode === "DRY_RUN" ? "gw-dry" : ""}`} id={`gw-${gw.id}`}>
       <header className="gw-head">
         <span className={`gw-icon gw-${gw.type}`}>
           <GatewayIcon size={20} />
@@ -488,6 +490,7 @@ function GatewayCard({ gw }: { gw: Gateway }) {
             <span className="mono tiny">{gw.governed_access_path}</span> · created {fmtDate(gw.create_time)}
           </div>
         </div>
+        <ShowOnMap focus={focusForGateway(gw)} what={gw.id} />
       </header>
       <p className="gw-explain">
         {gw.type === "egress" ? (

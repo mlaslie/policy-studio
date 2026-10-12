@@ -1,0 +1,177 @@
+// The staged-change view (docs/VISUALIZATION_PLAN.md §8, §14): simulate.ts applies each intent kind to a copy of the
+// state (grants and revokes matched on the condition expression), diff.ts turns before / after into pending add,
+// remove and change, with the cart intents behind each.
+import { describe, expect, it } from "vitest";
+import { buildWorld } from "../api/mockData";
+import type { Ctx, Intent } from "../api/types";
+import { READ_ONLY_EXPR, ROLE } from "../lib/policy";
+import { NOGW, buildPolicyGraph, type Direction, type PEdge } from "./graph";
+import { diffGraphs, mergeStaged, pairKey } from "./diff";
+import { simulate, type MapState } from "./simulate";
+import { DEFAULT_FILTERS, viewOf } from "./view";
+
+const CTX: Ctx = { project: "my-demo-project", region: "us-east4" };
+const w0 = buildWorld(CTX);
+const inv = w0.inventory;
+const state: MapState = { inventory: inv, gateways: w0.gateways, modelArmor: w0.modelArmor };
+const eng = (name: string) => inv.engines.find((e) => e.display_name === name)!;
+const dest = (name: string) => [...inv.agents, ...inv.mcp_servers, ...inv.endpoints].find((d) => d.display_name === name)!;
+const EGRESS = w0.gateways.find((g) => g.type === "egress")!;
+const INGRESS = w0.gateways.find((g) => g.type === "ingress")!;
+const hd = eng("Helpdesk Agent");
+const travel = eng("Travel Planner");
+const tickets = dest("Tickets MCP");
+const hrd = dest("HR Directory MCP");
+const src = (e = hd) => ({ type: "engine" as const, principal: e.principal, label: e.display_name, engine: e.name });
+const dst = (d: { id: string; name: string; display_name: string }, kind: "mcp_server" | "agent" | "endpoint" = "mcp_server") => ({ kind, id: d.id, name: d.name, label: d.display_name });
+
+/** Before, after and the merged graph for a cart (optionally with an agent selected). */
+function staged(cart: Intent[], direction: Direction = "egress", focus?: string) {
+  const sim = simulate(state, cart);
+  const input = { direction, focus, ctx: CTX };
+  const before = buildPolicyGraph({ ...input, inventory: inv, gateways: w0.gateways, modelArmor: w0.modelArmor });
+  const after = buildPolicyGraph({ ...input, inventory: sim.inventory, gateways: sim.gateways, modelArmor: sim.modelArmor });
+  const d = diffGraphs(before, after);
+  return { sim, before, after, d, merged: mergeStaged(before, after, d, cart, inv, sim.effects) };
+}
+const line = (ls: PEdge[] | null, caller: string, target: string) => ls?.find((l) => l.caller === caller && l.target === target);
+
+describe("simulate", () => {
+  it("never touches the state it's given", () => {
+    const before = JSON.stringify(state);
+    simulate(state, [{ id: "g", kind: "grant", source: src(), destination: dst(hrd), access: { mode: "all" } }, { id: "b", kind: "bind_gateway", engine: travel.name, gateway: { name: EGRESS.name, direction: "egress" } }]);
+    expect(JSON.stringify(state)).toBe(before);
+  });
+
+  it("grant adds a binding once (an exact duplicate is a no-op)", () => {
+    const g: Intent = { id: "g", kind: "grant", source: src(), destination: dst(hrd), access: { mode: "read_only_hint" } };
+    const s = simulate(state, [g, { ...g, id: "g2" }]);
+    const mine = s.inventory.access[hrd.name].filter((b) => b.member === hd.principal);
+    expect(mine).toEqual([expect.objectContaining({ role: ROLE, condition: expect.objectContaining({ expression: READ_ONLY_EXPR }) })]);
+    expect(s.effects.g).toContain(hrd.name);
+  });
+
+  it("revoke matches the condition expression (whitespace aside), not the title", () => {
+    const spaced = READ_ONLY_EXPR.replace(" || ", "   ||\n ");
+    const ok = simulate(state, [{ id: "r", kind: "revoke", source: src(), destination: dst(tickets), access: { mode: "custom", expression: spaced, title: "another title" } }]);
+    expect(ok.inventory.access[tickets.name].some((b) => b.member === hd.principal)).toBe(false);
+    const other = simulate(state, [{ id: "r", kind: "revoke", source: src(), destination: dst(tickets), access: { mode: "all" } }]);
+    expect(other.inventory.access[tickets.name].some((b) => b.member === hd.principal)).toBe(true);
+  });
+
+  it("modify swaps exactly the access_from binding; a missing one changes nothing", () => {
+    const m: Intent = { id: "m", kind: "modify", source: src(), destination: dst(tickets), access_from: { mode: "custom", expression: READ_ONLY_EXPR }, access: { mode: "tools", tools: ["get_ticket"] } };
+    const s = simulate(state, [m]);
+    const mine = s.inventory.access[tickets.name].filter((b) => b.member === hd.principal);
+    expect(mine).toHaveLength(1);
+    expect(mine[0].condition?.expression).toContain("'get_ticket'");
+    const gone = simulate(state, [{ ...m, access_from: { mode: "all" } }]);
+    expect(gone.inventory.access[tickets.name]).toEqual(inv.access[tickets.name]);
+  });
+
+  it("bind / unbind move the engine and the gateway's bound list", () => {
+    const b = simulate(state, [{ id: "b", kind: "bind_gateway", engine: travel.name, gateway: { name: EGRESS.name, direction: "egress" } }]);
+    expect(b.inventory.engines.find((e) => e.name === travel.name)!.gateways.egress).toBe(EGRESS.name);
+    expect(b.gateways.find((g) => g.name === EGRESS.name)!.bound_engines.some((x) => x.engine === travel.name && x.direction === "egress")).toBe(true);
+    const u = simulate(state, [{ id: "u", kind: "unbind_gateway", engine: hd.name, gateway: { name: EGRESS.name, direction: "egress" } }]);
+    expect(u.inventory.engines.find((e) => e.name === hd.name)!.gateways.egress).toBeUndefined();
+    expect(u.gateways.find((g) => g.name === EGRESS.name)!.bound_engines.some((x) => x.engine === hd.name && x.direction === "egress")).toBe(false);
+  });
+
+  it("set_enforcement: shared changes every gateway on the extension, dedicated only the one", () => {
+    const ext = EGRESS.enforcement!.extension;
+    const shared = simulate(state, [{ id: "e", kind: "set_enforcement", gateway: { name: EGRESS.name, direction: "egress" }, extension: ext, mode: "ENFORCE", scope: "shared" }]);
+    expect(shared.gateways.filter((g) => g.enforcement).map((g) => g.enforcement!.mode)).toEqual(["ENFORCE", "ENFORCE"]);
+    expect(shared.effects.e.sort()).toEqual([EGRESS.name, INGRESS.name].sort());
+    const ded = simulate(state, [{ id: "e", kind: "set_enforcement", gateway: { name: EGRESS.name, direction: "egress" }, extension: ext, mode: "ENFORCE", scope: "dedicated" }]);
+    expect(ded.gateways.find((g) => g.name === INGRESS.name)!.enforcement!.mode).toBe("DRY_RUN");
+  });
+
+  it("Model Armor on / off set enabled; kinds the map doesn't draw are ignored", () => {
+    const s = simulate(state, [
+      { id: "on", kind: "model_armor_on", gateway: { name: INGRESS.name, direction: "ingress" } },
+      { id: "off", kind: "model_armor_off", gateway: { name: EGRESS.name, direction: "egress" } },
+      { id: "t", kind: "model_armor_template", params: { template_id: "x" } },
+    ]);
+    expect(s.modelArmor!.gateways.find((g) => g.gateway === INGRESS.name)!.enabled).toBe(true);
+    expect(s.modelArmor!.gateways.find((g) => g.gateway === EGRESS.name)!.enabled).toBe(false);
+    expect(s.ignored).toEqual(["t"]);
+  });
+});
+
+describe("diff: pending add, remove and change for each kind", () => {
+  it("grant: the default-deny line becomes a pending add (drawn once)", () => {
+    const g: Intent = { id: "g", kind: "grant", source: src(), destination: dst(hrd), access: { mode: "read_only_hint" } };
+    const { merged } = staged([g], "egress", hd.name);
+    const ls = merged.focusLines!.filter((l) => l.caller === hd.name && l.target === hrd.name);
+    expect(ls).toHaveLength(1);
+    expect(ls[0]).toMatchObject({ id: `a:${hd.name}|${hrd.name}`, pending: "add", before: "would_deny", verdict: "partial", intents: ["g"] });
+    // without a selected agent: the combined line through the gateway gains a part
+    const c = staged([g]).merged.edges.find((e) => e.id === `c:${EGRESS.name}|${hrd.name}`)!;
+    expect(c.pending).toBe("change");
+    expect(c.intents).toEqual(["g"]);
+  });
+
+  it("revoke: a pending remove that will be denied by default (dry run: would be denied)", () => {
+    const r: Intent = { id: "r", kind: "revoke", source: src(), destination: dst(tickets), access: { mode: "custom", expression: READ_ONLY_EXPR } };
+    const { merged, after } = staged([r], "egress", hd.name);
+    const l = line(merged.focusLines, hd.name, tickets.name)!;
+    expect(l).toMatchObject({ pending: "remove", verdict: "partial", after: "would_deny", intents: ["r"] });
+    expect(line(after.focusLines, hd.name, tickets.name)?.implicit).toBe(true);
+    // the default-deny line it becomes isn't drawn as well
+    expect(merged.focusLines!.filter((x) => x.target === tickets.name && x.caller === hd.name)).toHaveLength(1);
+  });
+
+  it("modify: one pending change, today's verdict kept for the text", () => {
+    const m: Intent = { id: "m", kind: "modify", source: src(), destination: dst(tickets), access_from: { mode: "custom", expression: READ_ONLY_EXPR }, access: { mode: "tools", tools: ["get_ticket"] } };
+    const l = line(staged([m], "egress", hd.name).merged.focusLines, hd.name, tickets.name)!;
+    expect(l).toMatchObject({ pending: "change", before: "partial", beforeLabel: "read-only", verdict: "partial", intents: ["m"] });
+    expect(l.label).not.toBe("read-only");
+  });
+
+  it("bind: the agent changes lane; its dormant lines move behind the gateway", () => {
+    const b: Intent = { id: "b", kind: "bind_gateway", engine: travel.name, gateway: { name: EGRESS.name, direction: "egress" } };
+    const { merged, d } = staged([b]);
+    expect(d.nodes.get(travel.name)).toEqual(["Binding to corp-egress staged"]);
+    expect(merged.nodes.find((n) => n.id === travel.name)!.pending).toEqual({ text: ["Binding to corp-egress staged"], intents: ["b"] });
+    const lane = merged.edges.find((e) => e.id === `trunk:${travel.name}`)!;
+    expect(lane).toMatchObject({ pending: "change", before: "direct", verdict: "path", intents: ["b"] });
+    const cal = dest("Calendar Agent").name;
+    expect(merged.edges.find((e) => e.id === `c:${NOGW.egress}|${cal}`)).toMatchObject({ pending: "remove", verdict: "dormant" });
+    expect(merged.edges.find((e) => e.id === `c:${EGRESS.name}|${cal}`)?.pending).toBe("add");
+    expect(pairKey(merged.edges.find((e) => e.id === `trunk:${travel.name}`)!)).toBe(`lane:${travel.name}`);
+  });
+
+  it("unbind: the agent leaves the gateway lane", () => {
+    const u: Intent = { id: "u", kind: "unbind_gateway", engine: hd.name, gateway: { name: EGRESS.name, direction: "egress" } };
+    const { merged, d } = staged([u]);
+    expect(d.nodes.get(hd.name)).toEqual(["Unbinding from corp-egress staged"]);
+    expect(merged.edges.find((e) => e.id === `direct:${hd.name}`)).toMatchObject({ pending: "change", before: "path", verdict: "direct", intents: ["u"] });
+  });
+
+  it("set_enforcement: would-deny lines become blocked; the gateway shows the staged mode", () => {
+    const e: Intent = { id: "e", kind: "set_enforcement", gateway: { name: EGRESS.name, direction: "egress" }, extension: EGRESS.enforcement!.extension, mode: "ENFORCE", scope: "shared" };
+    const { merged } = staged([e], "egress", hd.name);
+    expect(line(merged.focusLines, hd.name, hrd.name)).toMatchObject({ pending: "change", before: "would_deny", verdict: "blocked", intents: ["e"] });
+    expect(merged.nodes.find((n) => n.id === EGRESS.name)!.pending?.text).toEqual(["Dry run → Enforce (staged)"]);
+    // an allowed line only changes its mode: not marked
+    expect(line(merged.focusLines, hd.name, dest("Knowledge Base Agent").name)?.pending).toBeUndefined();
+  });
+
+  it("Model Armor on (ingress): unscreened lines become screened; off shows on the gateway", () => {
+    const on: Intent = { id: "on", kind: "model_armor_on", gateway: { name: INGRESS.name, direction: "ingress" } };
+    const { merged } = staged([on], "ingress");
+    expect(merged.edges.find((x) => x.id === `i:${INGRESS.name}|${hd.name}`)).toMatchObject({ pending: "change", before: "unscreened", verdict: "screened", intents: ["on"] });
+    expect(merged.nodes.find((n) => n.id === INGRESS.name)!.pending).toEqual({ text: ["Model Armor on (staged)"], intents: ["on"] });
+    const off: Intent = { id: "off", kind: "model_armor_off", gateway: { name: EGRESS.name, direction: "egress" } };
+    expect(staged([off]).merged.nodes.find((n) => n.id === EGRESS.name)!.pending?.text).toEqual(["Model Armor off (staged)"]);
+  });
+
+  it("Changes only: just the pending lines, the trunks to them, and their nodes", () => {
+    const g: Intent = { id: "g", kind: "grant", source: src(), destination: dst(hrd), access: { mode: "read_only_hint" } };
+    const v = viewOf(staged([g]).merged, DEFAULT_FILTERS, null, { changesOnly: true });
+    expect(v.edges.filter((e) => e.verdict !== "path").every((e) => e.pending)).toBe(true);
+    expect(v.edges.some((e) => e.id === `trunk:${hd.name}`)).toBe(true);
+    expect(new Set(v.nodes.map((n) => n.id))).toEqual(new Set(v.edges.flatMap((e) => [e.source, e.target])));
+  });
+});

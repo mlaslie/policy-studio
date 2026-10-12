@@ -9,6 +9,7 @@ import { CopyButton } from "../components/Glass";
 import { ArrowIcon, SearchIcon, WarnIcon } from "../components/Icons";
 import { shortName } from "../lib/policy";
 import { fmtDate, plural } from "../lib/util";
+import { ShowOnMap } from "../components/ShowOnMap";
 
 type Tab = "agents" | "mcp" | "apis" | "engines";
 
@@ -74,11 +75,14 @@ function destOf(kind: ResourceKind, x: { id: string; name: string; display_name:
 function BuildBtn({ dest }: { dest: Intent["destination"] }) {
   const { openBuilder } = useStudio();
   return (
-    <Tip tip={`Open the builder with ${dest?.label ?? "this destination"} filled in as what may be called. Nothing is staged yet.`}>
-      <button className="btn btn-small btn-tonal" onClick={() => openBuilder({ kind: "grant", destination: dest })}>
-        Build a policy for this <ArrowIcon size={14} />
-      </button>
-    </Tip>
+    <>
+      <ShowOnMap focus={dest ? { direction: "egress", node: dest.name } : null} what={dest?.label ?? "this destination"} compact />
+      <Tip tip={`Open the builder with ${dest?.label ?? "this destination"} filled in as what may be called. Nothing is staged yet.`}>
+        <button className="btn btn-small btn-tonal" onClick={() => openBuilder({ kind: "grant", destination: dest })}>
+          Build a policy for this <ArrowIcon size={14} />
+        </button>
+      </Tip>
+    </>
   );
 }
 
@@ -171,6 +175,7 @@ function EngineCard({ e }: { e: Engine }) {
             <span className="mono">reasoningEngines/{e.id}</span> · created {fmtDate(e.create_time)}
           </div>
         </div>
+        <ShowOnMap focus={{ direction: "egress", node: e.name }} what={e.display_name} compact />
         <Tip tip={`Open the builder with ${e.display_name} filled in as the caller. Nothing is staged yet.`}>
           <button
             className="btn btn-small btn-tonal"

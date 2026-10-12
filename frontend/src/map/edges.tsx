@@ -1,11 +1,14 @@
 // Policy map lines, ported from the demo's diagram/edges.tsx (bezier path with a halo, arrowhead, badge ~80% along,
 // particles). One line type, styled by verdict (VISUALIZATION_PLAN §5.2): dash patterns, the ✕ / "?" badges, the
 // half-filled arrow for partial access and the Model Armor shield at the gateway end, so color is never the only cue.
+// Staged changes (§8) add a clock badge and a word: a pending add is dashed (animated unless reduced motion), a pending
+// remove keeps today's style under a red dashed overlay, a pending change is drawn as it will be.
 import { BaseEdge, EdgeLabelRenderer, getBezierPath, type EdgeProps } from "@xyflow/react";
 import { memo } from "react";
-import { CloseIcon, ShieldIcon } from "../components/Icons";
+import { ClockIcon, CloseIcon, ShieldIcon } from "../components/Icons";
 import type { PEdge, Verdict } from "./graph";
-import { VERDICT_LABEL, viaText, type MEdge } from "./toFlow";
+import { PENDING_WORD, VERDICT_LABEL, viaText, type MEdge } from "./toFlow";
+import { pendingText } from "./diff";
 
 export { viaText };
 
@@ -41,6 +44,7 @@ export function edgeTitle(e: PEdge): string {
     e.mode === "DRY_RUN" && e.verdict !== "path" ? "gateway in dry run" : "",
     e.modelArmor ? (e.modelArmorDryRun ? "Model Armor screening (dry run)" : "Model Armor screening") : "",
     e.note ?? "",
+    e.pending ? `Staged: ${PENDING_WORD[e.pending]}. ${pendingText(e)}` : "",
   ]
     .filter(Boolean)
     .join(" · ");
@@ -59,7 +63,7 @@ function PolicyEdgeImpl({ id, sourceX, sourceY, targetX, targetY, sourcePosition
   const [sx, sy] = at(Math.min(0.3, 30 / Math.max(1, Math.hypot(targetX - sourceX, targetY - sourceY))));
   const marker = v === "partial" ? "url(#pm-arrow-partial)" : v === "blocked" || v === "would_deny" ? undefined : `url(#pm-arrow-${v})`;
   const via = viaText(e);
-  const text = [e.label && e.label !== "?" ? e.label : "", via ?? ""].filter(Boolean).join(" · ");
+  const text = [e.pending ? `staged: ${PENDING_WORD[e.pending]}` : "", e.label && e.label !== "?" ? e.label : "", via ?? ""].filter(Boolean).join(" · ");
   const badge =
     v === "blocked" ? (
       <span className="edge-badge badge-denied">
@@ -76,7 +80,14 @@ function PolicyEdgeImpl({ id, sourceX, sourceY, targetX, targetY, sourcePosition
   return (
     <>
       <path d={path} className="edge-halo" />
-      <BaseEdge id={id} path={path} className={`edge-path st-${v} ${e.inherited ? "inherited" : ""}`} markerEnd={marker} interactionWidth={18} />
+      <BaseEdge
+        id={id}
+        path={path}
+        className={`edge-path st-${v} ${e.inherited ? "inherited" : ""} ${e.pending === "add" ? `pending-add${data!.reducedMotion ? " still" : ""}` : ""}`}
+        markerEnd={marker}
+        interactionWidth={18}
+      />
+      {e.pending === "remove" && <path d={path} className="edge-pending-remove" fill="none" />}
       <path d={path} className="edge-hit" fill="none">
         <title>{title}</title>
       </path>
@@ -96,9 +107,14 @@ function PolicyEdgeImpl({ id, sourceX, sourceY, targetX, targetY, sourcePosition
           ))}
         </g>
       )}
-      {(badge || text) && (
+      {(badge || text || e.pending) && (
         <EdgeLabelRenderer>
           <div className={`edge-badge-wrap ${data!.dim ? "dim" : ""}`} style={{ transform: `translate(-50%, -50%) translate(${bx}px, ${by}px)` }} title={title}>
+            {e.pending && (
+              <span className={`edge-badge badge-pending pending-${e.pending}`}>
+                <ClockIcon size={12} />
+              </span>
+            )}
             {badge}
             {text && <span className={`edge-label st-${v}`}>{text}</span>}
           </div>

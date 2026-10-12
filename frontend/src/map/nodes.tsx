@@ -4,12 +4,12 @@
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 import { createContext, memo, useContext } from "react";
 import type { CSSProperties } from "react";
-import { ApiIcon, ArrowIcon, BookIcon, CloudIcon, GatewayIcon, PencilIcon, PersonIcon, RegistryIcon, RobotIcon, ServerIcon, ShieldIcon, WarnIcon } from "../components/Icons";
+import { ApiIcon, ArrowIcon, BookIcon, ClockIcon, CloudIcon, GatewayIcon, PencilIcon, PersonIcon, PinIcon, RegistryIcon, RobotIcon, ServerIcon, ShieldIcon, WarnIcon } from "../components/Icons";
 import type { Chip } from "./graph";
 import type { MNode, ToolState } from "./toFlow";
 
 /** Actions a node can trigger (kept out of node data so it stays plain). */
-export const MapActions = createContext<{ jump: (id: string) => void }>({ jump: () => undefined });
+export const MapActions = createContext<{ jump: (id: string) => void; unpin: (id: string) => void }>({ jump: () => undefined, unpin: () => undefined });
 
 const H = ({ type, pos, id, style }: { type: "source" | "target"; pos: Position; id: string; style?: CSSProperties }) => (
   <Handle type={type} position={pos} id={id} isConnectable={false} className="hnd" style={style} />
@@ -26,15 +26,37 @@ function Chips({ chips }: { chips?: Chip[] }) {
   return (
     <div className="node-chips">
       {chips.map((c) => (
-        <span key={c.text} className={`chip chip-${c.tone}`} title={c.title}>
-          {c.text}
+        <span key={c.text} className={`chip chip-${c.tone} ${c.pending ? "chip-pending" : ""}`} title={c.title}>
+          {c.pending && <ClockIcon size={11} />} {c.text}
         </span>
       ))}
     </div>
   );
 }
 
-const cls = (d: MNode["data"], ...more: (string | false | undefined)[]) => ["node", d.dim && "dim", d.hit && "hit", d.ring && `ring-${d.ring}`, ...more].filter(Boolean).join(" ");
+/** A node you dragged keeps its place (saved per project, region and direction): a pin, and Unpin to send it back to
+ *  the automatic layout. */
+function Pin({ id, data }: { id: string; data: MNode["data"] }) {
+  const { unpin } = useContext(MapActions);
+  if (!data.pinned) return null;
+  return (
+    <button
+      type="button"
+      className="node-pin nodrag nopan"
+      onClick={(e) => {
+        e.stopPropagation();
+        unpin(id);
+      }}
+      aria-label={`Unpin ${data.node.label}: back to the automatic layout`}
+      title="Pinned where you dropped it. Click to unpin (back to the automatic layout)."
+    >
+      <PinIcon size={12} />
+      <span className="node-pin-text">Unpin</span>
+    </button>
+  );
+}
+
+const cls = (d: MNode["data"], ...more: (string | false | undefined)[]) => ["node", d.dim && "dim", d.hit && "hit", d.ring && `ring-${d.ring}`, d.node.pending && (d.node.pending.removed ? "pending-removed" : "pending"), ...more].filter(Boolean).join(" ");
 
 /** "Same agent" link between an Agent Runtime agent as a caller and as a registry entry. */
 function SameAs({ id, label }: { id?: string; label: string }) {
@@ -56,11 +78,12 @@ function SameAs({ id, label }: { id?: string; label: string }) {
   );
 }
 
-const EngineNode = memo(({ data }: NodeProps<MNode>) => {
+const EngineNode = memo(({ id, data }: NodeProps<MNode>) => {
   const n = data.node;
   return (
     <div className={cls(data, "node-orch", !n.gateway && "unbound")}>
       <Handles />
+      <Pin id={id} data={data} />
       <div className="node-badge badge-runtime">
         <span className="dot" /> Agent Runtime
       </div>
@@ -81,7 +104,7 @@ const EngineNode = memo(({ data }: NodeProps<MNode>) => {
   );
 });
 
-const GatewayNode = memo(({ data }: NodeProps<MNode>) => {
+const GatewayNode = memo(({ id, data }: NodeProps<MNode>) => {
   const n = data.node;
   const none = n.kind === "no_gateway";
   const ma = n.modelArmor;
@@ -89,6 +112,7 @@ const GatewayNode = memo(({ data }: NodeProps<MNode>) => {
   return (
     <div className={cls(data, "node-gateway", none ? "faded" : "attached", n.mode === "DRY_RUN" && n.sub?.startsWith("Egress") && "dry")}>
       <Handles />
+      <Pin id={id} data={data} />
       <div className="node-head">
         <span className="node-icon icon-gateway">
           <GatewayIcon size={22} />
@@ -110,12 +134,13 @@ const GatewayNode = memo(({ data }: NodeProps<MNode>) => {
   );
 });
 
-const PseudoNode = memo(({ data }: NodeProps<MNode>) => {
+const PseudoNode = memo(({ id, data }: NodeProps<MNode>) => {
   const n = data.node;
   const pub = n.id === "pseudo:public";
   return (
     <div className={cls(data, "node-user", pub && "public")} title={n.members?.map((m) => m.label).join("\n")}>
       <Handles />
+      <Pin id={id} data={data} />
       <div className="node-head">
         <span className={`node-icon ${n.kind === "client" ? "icon-client" : "icon-person"}`}>
           <PersonIcon size={20} />
@@ -132,13 +157,14 @@ const PseudoNode = memo(({ data }: NodeProps<MNode>) => {
 
 const DEST_BADGE: Record<string, string> = { a2a: "A2A", runtime_dest: "Agent Runtime", endpoint: "API endpoint", registry: "Registry-wide" };
 
-const DestNode = memo(({ data }: NodeProps<MNode>) => {
+const DestNode = memo(({ id, data }: NodeProps<MNode>) => {
   const n = data.node;
   const icon = n.kind === "endpoint" ? <ApiIcon size={20} /> : n.kind === "registry" ? <RegistryIcon size={20} /> : <RobotIcon size={20} />;
   const skills = n.skills ?? [];
   return (
     <div className={cls(data, `node-dest node-${n.kind}`, n.unreadable && "unreadable")}>
       <Handles />
+      <Pin id={id} data={data} />
       <div className={`node-badge ${n.kind === "registry" ? "" : "badge-cloudrun"}`}>
         {n.kind === "a2a" && <CloudIcon size={12} />} {DEST_BADGE[n.kind]}
       </div>
@@ -179,13 +205,14 @@ const DestNode = memo(({ data }: NodeProps<MNode>) => {
 
 const TOOL_TITLE: Record<ToolState, string> = { allowed: "allowed", denied: "denied", unknown: "can't be told here" };
 
-const McpNode = memo(({ data }: NodeProps<MNode>) => {
+const McpNode = memo(({ id, data }: NodeProps<MNode>) => {
   const n = data.node;
   const tools = n.tools ?? [];
   const destructive = tools.filter((t) => t.destructive).length;
   return (
     <div className={cls(data, "node-mcp", n.unreadable && "unreadable")}>
       <Handles />
+      <Pin id={id} data={data} />
       <div className="node-badge badge-cloudrun">
         <CloudIcon size={12} /> MCP
       </div>
@@ -236,9 +263,10 @@ const McpNode = memo(({ data }: NodeProps<MNode>) => {
   );
 });
 
-const GroupNode = memo(({ data }: NodeProps<MNode>) => (
+const GroupNode = memo(({ id, data }: NodeProps<MNode>) => (
   <div className={cls(data, "node-group")} title="Show these destinations">
     <Handles />
+    <Pin id={id} data={data} />
     <div className="node-head">
       <span className="node-icon icon-registry">
         <ApiIcon size={18} />
@@ -251,9 +279,10 @@ const GroupNode = memo(({ data }: NodeProps<MNode>) => (
   </div>
 ));
 
-const SinkNode = memo(({ data }: NodeProps<MNode>) => (
+const SinkNode = memo(({ id, data }: NodeProps<MNode>) => (
   <div className={cls(data, "node-sink")}>
     <Handles />
+    <Pin id={id} data={data} />
     <div className="node-head">
       <span className="node-icon icon-sink">
         <CloudIcon size={20} />

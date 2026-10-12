@@ -6,6 +6,7 @@ import type { ApplyConfirm, AuditResp, AuthInfo, ContextInfo, Ctx, GatewaysResp,
 import { sameChange, toList, type ApplyRun } from "./lib/apply";
 import { load, save } from "./lib/util";
 import { intentKey, newId } from "./lib/policy";
+import type { MapFocus } from "./map/focus";
 
 export type Loadable<T> = { data: T | null; loading: boolean; error: string | null };
 const empty = <T,>(): Loadable<T> => ({ data: null, loading: false, error: null });
@@ -85,6 +86,10 @@ type Studio = {
   dismissRun: () => void;
   /** Put inverse intents into the cart and open Apply on them. */
   stageUndo: (intents: Intent[]) => void;
+  /** "Show on map": what the map focuses on when it opens (it clears it once applied). */
+  mapFocus: (MapFocus & { seq: number }) | null;
+  openMap: (focus?: MapFocus) => void;
+  clearMapFocus: () => void;
   /** The guided "Set up Model Armor in this region" wizard on the Model Armor step. */
   maSetupOpen: boolean;
   openMaSetup: () => void;
@@ -142,6 +147,7 @@ export function StudioProvider({ children }: { children: ReactNode }) {
     }
   });
   const [maSetupOpen, setMaSetupOpen] = useState(false);
+  const [mapFocus, setMapFocus] = useState<Studio["mapFocus"]>(null);
   const abortRef = useRef<AbortController | null>(null);
   const ctxRef = useRef(ctx);
   ctxRef.current = ctx;
@@ -395,6 +401,15 @@ export function StudioProvider({ children }: { children: ReactNode }) {
     [goto, toast],
   );
 
+  const openMap = useCallback(
+    (focus?: MapFocus) => {
+      setMapFocus(focus ? { ...focus, seq: ++seq.current } : null);
+      goto("map");
+    },
+    [goto],
+  );
+  const clearMapFocus = useCallback(() => setMapFocus(null), []);
+
   const openMaSetup = useCallback(() => {
     setMaSetupOpen(true);
     goto("model-armor");
@@ -408,9 +423,9 @@ export function StudioProvider({ children }: { children: ReactNode }) {
       step, goto, draft, openBuilder, reviewFocus, openReview,
       learnOpen, setLearnOpen, glossaryTerm, showTerm, toasts, toast,
       auth, refreshAuth, applyFocus, openApply, run, history, startApply, cancelApply, dismissRun, stageUndo,
-      maSetupOpen, openMaSetup, setMaSetupOpen,
+      maSetupOpen, openMaSetup, setMaSetupOpen, mapFocus, openMap, clearMapFocus,
     }),
-    [maSetupOpen, openMaSetup, auth, refreshAuth, applyFocus, openApply, run, history, startApply, cancelApply, dismissRun, stageUndo, ctx, setCtx, ctxInfo, gateways, modelArmor, inventory, audit, syncing, syncedAt, sync, cart, addIntents, updateIntent, removeIntent, duplicateIntent, clearCart, step, goto, draft, openBuilder, reviewFocus, openReview, learnOpen, setLearnOpen, glossaryTerm, showTerm, toasts, toast],
+    [mapFocus, openMap, clearMapFocus, maSetupOpen, openMaSetup, auth, refreshAuth, applyFocus, openApply, run, history, startApply, cancelApply, dismissRun, stageUndo, ctx, setCtx, ctxInfo, gateways, modelArmor, inventory, audit, syncing, syncedAt, sync, cart, addIntents, updateIntent, removeIntent, duplicateIntent, clearCart, step, goto, draft, openBuilder, reviewFocus, openReview, learnOpen, setLearnOpen, glossaryTerm, showTerm, toasts, toast],
   );
   return <Ctx_.Provider value={value}>{children}</Ctx_.Provider>;
 }
