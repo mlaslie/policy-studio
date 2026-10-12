@@ -278,8 +278,14 @@ def preflight(req: IntentsRequest) -> dict[str, Any]:
             writable = service.auth_view(ctx.project, ctx.gateway_project).get("writable")
         except Exception:  # noqa: BLE001  (the Apply step shows credential problems separately)
             writable = None
+    inv: Optional[Inventory] = None
+    if any(i.kind == "modify" for i in intents):
+        try:
+            inv = service.inventory_view(ctx, False)          # is the grant a modify changes still there?
+        except Exception:  # noqa: BLE001  (apply checks it live)
+            inv = None
     dups = pf.duplicates(intents)
-    blocked = pf.blockers([i for i in intents if i.id not in dups], env, writable)
+    blocked = pf.blockers([i for i in intents if i.id not in dups], env, writable, inv)
     advice = pf.advisories([i for i in intents if i.id not in dups and i.id not in blocked], env)
     items: list[dict[str, Any]] = []
     for it in intents:

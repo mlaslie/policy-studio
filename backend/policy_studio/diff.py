@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from .conditions import EGRESSOR, condition_for, same_condition
-from .english import condition_english, make_binding
+from .english import access_words, condition_english, make_binding
 from .gcp.engines import tail
 from .model import Binding, Condition, DiffItem, Gateway, Intent, Inventory
 from .gcp import model_armor as ma_mod
@@ -12,7 +12,8 @@ from .render import (MODE_LABEL, Blocked, RenderEnv, dedicate_names, engine_full
                      proj_iam_spec, short, template_spec)
 
 
-def _resource_key(intent: Intent, inv: Inventory, env: RenderEnv) -> Optional[str]:
+def resource_key(intent: Intent, inv: Inventory, env: RenderEnv) -> Optional[str]:
+    """The Inventory.access key of the intent's destination (None when it isn't in the inventory)."""
     d = intent.destination
     if not d:
         return None
@@ -32,7 +33,7 @@ def _new_binding(intent: Intent, want: Optional[Condition], label: str, kind: st
 
 
 def _diff_iam(intent: Intent, inv: Inventory, env: RenderEnv) -> DiffItem:
-    key = _resource_key(intent, inv, env)
+    key = resource_key(intent, inv, env)
     member = intent.source.principal if intent.source else ""
     want = condition_for(intent.access)
     d = intent.destination
@@ -43,9 +44,13 @@ def _diff_iam(intent: Intent, inv: Inventory, env: RenderEnv) -> DiffItem:
         detail = (f"current IAM policy unavailable ({err})" if err else
                   "destination not found in this region's Agent Registry")
         grant = intent.kind == "grant"
+        if intent.kind == "modify":
+            detail = f"{detail}; the grant to change can't be checked" if err else detail
         return DiffItem(intent_id=intent.id, status="add" if grant else "absent", current=None,
                         after=[_new_binding(intent, want, label, kind, inv)] if grant else None, detail=detail)
     mine: list[Binding] = [b for b in inv.access[key] if b.member == member and b.role == EGRESSOR]
+    if intent.kind == "modify":
+        return _diff_modify(intent, mine, want, label, kind, inv)
     same = [b for b in mine if same_condition(b.condition, want)]
     others = [b for b in mine if not same_condition(b.condition, want)]
     if intent.kind == "grant":
@@ -66,6 +71,27 @@ def _diff_iam(intent: Intent, inv: Inventory, env: RenderEnv) -> DiffItem:
         return DiffItem(intent_id=intent.id, status="absent", current=mine, after=mine,
                         detail="no binding with this exact condition (the member has other bindings)")
     return DiffItem(intent_id=intent.id, status="absent", current=mine, after=mine, detail="no such binding")
+
+
+def _diff_modify(intent: Intent, mine: list[Binding], want: Optional[Condition], label: str, kind: str,
+                 inv: Inventory) -> DiffItem:
+    """replace: the binding matching access_from exactly goes, the new one comes, in one change."""
+    old = condition_for(intent.access_from)
+    change = f"{access_words(intent.access_from)} → {access_words(intent.access)}"
+    if same_condition(old, want):
+        return DiffItem(intent_id=intent.id, status="present", current=mine, after=mine,
+                        detail="the new access is the same as the current one")
+    hit = [b for b in mine if same_condition(b.condition, old)]
+    has_new = any(same_condition(b.condition, want) for b in mine)
+    if not hit:
+        if has_new:
+            return DiffItem(intent_id=intent.id, status="present", current=mine, after=mine,
+                            detail=f"already changed ({change}): the new binding is there and the old one isn't")
+        return DiffItem(intent_id=intent.id, status="absent", current=mine, after=mine,
+                        detail="the grant to change wasn't found: it changed since you looked; Sync and try again")
+    rest = [b for b in mine if not same_condition(b.condition, old)]
+    after = rest if has_new else rest + [_new_binding(intent, want, label, kind, inv)]
+    return DiffItem(intent_id=intent.id, status="replace", current=mine, after=after, detail=change)
 
 
 def _diff_bind(intent: Intent, inv: Inventory, env: RenderEnv) -> DiffItem:
@@ -193,7 +219,7 @@ def diff(intents: list[Intent], inv: Inventory, gateways: list[Gateway], env: Re
          ma: Optional[dict[str, Any]] = None) -> list[DiffItem]:
     out = []
     for it in intents:
-        if it.kind in ("grant", "revoke"):
+        if it.kind in ("grant", "revoke", "modify"):
             out.append(_diff_iam(it, inv, env))
         elif it.kind in ("bind_gateway", "unbind_gateway"):
             out.append(_diff_bind(it, inv, env))

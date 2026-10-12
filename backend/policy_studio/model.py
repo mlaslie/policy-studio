@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class _M(BaseModel):
@@ -204,8 +204,8 @@ class GatewayRef(_In):
     policy: Optional[str] = None       # model_armor_on/off: CONTENT_AUTHZ authz policy name
 
 
-IntentKind = Literal["grant", "revoke", "bind_gateway", "unbind_gateway", "model_armor_on", "model_armor_off",
-                     "model_armor_template", "model_armor_extension", "iam_project_grant",
+IntentKind = Literal["grant", "revoke", "modify", "bind_gateway", "unbind_gateway", "model_armor_on",
+                     "model_armor_off", "model_armor_template", "model_armor_extension", "iam_project_grant",
                      "set_enforcement", "dedicate_extension"]
 SETUP_KINDS = ("model_armor_template", "model_armor_extension", "iam_project_grant")
 ENFORCEMENT_KINDS = ("set_enforcement", "dedicate_extension")
@@ -247,6 +247,9 @@ class Intent(_In):
     source: Optional[Source] = None
     destination: Optional[Destination] = None
     access: Optional[Access] = None
+    # modify: the existing binding's condition, exact (mode "custom" with its expression and title, or mode "all" when
+    # it has none), as revokes carry it. `access` is the new one. Applied as one read-modify-write.
+    access_from: Optional[Access] = None
     gateway: Optional[GatewayRef] = None
     engine: Optional[str] = None
     params: Optional[SetupParams] = None   # model_armor_template / model_armor_extension / iam_project_grant
@@ -261,6 +264,14 @@ class Intent(_In):
     new_name: Optional[str] = None
     revert: Optional[bool] = None
 
+    @model_validator(mode="after")
+    def _modify_fields(self) -> "Intent":
+        if self.kind == "modify":
+            missing = [f for f in ("source", "destination", "access_from", "access") if getattr(self, f) is None]
+            if missing:
+                raise ValueError(f"modify needs {', '.join(missing)}")
+        return self
+
     @property
     def is_delete(self) -> bool:
         return self.kind in SETUP_KINDS and bool(self.params and self.params.delete)
@@ -268,7 +279,8 @@ class Intent(_In):
     @property
     def is_destructive(self) -> bool:
         """Revokes, unbinds, Model Armor off, setup deletes, dry run (stops blocking) and reverting a dedicated
-        extension (deletes it)."""
+        extension (deletes it). A modify isn't: it never removes all access (render and preflight warn when it widens
+        it)."""
         if self.kind in ("revoke", "unbind_gateway", "model_armor_off"):
             return True
         if self.kind == "set_enforcement":

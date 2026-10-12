@@ -13,6 +13,7 @@ import type { Intent } from "../api/types";
 const TONE: Record<Intent["kind"], string> = {
   grant: "green",
   revoke: "red",
+  modify: "amber",
   bind_gateway: "blue",
   unbind_gateway: "amber",
   model_armor_on: "purple",
@@ -154,7 +155,7 @@ function CartPopover({ id, panelRef, onClose }: { id: string; panelRef: RefObjec
         <>
           <ol className="cart-list">
             {sorted.map((i) => (
-              <li key={i.id} className={`cart-item ${step === 5 && reviewFocus === i.id ? "focused" : ""}`}>
+              <li key={i.id} className={`cart-item ${step === "review" && reviewFocus === i.id ? "focused" : ""}`}>
                 <Tip tip="Open this item in Review & output to see its commands and diff." block className="grow">
                   <button
                     type="button"

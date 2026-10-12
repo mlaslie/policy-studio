@@ -100,3 +100,32 @@ def same_condition(a: Optional[Condition | dict], b: Optional[Condition | dict])
     ea = (a.get("expression") if isinstance(a, dict) else a.expression) if a else ""
     eb = (b.get("expression") if isinstance(b, dict) else b.expression) if b else ""
     return _norm(ea or "") == _norm(eb or "")
+
+
+def _effective(acc: Optional[Access]) -> Access:
+    """An Access as what it does: an exact (custom) expression that is one of the known forms is classified."""
+    if acc is None:
+        return Access(mode="all")
+    if acc.mode == "custom":
+        return classify({"expression": acc.expression or ""}) if (acc.expression or "").strip() else Access(mode="all")
+    return acc
+
+
+def compare_access(old: Optional[Access], new: Optional[Access], read_only: Optional[set[str]] = None) -> str:
+    """How a modify changes access: "same" | "narrower" | "broader" | "unknown". `read_only`: names of the MCP
+    server's read-only tools (None = not known), used to compare a tools list with the read-only hint."""
+    a, b = _effective(old), _effective(new)
+    if same_condition(condition_for(a), condition_for(b)):
+        return "same"
+    if b.mode == "all":
+        return "broader"
+    if a.mode == "all":
+        return "narrower"
+    if a.mode == "tools" and b.mode == "tools":
+        return "broader" if set(b.tools or []) - set(a.tools or []) else "narrower"
+    if a.mode == "read_only_hint" and b.mode == "tools" and read_only is not None:
+        return "broader" if set(b.tools or []) - read_only else "narrower"
+    if a.mode == "tools" and b.mode == "read_only_hint" and read_only is not None:
+        # the hint also covers read-only tools added later
+        return "broader" if read_only - set(a.tools or []) else "unknown"
+    return "unknown"

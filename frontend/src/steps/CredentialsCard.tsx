@@ -1,4 +1,4 @@
-// Step 0: the Credentials card (GET /auth): run mode, where credentials come from, checks with fixes,
+// Context step: the Credentials card (GET /auth): run mode, where credentials come from, checks with fixes,
 // a project-mismatch warning, and in generate mode how to run Policy Studio locally to apply.
 import { Tip } from "../components/Tooltip";
 import { useMemo } from "react";

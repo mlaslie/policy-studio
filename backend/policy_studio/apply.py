@@ -4,6 +4,9 @@ Uses render.py's specs (iam_spec / bind_spec / ma_spec, engine_body, ma_body, UR
 what the generated commands do:
   grant / revoke     IAP getIamPolicy (v3) -> add / remove the binding -> setIamPolicy with the etag (retried on an
                      etag conflict), read back. Revoke removes only member + role + matching condition.
+  modify             the same read-modify-write, once: remove the binding matching access_from exactly, add the one
+                     for access, one setIamPolicy (other bindings untouched). Not found -> failed ("the grant
+                     changed"), unless the new binding is already there (skipped). Undo is the reverse modify.
   bind / unbind      GET the engine (live agentGatewayConfig) -> PATCH with the other direction kept. One change per
                      engine at a time. Long-running: polled in the background, then the engine is read back.
   model_armor_on/off create / delete the CONTENT_AUTHZ authz policy (long-running, ~4 min), then read back.
@@ -130,6 +133,20 @@ def remove_binding(pol: dict, member: str, role: str, cond: Any) -> tuple[dict, 
     return new, True, removed
 
 
+def modify_binding(pol: dict, member: str, role: str, old: Any, new: Any) -> tuple[dict, str, list[dict]]:
+    """Swap member's binding of role with condition `old` (exactly; None = unconditional) for one with `new`, in one
+    policy edit; other bindings untouched. Returns (policy, outcome, removed conditions): outcome "changed", "same"
+    (old and new are the same condition), "already" (the new binding is there and the old one isn't) or
+    "not_found"."""
+    if same_condition(old, new):
+        return pol, "same", []
+    out, changed, removed = remove_binding(pol, member, role, old)
+    if not changed:
+        return pol, "already" if _has(pol, member, role, new) else "not_found", []
+    out, _ = add_binding(out, member, role, new)
+    return out, "changed", removed
+
+
 def is_etag_conflict(e: Exception) -> bool:
     if not isinstance(e, GcpError):
         return False
@@ -241,8 +258,8 @@ class Applier:
             for it in sorted(todo, key=run_order):
                 self._intents[it.id] = it
                 try:
-                    handler = {"grant": self._iap, "revoke": self._iap, "bind_gateway": self._bind,
-                               "unbind_gateway": self._bind, "model_armor_on": self._ma_on,
+                    handler = {"grant": self._iap, "revoke": self._iap, "modify": self._iap,
+                               "bind_gateway": self._bind, "unbind_gateway": self._bind, "model_armor_on": self._ma_on,
                                "model_armor_off": self._ma_off, "model_armor_template": self._template,
                                "model_armor_extension": self._extension,
                                "iam_project_grant": self._project_iam,
@@ -313,11 +330,23 @@ class Applier:
         if "PROJECT_NUMBER" in sp.resource:
             return self.emit(it.id, "failed", "Couldn't resolve the project number of the Agent Registry project")
         url = f"{IAP}/{sp.resource}"
-        self.emit(it.id, "running", f"{'Granting' if sp.op == 'add' else 'Revoking'} {sp.role} on {sp.dest_label}")
+        verb = {"add": "Granting", "remove": "Revoking", "modify": "Changing the condition of"}[sp.op]
+        self.emit(it.id, "running", f"{verb} {sp.role} on {sp.dest_label}")
         removed: list[dict] = []
         for attempt in range(MAX_ETAG_RETRIES + 1):
             pol = self.rest.post(f"{url}:getIamPolicy", json={"options": {"requestedPolicyVersion": 3}}) or {}
-            if sp.op == "add":
+            if sp.op == "modify":
+                new, outcome, removed = modify_binding(pol, sp.member, sp.role, sp.old_condition, sp.condition)
+                if outcome == "same":
+                    return self.emit(it.id, "skipped", "The new access is the same as the current one")
+                if outcome == "already":
+                    return self.emit(it.id, "skipped", "Already changed (the new binding is there, the old one "
+                                                       "isn't)")
+                if outcome == "not_found":
+                    return self.emit(it.id, "failed", "The grant changed since you looked (no binding with this "
+                                                      "member, role and the old condition); Sync and try again")
+                changed = True
+            elif sp.op == "add":
                 new, changed = add_binding(pol, sp.member, sp.role, sp.condition)
             else:
                 new, changed, removed = remove_binding(pol, sp.member, sp.role, sp.condition)
@@ -337,6 +366,13 @@ class Applier:
         self.emit(it.id, "done", "Policy updated", undo=undo)
         back = self.rest.post(f"{url}:getIamPolicy", json={"options": {"requestedPolicyVersion": 3}}) or {}
         present = _has(back, sp.member, sp.role, sp.condition)
+        if sp.op == "modify":
+            old = _has(back, sp.member, sp.role, sp.old_condition)
+            if present and not old:
+                return self.emit(it.id, "verified", "Read back: the new binding is there and the old one is gone",
+                                 undo=undo)
+            return self.emit(it.id, "failed", "Read back: " + ("the old binding is still there" if old else
+                                                               "the new binding is missing"), undo=undo)
         if present == (sp.op == "add"):
             self.emit(it.id, "verified", "Read back: the binding is " + ("there" if present else "gone"), undo=undo)
         else:
@@ -344,6 +380,9 @@ class Applier:
                       undo=undo)
 
     def _iap_undo(self, it: Intent, sp: Any, removed: list[dict]) -> Intent:
+        if sp.op == "modify":                     # the reverse modify: from the new binding back to the removed one
+            return it.model_copy(update={"id": f"undo-{it.id}", "access_from": exact_access(sp.condition),
+                                         "access": exact_access(removed[0] if removed else None)})
         if sp.op == "add":
             acc = (it.access or Access()).model_copy()
             if sp.condition is not None:

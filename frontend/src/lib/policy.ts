@@ -1,7 +1,7 @@
 // Shared, client-side knowledge about egress grants: the condition expressions (API.md "Conditions"),
 // plain-English sentences for intents, and principal helpers. The backend's /render is the source of
 // truth for generated commands; this module only powers instant previews and labels.
-import type { AccessMode, Ctx, Intent, McpServer } from "../api/types";
+import type { Access, AccessMode, Ctx, Intent, McpServer } from "../api/types";
 
 export const ROLE = "roles/iap.egressor";
 export const TOOL_ATTR = "iap.googleapis.com/mcp.toolName";
@@ -22,6 +22,32 @@ export function conditionFor(access: Intent["access"]): { title: string; express
   if (access.mode === "read_only_hint") return { title: title ?? "MCP read-only tools (by hint)", expression: READ_ONLY_EXPR };
   if (access.mode === "tools") return { title: title ?? `MCP tools: ${(access.tools ?? []).join(", ") || "none"}`, expression: toolsExpr(access.tools ?? []) };
   return { title: title ?? "Custom condition", expression: access.expression ?? "" };
+}
+
+/** An existing condition expression as an access choice (none = full access); anything else is "custom". */
+export function accessFromCondition(expr: string | undefined): Access {
+  if (!expr) return { mode: "all" };
+  const e = expr.replace(/\s+/g, " ").trim();
+  if (e === READ_ONLY_EXPR) return { mode: "read_only_hint" };
+  const m = new RegExp(`^api\\.getAttribute\\('${TOOL_ATTR.replace(/\./g, "\\.")}', ''\\) in \\[(.*)\\]$`).exec(e);
+  if (m) {
+    const tools = [...m[1].matchAll(/'((?:[^'\\]|\\.)*)'/g)].map((x) => x[1]).filter(Boolean);
+    return { mode: "tools", tools };
+  }
+  return { mode: "custom", expression: expr };
+}
+
+/** Short phrase for an access, as the backend's english.access_words: an exact (custom) expression is described as
+ *  what it is. For modify sentences ("full access → only read-only tools"). */
+export function accessWords(a: Access | undefined): string {
+  const acc = a?.mode === "custom" ? accessFromCondition(a.expression?.trim() ? a.expression : undefined) : a;
+  if (!acc || acc.mode === "all") return "full access";
+  if (acc.mode === "read_only_hint") return "only read-only tools";
+  if (acc.mode === "tools") {
+    const t = (acc.tools ?? []).filter(Boolean);
+    return t.length ? `only tools ${t.join(", ")}` : "MCP setup calls only (no tools)";
+  }
+  return "a custom condition";
 }
 
 export const ACCESS_LABEL: Record<AccessMode, string> = {
@@ -58,6 +84,8 @@ export function intentEnglish(i: Intent): string {
       const c = conditionFor(i.access);
       return c ? `Remove ${who}'s “${c.title}” grant on ${dest}.` : `Remove ${who}'s unconditional grant on ${dest}.`;
     }
+    case "modify":
+      return `Change ${who}'s access to ${dest}: ${accessWords(i.access_from)} → ${accessWords(i.access)}.`;
     case "bind_gateway":
       return i.gateway?.direction === "ingress"
         ? `Route traffic into ${eng} through ingress gateway ${gw}.`
@@ -95,6 +123,7 @@ export function intentEnglish(i: Intent): string {
 export const KIND_LABEL: Record<Intent["kind"], string> = {
   grant: "Grant",
   revoke: "Revoke",
+  modify: "Change access",
   bind_gateway: "Bind",
   unbind_gateway: "Unbind",
   model_armor_on: "Model Armor on",
@@ -118,7 +147,8 @@ export const KIND_ORDER: Record<Intent["kind"], number> = {
   model_armor_on: 7,
   model_armor_off: 8,
   grant: 9,
-  revoke: 10,
+  modify: 10,
+  revoke: 11,
 };
 
 function stable(v: unknown): string {
@@ -137,6 +167,7 @@ function stable(v: unknown): string {
 export function intentKey(i: Intent): string {
   const g = i.gateway;
   const a = i.access;
+  const f = i.access_from;
   return stable({
     kind: i.kind,
     gateway: g ? [shortName(g.name), g.direction] : null,
@@ -144,6 +175,7 @@ export function intentKey(i: Intent): string {
     source: i.source?.principal ?? null,
     destination: i.destination ? [i.destination.kind, i.destination.id || shortName(i.destination.name)] : null,
     access: a ? [a.mode, [...(a.tools ?? [])].filter(Boolean).sort(), a.expression ?? "", a.title ?? null] : null,
+    access_from: f ? [f.mode, [...(f.tools ?? [])].filter(Boolean).sort(), f.expression ?? "", f.title ?? null] : null,
     params: i.params ?? null,
     extension: i.extension ? shortName(i.extension) : null,
     mode: i.mode ?? null,

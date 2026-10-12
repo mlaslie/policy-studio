@@ -410,7 +410,7 @@ export function buildWorld(ctx: Ctx) {
     agents.find((a) => a.name === name)?.display_name ?? mcp_servers.find((m) => m.name === name)?.display_name ?? endpoints.find((e) => e.name === name)?.display_name ?? name;
   const kindOf = (name: string): Grant["resource_kind"] => (name.includes("/mcpServers/") ? "mcp_server" : name.includes("/endpoints/") ? "endpoint" : "agent");
 
-  const inventory: Inventory = { engines, agents, mcp_servers, endpoints, access };
+  const inventory: Inventory = { engines, agents, mcp_servers, endpoints, access, access_errors: {}, project_agents_principal: projectSet, errors: [] };
 
   const grants = (): Grant[] =>
     Object.entries(inventory.access).flatMap(([res, bs]) => bs.map((x) => ({ ...x, resource: res, resource_kind: kindOf(res), resource_label: labelOf(res) })));
@@ -494,12 +494,12 @@ export function buildWorld(ctx: Ctx) {
       "discoveryengine.googleapis.com": true,
     },
     permissions: [
-      { permission: "networkservices.agentGateways.list", granted: true, needed_for: "List gateways (step 1)" },
+      { permission: "networkservices.agentGateways.list", granted: true, needed_for: "List gateways (Gateways step)" },
       { permission: "networksecurity.authzPolicies.list", granted: true, needed_for: "See IAP and Model Armor policies on gateways" },
       { permission: "agentregistry.agents.list", granted: true, needed_for: "Inventory: agents, MCP servers, endpoints" },
       { permission: "iap.webServices.getIamPolicy", granted: true, needed_for: "Read who can reach each registry entry" },
       { permission: "aiplatform.reasoningEngines.list", granted: true, needed_for: "List Agent Runtime agents and their identities" },
-      { permission: "modelarmor.templates.list", granted: R !== "europe-west1", needed_for: "Read Model Armor templates (step 2)", fix: `gcloud projects add-iam-policy-binding ${P} --member=user:alex.admin@example.com --role=roles/modelarmor.viewer` },
+      { permission: "modelarmor.templates.list", granted: R !== "europe-west1", needed_for: "Read Model Armor templates (Model Armor step)", fix: `gcloud projects add-iam-policy-binding ${P} --member=user:alex.admin@example.com --role=roles/modelarmor.viewer` },
       { permission: "iap.webServices.setIamPolicy", granted: false, needed_for: "Apply grants (P3; not needed to generate commands)", fix: `gcloud projects add-iam-policy-binding ${P} --member=user:alex.admin@example.com --role=roles/iap.admin` },
       { permission: "aiplatform.reasoningEngines.update", granted: null, needed_for: "Bind agents to gateways (P3; not checked)" },
     ],

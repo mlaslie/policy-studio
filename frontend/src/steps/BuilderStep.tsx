@@ -1,4 +1,4 @@
-// Step 4: the guided policy builder (Who → What → How much) with a live preview, IAM anatomy,
+// Build step: the guided policy builder (Who → What → How much) with a live preview, IAM anatomy,
 // prerequisite checks and a Revoke mode.
 import { Tip } from "../components/Tooltip";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -8,7 +8,7 @@ import type { AccessMode, Binding, Grant, Intent, RenderItem, SourceType } from 
 import { Badge, Callout, KindIcon, Load, StepHeader, Tabs, Term } from "../components/ui";
 import { ToolBadge, useDestinations } from "./InventoryStep";
 import { WarningCallouts } from "./ModelArmorSetup";
-import { grantToIntent, revokesGrant } from "../lib/grants";
+import { grantToIntent, grantToModify, revokesGrant } from "../lib/grants";
 import { CheckIcon, PlusIcon, RobotIcon, SearchIcon, WarnIcon } from "../components/Icons";
 import {
   READ_ONLY_EXPR,
@@ -69,12 +69,13 @@ function Choice({ name, checked, onChange, title, desc, badge, disabled, childre
   );
 }
 
-/** Prerequisite / redundancy checks shown as amber chips with an optional "also stage fix". */
-type Check = { id: string; tone: "amber" | "info" | "red"; text: React.ReactNode; fix?: Intent; fixLabel?: string };
+/** Prerequisite / redundancy checks shown as amber chips with an optional "also stage fix", or an intent to stage
+ *  instead of this one (`instead`, e.g. a modify of the existing grant). */
+type Check = { id: string; tone: "amber" | "info" | "red"; text: React.ReactNode; fix?: Intent; fixLabel?: string; instead?: Intent; insteadLabel?: string; insteadTip?: string };
 
 function useChecks(intent: Intent | null): Check[] {
   const { inventory, cart } = useStudio();
-  const { engineByName, egress } = useLookup();
+  const { engineByName, engineByPrincipal, egress } = useLookup();
   return useMemo(() => {
     const out: Check[] = [];
     const inv = inventory.data;
@@ -104,7 +105,23 @@ function useChecks(intent: Intent | null): Check[] {
     const cond = conditionFor(intent.access);
     const mine = current.filter((b) => b.member === src.principal && b.role === ROLE);
     if (mine.some((b) => (b.condition?.expression ?? "") === (cond?.expression ?? ""))) out.push({ id: "dup", tone: "info", text: <>This exact grant already exists. Adding it again changes nothing.</> });
-    else if (mine.length) out.push({ id: "replace", tone: "amber", text: <>{src.label} already has {mine[0].condition ? "conditional" : "unconditional"} access here (“{mine[0].english}”). Applying this replaces it.</> });
+    else if (mine.length) {
+      // IAM adds bindings rather than replacing them: a grant would sit next to the existing one, which keeps its
+      // access. A modify swaps the existing binding (its exact condition) for this access in one change.
+      const g: Grant = { ...mine[0], resource: dest.name, resource_kind: dest.kind, resource_label: dest.label };
+      out.push({
+        id: "replace",
+        tone: "amber",
+        text: (
+          <>
+            {src.label} already has {mine[0].condition ? "conditional" : "unconditional"} access here (“{mine[0].english}”){mine.length > 1 ? ` and ${mine.length - 1} more grant${mine.length > 2 ? "s" : ""}` : ""}. IAM adds this grant as a second binding next to it, so the existing access stays as it is.
+          </>
+        ),
+        instead: { ...grantToModify(g, engineByPrincipal, intent.access ?? { mode: "all" }), source: src, destination: dest },
+        insteadLabel: "Change the existing grant instead",
+        insteadTip: "Stage one change that replaces the existing grant's access with this one (a single IAM update, so there's no moment with both or neither). Nothing changes in Google Cloud until you apply.",
+      });
+    }
     const broader = current.find((b) => b.role === ROLE && !b.condition && b.member !== src.principal && (b.member.startsWith("principalSet://") || b.member.startsWith("all")) && src.type !== "project_agents");
     if (broader) out.push({ id: "broader", tone: "amber", text: <>An existing broader grant already allows this: “{broader.english}”. Your narrower grant won't restrict it.</> });
     if (intent.access?.mode === "all" && dest.kind === "mcp_server") {
@@ -113,7 +130,7 @@ function useChecks(intent: Intent | null): Check[] {
     }
     if (src.type === "project_agents") out.push({ id: "broad", tone: "info", text: <>Every agent in the project gets this, including agents created later.</> });
     return out;
-  }, [intent, inventory.data, engineByName, egress, cart]);
+  }, [intent, inventory.data, engineByName, engineByPrincipal, egress, cart]);
 }
 
 function AnatomyRow({ k, v, meaning, mono = true }: { k: string; v: React.ReactNode; meaning: React.ReactNode; mono?: boolean }) {
@@ -331,9 +348,9 @@ export function BuilderStep() {
     setEditId(undefined);
   };
 
-  const commit = (another: boolean) => {
-    if (!intent) return;
-    const finalIntent = { ...intent, id: editId ?? newId() };
+  const commit = (another: boolean, staged: Intent | null = intent) => {
+    if (!staged) return;
+    const finalIntent = { ...staged, id: editId ?? newId() };
     if (editId && cart.some((c) => c.id === editId)) {
       updateIntent(editId, finalIntent);
       if (extraFixes.length) addIntents(extraFixes);
@@ -589,6 +606,13 @@ export function BuilderStep() {
                             <div key={c.id} className={`check-chip chip-${c.tone}`}>
                               <WarnIcon size={14} />
                               <span className="grow">{c.text}</span>
+                              {c.instead && (
+                                <Tip tip={c.insteadTip ?? "Stage this instead."}>
+                                  <button className="btn btn-small btn-outline" onClick={() => commit(false, c.instead!)}>
+                                    {c.insteadLabel ?? "Stage this instead"}
+                                  </button>
+                                </Tip>
+                              )}
                               {c.fix &&
                                 (added ? (
                                   <Badge tone="green">fix will be staged</Badge>

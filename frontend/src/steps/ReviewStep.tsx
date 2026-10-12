@@ -1,4 +1,4 @@
-// Step 5: render the cart (or one item) as Terraform / gcloud / REST / Python with copy and download,
+// Review step: render the cart (or one item) as Terraform / gcloud / REST / Python with copy and download,
 // plus a diff against the current state from POST /diff.
 import { Tip, unavailable } from "../components/Tooltip";
 import { useEffect, useMemo, useState } from "react";
@@ -15,7 +15,7 @@ import { useApplyGate } from "../components/Mode";
 import { WarningCallouts } from "./ModelArmorSetup";
 import { RedeployHelp } from "../components/Redeploy";
 import { PlayIcon } from "../components/Icons";
-import { DESTRUCTIVE_PHRASE, isDestructive } from "../lib/apply";
+import { DESTRUCTIVE_PHRASE, MODIFY_STATUS, isDestructive } from "../lib/apply";
 
 function ApplyButton({ ids, label, small }: { ids: string[] | null; label: string; small?: boolean }) {
   const { openApply, cart, ctx } = useStudio();
@@ -79,7 +79,7 @@ function DiffColumn({ intent, d }: { intent: Intent; d: DiffItem | undefined }) 
     <div className="diff" aria-label="Diff against current state">
       <div className="diff-head">
         <span className="muted small">Diff</span>
-        <Badge tone={s.tone}>{s.label}</Badge>
+        <Badge tone={s.tone}>{(intent.kind === "modify" && MODIFY_STATUS[d.status]) || s.label}</Badge>
       </div>
       <p className="small">{d.detail}</p>
       {d.current && (
@@ -225,10 +225,10 @@ Run with credentials that can change IAM in ${ctx.project}.
           <h3>The cart is empty</h3>
           <p>Build a policy, or stage a fix from the audit, then come back here for the commands.</p>
           <div className="row center-row">
-            <button className="btn btn-primary" onClick={() => goto(4)}>
+            <button className="btn btn-primary" onClick={() => goto("build")}>
               <PlusIcon size={16} /> Build a policy
             </button>
-            <button className="btn btn-tonal" onClick={() => goto(7)}>
+            <button className="btn btn-tonal" onClick={() => goto("audit")}>
               Open the audit
             </button>
           </div>
@@ -283,7 +283,7 @@ Run with credentials that can change IAM in ${ctx.project}.
               <li key={m}>{m}</li>
             ))}
           </ul>
-          <button className="link-btn" onClick={() => goto(0)}>
+          <button className="link-btn" onClick={() => goto("context")}>
             Fill it in on the Context step
           </button>
           , outputs update automatically.

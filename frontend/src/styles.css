@@ -751,6 +751,17 @@ p {
   flex-direction: column;
   gap: 14px;
 }
+/* The policy map step uses the full width (the canvas re-fits to it). */
+.center-wide .center-inner {
+  max-width: none;
+}
+.map-placeholder {
+  min-height: 360px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+}
 .step-head {
   display: flex;
   align-items: flex-start;
@@ -3390,7 +3401,7 @@ body.resizing * {
   }
 }
 
-/* Builder: destination type filters (step 4) */
+/* Builder: destination type filters (Build step) */
 .type-filters { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 10px; }
 .type-filter { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px;
   border: 1px solid var(--border); background: var(--surface); color: var(--text); font: inherit; font-size: 13px; cursor: pointer; }

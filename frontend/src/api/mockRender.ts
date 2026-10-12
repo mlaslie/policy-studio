@@ -3,7 +3,8 @@
 import type { Binding, Ctx, DiffItem, DiffResult, Intent, Outputs, RenderItem, RenderResult } from "./types";
 import type { World } from "./mockData";
 import { MOCK_NUMBER, templateFrom } from "./mockData";
-import { ROLE, conditionFor, intentEnglish, shortName } from "../lib/policy";
+import { ROLE, accessWords, conditionFor, intentEnglish, shortName } from "../lib/policy";
+import { modifyWarning } from "../lib/apply";
 
 const IAP = "https://iap.googleapis.com/v1";
 
@@ -142,6 +143,84 @@ function grantOutputs(ctx: Ctx, i: Intent, revoke: boolean): { outputs: Outputs;
   ].join("\n");
 
   return { outputs: { terraform, gcloud, rest, python }, warnings, notes };
+}
+
+/** modify: one read-modify-write that swaps the binding with the old condition for one with the new condition, like
+ *  the backend's render (gcloud get-/set-iam-policy, REST and Python the same; Terraform is a destroy + create). */
+function modifyOutputs(ctx: Ctx, i: Intent): { outputs: Outputs; warnings: string[]; notes: string[] } {
+  const d = i.destination!;
+  const member = i.source!.principal;
+  const from = conditionFor(i.access_from);
+  const cond = conditionFor(i.access);
+  const [tfType, tfKey, gFlag] = TF_TYPE[d.kind];
+  const name = ident(`${i.source!.label}_${d.label}`);
+  const res = iapResource(ctx, i);
+  const head = `# ${intentEnglish(i)}`;
+  const where = [`  --resource-type=agent-registry \\`, ...(gFlag ? [`  --${gFlag}=${d.id} \\`] : []), `  --region=${ctx.region} \\`, `  --project=${ctx.project}`];
+  const jq = [
+    `jq --arg role ${ROLE} --arg member ${sq(member)} --arg from ${sq(from?.expression ?? "")} --arg expr ${sq(cond?.expression ?? "")} --arg title ${sq(cond?.title ?? "")} '`,
+    `  .version = 3 | .bindings = ([(.bindings // [])[] | if .role == $role and ((.condition.expression // "") == $from) then .members -= [$member] else . end | select(.members | length > 0)]`,
+    `    + [{role: $role, members: [$member]} + (if $expr == "" then {} else {condition: {title: $title, expression: $expr}} end)])' policy.json > new.json`,
+  ];
+  const pad = Math.max(tfKey.length, 8);
+  const block = (c: typeof cond, lifecycle: boolean) =>
+    [
+      `resource "${tfType}" "${name}" {`,
+      ...([["project", "var.project_id"], ["location", "var.region"], ...(tfKey ? [[tfKey, hcl(d.id)]] : []), ["role", `"${ROLE}"`], ["member", hcl(member)]] as const).map(([k, v]) => `  ${k.padEnd(pad)} = ${v}`),
+      ...(c ? [`  condition {`, `    title      = ${hcl(c.title)}`, `    expression = ${hcl(c.expression)}`, `  }`] : []),
+      ...(lifecycle ? [`  lifecycle {`, `    create_before_destroy = true`, `  }`] : []),
+      `}`,
+    ].join("\n");
+  const terraform = [
+    head,
+    `# Change access: an _iam_member is keyed by its condition, so Terraform plans a replacement (destroy + create).`,
+    `# Edit the condition of the block that manages this grant as below; create_before_destroy adds the new binding first.`,
+    `#`,
+    `# Today:`,
+    block(from, false).split("\n").map((l) => `# ${l}`).join("\n"),
+    ``,
+    block(cond, true),
+  ].join("\n");
+  const gcloud = [head, `# One read-modify-write: not remove- + add-iam-policy-binding (that leaves a moment with no access).`, `gcloud iap web get-iam-policy \\`, ...where.slice(0, -1), `${where[where.length - 1]} \\`, `  --format=json > policy.json`, ...jq, `gcloud iap web set-iam-policy new.json \\`, ...where].join("\n");
+  const rest = [
+    head,
+    `RES="${res}"`,
+    `TOKEN="$(gcloud auth print-access-token)"`,
+    `curl -sS -X POST "${IAP}/$RES:getIamPolicy" \\`,
+    `  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \\`,
+    `  -d '{"options":{"requestedPolicyVersion":3}}' > policy.json`,
+    ...jq,
+    `curl -sS -X POST "${IAP}/$RES:setIamPolicy" \\`,
+    `  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \\`,
+    `  -d "{\\"policy\\": $(cat new.json)}"`,
+  ].join("\n");
+  const python = [
+    head,
+    `# pip install google-cloud-iap  (see the bundle for the modify() helper)`,
+    `modify(`,
+    `    ${JSON.stringify(res)},`,
+    `    ${JSON.stringify(member)},`,
+    ...(from ? [`    old_expression=${JSON.stringify(from.expression)},`] : []),
+    ...(cond ? [`    title=${JSON.stringify(cond.title)},`, `    expression=${JSON.stringify(cond.expression)},`] : []),
+    `)`,
+  ].join("\n");
+  const notes = [`change: replaces the binding whose condition is ${from?.expression ?? "none (unconditional)"}, in the same setIamPolicy as the new one.`];
+  const warn = modifyWarning(i);
+  return { outputs: { terraform, gcloud, rest, python }, warnings: warn ? [warn] : [], notes };
+}
+
+/** A modify on one resource's bindings, like the backend's apply.modify_binding: the member's binding with exactly
+ *  the old condition (by expression) is swapped for one with the new condition; the others are kept in order. */
+export function modifyBindings(cur: Binding[], i: Intent): { bindings: Binding[]; outcome: "changed" | "same" | "already" | "not_found" } {
+  const member = i.source?.principal ?? "";
+  const from = conditionFor(i.access_from);
+  const to = conditionFor(i.access);
+  const mine = (b: Binding, c: Binding["condition"]) => b.member === member && b.role === ROLE && sameCond(b.condition, c);
+  if (sameCond(from, to)) return { bindings: cur, outcome: "same" };
+  if (!cur.some((b) => mine(b, from))) return { bindings: cur, outcome: cur.some((b) => mine(b, to)) ? "already" : "not_found" };
+  const kept = cur.filter((b) => !mine(b, from));
+  const next: Binding = { role: ROLE, member, member_label: i.source?.label ?? member, condition: to, english: intentEnglish({ ...i, kind: "grant" }) };
+  return { bindings: kept.some((b) => mine(b, to)) ? kept : [...kept, next], outcome: "changed" };
 }
 
 function bindOutputs(ctx: Ctx, w: World, i: Intent, unbind: boolean): { outputs: Outputs; warnings: string[]; notes: string[] } {
@@ -435,12 +514,12 @@ export function mockRender(ctx: Ctx, w: World, intents: Intent[]): RenderResult 
   const items: RenderItem[] = intents.map((i) => {
     let r: { outputs: Outputs; warnings: string[]; notes: string[] };
     let anatomy: RenderItem["anatomy"];
-    if (i.kind === "grant" || i.kind === "revoke") {
+    if (i.kind === "grant" || i.kind === "revoke" || i.kind === "modify") {
       if (!i.source || !i.destination) {
         return { intent_id: i.id, english: intentEnglish(i), anatomy: { resource: "", role: ROLE, member: "", notes: [] }, outputs: { terraform: "", gcloud: "", rest: "", python: "" }, warnings: ["Pick a source and a destination first."] };
       }
-      r = grantOutputs(ctx, i, i.kind === "revoke");
-      const cond = i.kind === "grant" ? conditionFor(i.access) : null;
+      r = i.kind === "modify" ? modifyOutputs(ctx, i) : grantOutputs(ctx, i, i.kind === "revoke");
+      const cond = i.kind !== "revoke" ? conditionFor(i.access) : null;
       anatomy = { resource: iapResource(ctx, i), role: ROLE, member: i.source.principal, condition: cond?.expression ?? null, notes: r.notes };
       const src = w.inventory.engines.find((e) => e.name === i.source?.engine);
       if (i.kind === "grant" && src && !src.gateways.egress) r.warnings.push(`${src.display_name} is not bound to an egress gateway, so this grant is never checked: its calls go out directly.`);
@@ -492,10 +571,18 @@ const sameCond = (a: Binding["condition"], b: Binding["condition"]) => normExpr(
 
 export function mockDiff(w: World, intents: Intent[]): DiffResult {
   const items: DiffItem[] = intents.map((i) => {
-    if (i.kind === "grant" || i.kind === "revoke") {
+    if (i.kind === "grant" || i.kind === "revoke" || i.kind === "modify") {
       const res = i.destination?.name ?? "";
       const current = w.inventory.access[res] ?? [];
       const mine = current.filter((b) => b.member === i.source?.principal && b.role === ROLE);
+      if (i.kind === "modify") {
+        // Like the backend's diff: replace / present (same, or already changed) / absent (the grant changed).
+        const r = modifyBindings(mine, i);
+        const change = `${accessWords(i.access_from)} → ${accessWords(i.access)}`;
+        if (r.outcome === "changed") return { intent_id: i.id, status: "replace", current: mine, after: r.bindings, detail: change };
+        if (r.outcome === "not_found") return { intent_id: i.id, status: "absent", current: mine, after: mine, detail: "The grant to change wasn't found: it changed since you looked; Sync and try again." };
+        return { intent_id: i.id, status: "present", current: mine, after: mine, detail: r.outcome === "same" ? "The new access is the same as the current one." : `Already changed (${change}).` };
+      }
       if (i.kind === "revoke") {
         // Like the backend: only the binding with exactly this condition expression (no access = unconditional).
         const want = conditionFor(i.access);

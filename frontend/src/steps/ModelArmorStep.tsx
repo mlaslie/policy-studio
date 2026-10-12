@@ -1,7 +1,7 @@
-// Step 2: Model Armor per gateway, the template in plain English, stage on / off.
+// Model Armor step: Model Armor per gateway, the template in plain English, stage on / off.
 import { Tip } from "../components/Tooltip";
 import { useState } from "react";
-import { useStudio } from "../store";
+import { stepN, useStudio } from "../store";
 import type { ModelArmorGateway, Template } from "../api/types";
 import { Badge, Callout, Disclosure, Load, StepHeader, Term } from "../components/ui";
 import { CodeView } from "../components/CodeView";
@@ -151,7 +151,7 @@ export function ModelArmorStep() {
       <Load l={modelArmor} what="Model Armor">
         {(d) => (
           <>
-            {d.gateways.length === 0 && <p className="muted">No gateways in this region. Create one first (step 1).</p>}
+            {d.gateways.length === 0 && <p className="muted">No gateways in this region. Create one first (step {stepN("gateways")}).</p>}
             {d.gateways.length > 0 && <ModelArmorSetup data={d} />}
             {d.setup?.ready && !maSetupOpen && d.gateways.length > 0 && (
               <p className="small muted">

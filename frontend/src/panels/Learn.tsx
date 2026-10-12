@@ -1,6 +1,6 @@
 // Learn panel (collapsible, resizable right rail): a friendly explanation and mini diagram for the current step, plus the glossary.
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
-import { useStudio, type StepN } from "../store";
+import { useStudio, type StepKey } from "../store";
 import { GLOSSARY } from "../lib/glossary";
 import { BookIcon, ChevronIcon } from "../components/Icons";
 import { Tip } from "../components/Tooltip";
@@ -43,8 +43,8 @@ function Flow({ nodes, caption }: { nodes: Node[]; caption: string }) {
   );
 }
 
-const LESSONS: Record<StepN, { title: string; body: ReactNode; flow: ReactNode }> = {
-  0: {
+const LESSONS: Record<StepKey, { title: string; body: ReactNode; flow: ReactNode }> = {
+  context: {
     title: "Where are we looking?",
     body: (
       <>
@@ -55,7 +55,18 @@ const LESSONS: Record<StepN, { title: string; body: ReactNode; flow: ReactNode }
     ),
     flow: <Flow caption="Your login reads one project and region" nodes={[{ label: "You", sub: "gcloud login", tone: "agent" }, { label: "Policy Studio", sub: "read-only", tone: "check" }, { label: "Project", sub: "+ region", tone: "dest" }]} />,
   },
-  1: {
+  map: {
+    title: "The whole picture",
+    body: (
+      <>
+        <p>The map draws who can reach what: your agents on the left, the gateways their traffic goes through in the middle, and the destinations in the Agent Registry on the right.</p>
+        <p>Every line comes from a <b>roles/iap.egressor</b> grant Policy Studio read from your project. Without a grant, an agent behind an egress gateway is <b>denied by default</b>.</p>
+        <p>The later steps show each part in detail and let you change it. Changes are staged in the cart first; nothing is written until you apply.</p>
+      </>
+    ),
+    flow: <Flow caption="Agents reach destinations through a gateway" nodes={[{ label: "Agents", tone: "agent" }, { label: "Gateway", sub: "checks grants", tone: "gw" }, { label: "Destinations", sub: "registry", tone: "dest" }]} />,
+  },
+  gateways: {
     title: "What a gateway does",
     body: (
       <>
@@ -74,7 +85,7 @@ const LESSONS: Record<StepN, { title: string; body: ReactNode; flow: ReactNode }
     ),
     flow: <Flow caption="Egress: the gateway checks every outbound call" nodes={[{ label: "Agent", tone: "agent" }, { label: "Egress GW", sub: "IAP check", tone: "gw" }, { label: "MCP / A2A", sub: "API", tone: "dest" }]} />,
   },
-  2: {
+  "model-armor": {
     title: "How Model Armor attaches",
     body: (
       <>
@@ -85,7 +96,7 @@ const LESSONS: Record<StepN, { title: string; body: ReactNode; flow: ReactNode }
     ),
     flow: <Flow caption="Content is screened before it is forwarded" nodes={[{ label: "Prompt", tone: "agent" }, { label: "Gateway", sub: "CONTENT_AUTHZ", tone: "gw" }, { label: "Model Armor", sub: "template", tone: "check" }, { label: "Agent", tone: "dest" }]} />,
   },
-  3: {
+  inventory: {
     title: "The registry is the guest list",
     body: (
       <>
@@ -96,7 +107,7 @@ const LESSONS: Record<StepN, { title: string; body: ReactNode; flow: ReactNode }
     ),
     flow: <Flow caption="A grant on a registry entry names who may reach it" nodes={[{ label: "Agent Identity", sub: "principal://…", tone: "agent" }, { label: "iap.egressor", sub: "role", tone: "check" }, { label: "Registry entry", sub: "agent / MCP / API", tone: "dest" }]} />,
   },
-  4: {
+  build: {
     title: "How a grant is built",
     body: (
       <>
@@ -112,7 +123,7 @@ const LESSONS: Record<StepN, { title: string; body: ReactNode; flow: ReactNode }
     ),
     flow: <Flow caption="Member + role + resource (+ condition) = one grant" nodes={[{ label: "Who", sub: "member", tone: "agent" }, { label: "Role", sub: "egressor", tone: "check" }, { label: "What", sub: "resource", tone: "dest" }, { label: "How much", sub: "condition", tone: "gw" }]} />,
   },
-  5: {
+  review: {
     title: "Same policy, four ways",
     body: (
       <>
@@ -123,7 +134,7 @@ const LESSONS: Record<StepN, { title: string; body: ReactNode; flow: ReactNode }
     ),
     flow: <Flow caption="Staged items become code you run" nodes={[{ label: "Cart", tone: "agent" }, { label: "Render", tone: "check" }, { label: "TF / gcloud", sub: "REST / Python", tone: "dest" }]} />,
   },
-  6: {
+  apply: {
     title: "Applying changes",
     body: (
       <>
@@ -134,7 +145,7 @@ const LESSONS: Record<StepN, { title: string; body: ReactNode; flow: ReactNode }
     ),
     flow: <Flow caption="Confirm, apply, verify, undo" nodes={[{ label: "Confirm", tone: "agent" }, { label: "Apply", tone: "gw" }, { label: "Read back", tone: "check" }, { label: "Undo", tone: "muted" }]} />,
   },
-  7: {
+  audit: {
     title: "Reading an audit",
     body: (
       <>

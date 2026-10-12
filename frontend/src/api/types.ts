@@ -83,6 +83,8 @@ export type Template = {
     malicious_uri: { enabled: boolean };
   };
   block_message?: string;
+  /** Plain-English lines describing the filters (the backend always sends it; the mock may leave it out). */
+  summary?: string[];
   raw: object;
 };
 export type ModelArmorGateway = {
@@ -167,6 +169,12 @@ export type Inventory = {
   mcp_servers: McpServer[];
   endpoints: Endpoint[];
   access: Record<string, Binding[]>;
+  /** Registry entries whose IAM policy couldn't be read (no key in `access`), with the reason. */
+  access_errors: Record<string, string>;
+  /** principalSet of every Agent Runtime agent in the project (null when the org id can't be found). */
+  project_agents_principal: string | null;
+  errors: string[];
+  synced_at?: string;
 };
 
 export type ResourceKind = "agent" | "mcp_server" | "endpoint";
@@ -182,6 +190,7 @@ export type AuditResp = { grants: Grant[]; findings: Finding[]; synced_at: strin
 export type IntentKind =
   | "grant"
   | "revoke"
+  | "modify"
   | "bind_gateway"
   | "unbind_gateway"
   | "model_armor_on"
@@ -215,13 +224,17 @@ export type SetupParams = {
 };
 export type SourceType = "engine" | "project_agents" | "custom";
 export type AccessMode = "all" | "read_only_hint" | "tools" | "custom";
+export type Access = { mode: AccessMode; tools?: string[]; expression?: string; title?: string };
 export type Intent = {
   id: string;
   kind: IntentKind;
   source?: { type: SourceType; principal: string; label: string; engine?: string };
   /** registry = the whole Agent Registry (a registry-wide grant): id "", name projects/P/locations/R. */
   destination?: { kind: ResourceKind | "registry"; id: string; name: string; label: string };
-  access?: { mode: AccessMode; tools?: string[]; expression?: string; title?: string };
+  access?: Access;
+  /** modify: the existing binding's condition, exact (mode "custom" with its expression and title, or mode "all");
+   *  `access` is the new one. Applied as one read-modify-write. */
+  access_from?: Access;
   gateway?: { name: string; direction: Direction; extension?: string; policy?: string };
   engine?: string;
   params?: SetupParams;

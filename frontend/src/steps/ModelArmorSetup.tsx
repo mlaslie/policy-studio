@@ -209,7 +209,7 @@ export function ModelArmorSetup({ data }: { data: ModelArmorResp }) {
   ];
   const stagedIds = [stagedTmpl, stagedExt, ...agents.map((x) => x.staged), ...gws.map((x) => x.staged)].filter((x): x is Intent => !!x).map((x) => x.id);
   const anyStaged = stagedIds.length > 0;
-  const review = () => (canApply ? openApply(stagedIds) : goto(5));
+  const review = () => (canApply ? openApply(stagedIds) : goto("review"));
 
   const chips: { label: string; state: ChipState }[] = [
     { label: "Template", state: tmplState },

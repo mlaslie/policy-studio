@@ -1,4 +1,4 @@
-// Step 6: Apply. Shows the plan (cart or the selected items) with a diff per item, asks for confirmation
+// Apply step: Apply. Shows the plan (cart or the selected items) with a diff per item, asks for confirmation
 // (type the project ID; acknowledge destructive changes), streams POST /apply progress, then offers Undo.
 // In generate mode, or when credential checks fail, it explains why and points at the commands instead.
 import { Tip, unavailable } from "../components/Tooltip";
@@ -12,7 +12,7 @@ import { ArrowIcon, CheckIcon, ClockIcon, CloseIcon, CopyIcon, LockIcon, PlayIco
 import { useApplyGate } from "../components/Mode";
 import { CopyButton } from "../components/Glass";
 import { KIND_LABEL, KIND_ORDER, intentEnglish } from "../lib/policy";
-import { CHANGE_KIND, DESTRUCTIVE_PHRASE, TYPICAL, fmtElapsed, isDestructive, isLongRunning, kindBlockedReason, sameChange, type ApplyRun, type RunItem } from "../lib/apply";
+import { CHANGE_KIND, DESTRUCTIVE_PHRASE, MODIFY_STATUS, TYPICAL, fmtElapsed, isDestructive, isLongRunning, kindBlockedReason, sameChange, type ApplyRun, type RunItem } from "../lib/apply";
 import { LocalSetup, projectMismatch } from "./CredentialsCard";
 
 const STATUS: Record<DiffItem["status"], { label: string; tone: "green" | "neutral" | "amber" | "red" }> = {
@@ -25,6 +25,7 @@ const STATUS: Record<DiffItem["status"], { label: string; tone: "green" | "neutr
 const KIND_TONE: Record<Intent["kind"], "green" | "red" | "blue" | "amber" | "purple"> = {
   grant: "green",
   revoke: "red",
+  modify: "amber",
   bind_gateway: "blue",
   unbind_gateway: "amber",
   model_armor_on: "purple",
@@ -63,7 +64,7 @@ function BlockedFix({ p }: { p: PreflightItem }) {
   if (p.fix === "permission")
     return (
       <Tip tip="Open Context to see which role you're missing and the command to grant it.">
-        <button className="link-btn small" onClick={() => goto(0)}>
+        <button className="link-btn small" onClick={() => goto("context")}>
           See the missing permission on Context
         </button>
       </Tip>
@@ -74,7 +75,8 @@ function BlockedFix({ p }: { p: PreflightItem }) {
 function PlanRow({ intent, n, d, p }: { intent: Intent; n: number; d: DiffItem | undefined; p?: PreflightItem }) {
   const { auth } = useStudio();
   const denied = kindBlockedReason(auth.data, intent.kind);
-  const noop = d && (d.status === "present" || d.status === "absent");
+  // A modify whose grant isn't there any more fails (the grant changed), it isn't skipped.
+  const noop = d && (d.status === "present" || (d.status === "absent" && intent.kind !== "modify"));
   const blocked = p && p.status !== "ok";
   return (
     <li className={`plan-row ${noop || blocked ? "noop" : ""} ${blocked ? "blocked" : ""} ${isDestructive(intent) ? "destructive" : ""}`}>
@@ -127,7 +129,7 @@ function PlanRow({ intent, n, d, p }: { intent: Intent; n: number; d: DiffItem |
         )}
       </div>
       <div className="plan-side">
-        {d && !d.error && <Badge tone={STATUS[d.status].tone}>{STATUS[d.status].label}</Badge>}
+        {d && !d.error && <Badge tone={STATUS[d.status].tone}>{(intent.kind === "modify" && MODIFY_STATUS[d.status]) || STATUS[d.status].label}</Badge>}
         <span className="tiny muted" title="Typical time for this kind of change">
           <ClockIcon size={11} /> {TYPICAL[intent.kind].label}
         </span>
@@ -412,7 +414,7 @@ function RunPanel({ run }: { run: ApplyRun }) {
           <button className="btn btn-primary" onClick={dismissRun}>
             Back to the plan
           </button>
-          <button className="btn btn-tonal" onClick={() => goto(7)}>
+          <button className="btn btn-tonal" onClick={() => goto("audit")}>
             Open the audit <ArrowIcon size={16} />
           </button>
         </div>
@@ -518,7 +520,7 @@ function Unavailable() {
         </div>
       ))}
       <p className="small">
-        <button className="link-btn" onClick={() => goto(0)}>
+        <button className="link-btn" onClick={() => goto("context")}>
           Open Credentials on the Context step
         </button>{" "}
         to see every check and copy the fixes. You can still <button className="link-btn" onClick={() => openReview(null)}>copy the commands</button> and run them yourself.
@@ -638,10 +640,10 @@ export function ApplyStep() {
               <h3>Nothing to apply</h3>
               <p>Build a policy, or stage a fix from the audit, then come back here.</p>
               <div className="row center-row">
-                <button className="btn btn-primary" onClick={() => goto(4)}>
+                <button className="btn btn-primary" onClick={() => goto("build")}>
                   Build a policy
                 </button>
-                <button className="btn btn-tonal" onClick={() => goto(7)}>
+                <button className="btn btn-tonal" onClick={() => goto("audit")}>
                   Open the audit
                 </button>
               </div>

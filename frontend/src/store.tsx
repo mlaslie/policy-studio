@@ -10,17 +10,36 @@ import { intentKey, newId } from "./lib/policy";
 export type Loadable<T> = { data: T | null; loading: boolean; error: string | null };
 const empty = <T,>(): Loadable<T> => ({ data: null, loading: false, error: null });
 
+// Steps are referred to by key everywhere (goto("apply")); the number is only shown, and comes from the position,
+// so reordering or inserting a step needs no other change.
 export const STEPS = [
-  { n: 0, key: "context", title: "Context", sub: "Project and region" },
-  { n: 1, key: "gateways", title: "Gateways", sub: "Where traffic is checked" },
-  { n: 2, key: "model-armor", title: "Model Armor", sub: "Content screening" },
-  { n: 3, key: "inventory", title: "Inventory", sub: "Agents, tools and APIs" },
-  { n: 4, key: "build", title: "Build a policy", sub: "Who can call what" },
-  { n: 5, key: "review", title: "Review & output", sub: "Commands and diff" },
-  { n: 6, key: "apply", title: "Apply", sub: "Make the changes" },
-  { n: 7, key: "audit", title: "Audit", sub: "What's in place today" },
+  { key: "context", title: "Context", sub: "Project and region" },
+  { key: "map", title: "Policy map", sub: "Who can reach what" },
+  { key: "gateways", title: "Gateways", sub: "Where traffic is checked" },
+  { key: "model-armor", title: "Model Armor", sub: "Content screening" },
+  { key: "inventory", title: "Inventory", sub: "Agents, tools and APIs" },
+  { key: "build", title: "Build a policy", sub: "Who can call what" },
+  { key: "review", title: "Review & output", sub: "Commands and diff" },
+  { key: "apply", title: "Apply", sub: "Make the changes" },
+  { key: "audit", title: "Audit", sub: "What's in place today" },
 ] as const;
-export type StepN = (typeof STEPS)[number]["n"];
+export type StepKey = (typeof STEPS)[number]["key"];
+export const STEP_KEYS: readonly StepKey[] = STEPS.map((s) => s.key);
+/** The number shown for a step (display only). */
+export const stepN = (k: StepKey): number => STEP_KEYS.indexOf(k);
+export const isStepKey = (v: unknown): v is StepKey => typeof v === "string" && (STEP_KEYS as readonly string[]).includes(v);
+
+/** Step order before the map was inserted, for a step number saved by an older version. */
+const LEGACY_STEPS: StepKey[] = ["context", "gateways", "model-armor", "inventory", "build", "review", "apply", "audit"];
+/** A step saved as a number (localStorage studio.step) is moved to its key. Returns the saved key, if any. */
+export function migrateSavedStep(): StepKey | null {
+  const v = load<unknown>("studio.step", null);
+  if (typeof v === "number" && LEGACY_STEPS[v]) {
+    save("studio.step", LEGACY_STEPS[v]);
+    return LEGACY_STEPS[v];
+  }
+  return isStepKey(v) ? v : null;
+}
 
 type Toast = { id: number; text: string; tone?: "ok" | "warn" };
 
@@ -41,8 +60,8 @@ type Studio = {
   removeIntent: (id: string) => void;
   duplicateIntent: (id: string) => void;
   clearCart: () => void;
-  step: StepN;
-  goto: (s: StepN) => void;
+  step: StepKey;
+  goto: (s: StepKey) => void;
   draft: { intent: Partial<Intent>; editId?: string; mode?: "grant" | "revoke"; seq: number } | null;
   openBuilder: (intent: Partial<Intent>, opts?: { editId?: string; mode?: "grant" | "revoke" }) => void;
   reviewFocus: string | null;
@@ -101,7 +120,12 @@ export function StudioProvider({ children }: { children: ReactNode }) {
   const [syncing, setSyncing] = useState(false);
   const [syncedAt, setSyncedAt] = useState<number | null>(null);
   const [cart, setCart] = useState<Intent[]>(() => load<Intent[]>("studio.cart", []));
-  const [step, setStep] = useState<StepN>(() => (load<Partial<Ctx>>("studio.ctx", {}).project ? 1 : 0) as StepN);
+  // With a saved context, open on the map (the whole picture); otherwise on Context. Nothing writes studio.step
+  // today, but an old numeric value is still moved to its key.
+  const [step, setStep] = useState<StepKey>(() => {
+    migrateSavedStep();
+    return load<Partial<Ctx>>("studio.ctx", {}).project ? "map" : "context";
+  });
   const [draft, setDraft] = useState<Studio["draft"]>(null);
   const [reviewFocus, setReviewFocus] = useState<string | null>(null);
   const [learnOpen, setLearnOpenState] = useState<boolean>(() => load("studio.learn", true));
@@ -219,7 +243,7 @@ export function StudioProvider({ children }: { children: ReactNode }) {
   );
   const clearCart = useCallback(() => setCart([]), []);
 
-  const goto = useCallback((s: StepN) => {
+  const goto = useCallback((s: StepKey) => {
     setStep(s);
     document.querySelector(".center")?.scrollTo({ top: 0 });
   }, []);
@@ -227,14 +251,14 @@ export function StudioProvider({ children }: { children: ReactNode }) {
   const openBuilder = useCallback<Studio["openBuilder"]>(
     (intent, opts) => {
       setDraft({ intent, editId: opts?.editId, mode: opts?.mode, seq: ++seq.current });
-      goto(4);
+      goto("build");
     },
     [goto],
   );
   const openReview = useCallback(
     (id?: string | null) => {
       setReviewFocus(id ?? null);
-      goto(5);
+      goto("review");
     },
     [goto],
   );
@@ -254,7 +278,7 @@ export function StudioProvider({ children }: { children: ReactNode }) {
   const openApply = useCallback(
     (ids?: string[] | null) => {
       setApplyFocus(ids && ids.length ? ids : null);
-      goto(6);
+      goto("apply");
     },
     [goto],
   );
@@ -366,14 +390,14 @@ export function StudioProvider({ children }: { children: ReactNode }) {
       );
       setRun(null);
       setApplyFocus([...existing, ...staged.map((i) => i.id)]);
-      goto(6);
+      goto("apply");
     },
     [goto, toast],
   );
 
   const openMaSetup = useCallback(() => {
     setMaSetupOpen(true);
-    goto(2);
+    goto("model-armor");
     requestAnimationFrame(() => document.getElementById("ma-setup")?.scrollIntoView({ behavior: "smooth", block: "start" }));
   }, [goto]);
 

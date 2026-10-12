@@ -30,6 +30,7 @@ IAP_SET = ["iap.web.setIamPolicy", "iap.webTypes.setIamPolicy", "iap.webServices
 WRITE_PERMISSIONS: dict[str, tuple[list[str], bool, str, str]] = {
     "grant": (IAP_SET, True, "gateway", "roles/iap.admin"),
     "revoke": (IAP_SET, True, "gateway", "roles/iap.admin"),
+    "modify": (IAP_SET, True, "gateway", "roles/iap.admin"),
     "bind_gateway": (["aiplatform.reasoningEngines.update"], False, "project", "roles/aiplatform.user"),
     "unbind_gateway": (["aiplatform.reasoningEngines.update"], False, "project", "roles/aiplatform.user"),
     "model_armor_on": (["networksecurity.authzPolicies.create"], False, "both", "roles/networksecurity.editor"),
@@ -43,7 +44,7 @@ WRITE_PERMISSIONS: dict[str, tuple[list[str], bool, str, str]] = {
     "dedicate_extension": (["networkservices.authzExtensions.create", "networksecurity.authzPolicies.update"], False,
                            "both", "roles/networkservices.admin roles/networksecurity.editor"),
 }
-KIND_LABEL = {"grant": "grants", "revoke": "revokes", "bind_gateway": "gateway binds",
+KIND_LABEL = {"grant": "grants", "revoke": "revokes", "modify": "grant changes", "bind_gateway": "gateway binds",
               "unbind_gateway": "gateway unbinds", "model_armor_on": "Model Armor on",
               "model_armor_off": "Model Armor off", "model_armor_template": "Model Armor templates",
               "model_armor_extension": "Model Armor extensions",

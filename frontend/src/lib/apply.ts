@@ -1,7 +1,7 @@
 // Apply (P3) helpers shared by the store, the Apply step and Review: run state types, which kinds are
 // destructive, typical durations and plain-English labels.
-import type { ApplyState, AuthInfo, Intent } from "../api/types";
-import { intentKey, shortName } from "./policy";
+import type { Access, ApplyState, AuthInfo, DiffStatus, Intent } from "../api/types";
+import { accessFromCondition, accessWords, conditionFor, intentKey, shortName } from "./policy";
 
 export type RunItemState = ApplyState | "queued";
 export type RunItem = {
@@ -38,6 +38,33 @@ export const isDestructive = (i: Intent) =>
   (i.kind === "set_enforcement" && i.mode === "DRY_RUN") ||
   (i.kind === "dedicate_extension" && !!i.revert);
 
+/** How a modify changes access, like the backend's conditions.compare_access: "same" | "narrower" | "broader" |
+ *  "unknown". `readOnly`: the MCP server's read-only tool names (undefined = not known). */
+export function compareAccess(from: Access | undefined, to: Access | undefined, readOnly?: Set<string>): "same" | "narrower" | "broader" | "unknown" {
+  const eff = (x: Access | undefined): Access => (x?.mode === "custom" ? accessFromCondition(x.expression?.trim() ? x.expression : undefined) : (x ?? { mode: "all" }));
+  const a = eff(from);
+  const b = eff(to);
+  const norm = (x: Access) => (conditionFor(x)?.expression ?? "").replace(/\s+/g, " ").trim();
+  if (norm(a) === norm(b)) return "same";
+  if (b.mode === "all") return "broader";
+  if (a.mode === "all") return "narrower";
+  const added = (xs: string[], have: Set<string>) => xs.some((t) => !have.has(t));
+  if (a.mode === "tools" && b.mode === "tools") return added(b.tools ?? [], new Set(a.tools)) ? "broader" : "narrower";
+  if (a.mode === "read_only_hint" && b.mode === "tools" && readOnly) return added(b.tools ?? [], readOnly) ? "broader" : "narrower";
+  if (a.mode === "tools" && b.mode === "read_only_hint" && readOnly) return added([...readOnly], new Set(a.tools)) ? "broader" : "unknown";
+  return "unknown";
+}
+
+/** A modify isn't destructive (it never removes all access), but widening access deserves a warning (as the
+ *  backend's preflight gives). */
+export function modifyWarning(i: Intent, readOnly?: Set<string>): string | null {
+  if (i.kind !== "modify") return null;
+  return compareAccess(i.access_from, i.access, readOnly) === "broader" ? `This widens access: ${accessWords(i.access_from)} → ${accessWords(i.access)}.` : null;
+}
+
+/** Diff badge labels that read differently for a modify (the others are shared with grant / revoke). */
+export const MODIFY_STATUS: Partial<Record<DiffStatus, string>> = { replace: "Will change", absent: "Grant not found" };
+
 /** What a destructive kind does, for the acknowledgement checkbox. */
 export const DESTRUCTIVE_PHRASE: Partial<Record<Intent["kind"], string>> = {
   revoke: "removes access",
@@ -56,6 +83,7 @@ export const DESTRUCTIVE_PHRASE: Partial<Record<Intent["kind"], string>> = {
 export const TYPICAL: Record<Intent["kind"], { label: string; seconds: number }> = {
   grant: { label: "a few seconds", seconds: 5 },
   revoke: { label: "a few seconds", seconds: 5 },
+  modify: { label: "a few seconds", seconds: 5 },
   bind_gateway: { label: "about 5 min", seconds: 300 },
   unbind_gateway: { label: "about 5 min", seconds: 300 },
   model_armor_on: { label: "about 4 min", seconds: 240 },
@@ -71,6 +99,7 @@ export const isLongRunning = (i: Intent) => TYPICAL[i.kind].seconds >= 60;
 export const CHANGE_KIND: Record<Intent["kind"], string> = {
   grant: "IAM grant on the registry entry",
   revoke: "IAM revoke on the registry entry",
+  modify: "IAM change on the registry entry (one read-modify-write)",
   bind_gateway: "Agent update (long-running)",
   unbind_gateway: "Agent update (long-running)",
   model_armor_on: "Create authz policy (long-running)",
@@ -100,6 +129,7 @@ export function applyBlockedReason(a: AuthInfo | null, loading: boolean, error: 
 const KIND_NOUN: Record<Intent["kind"], string> = {
   grant: "grants",
   revoke: "revokes",
+  modify: "grant changes",
   bind_gateway: "gateway bindings",
   unbind_gateway: "gateway unbindings",
   model_armor_on: "turning Model Armor on",

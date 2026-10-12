@@ -98,7 +98,7 @@ Finding = { severity: "high"|"medium"|"info", title, detail, resource?, fix?: In
             redeploy?: string /* Python: redeploy with Agent Identity, for engines that can't be bound (no fix) */ }
   // fix intents for grant/revoke carry full source and destination objects with labels; bind fixes carry source too
 
-Intent = { id, kind: "grant"|"revoke"|"bind_gateway"|"unbind_gateway"|"model_armor_on"|"model_armor_off"
+Intent = { id, kind: "grant"|"revoke"|"modify"|"bind_gateway"|"unbind_gateway"|"model_armor_on"|"model_armor_off"
               |"model_armor_template"|"model_armor_extension"|"iam_project_grant"
               |"set_enforcement"|"dedicate_extension",
   source?:      { type: "engine"|"project_agents"|"custom", principal, label, engine? },
@@ -107,6 +107,9 @@ Intent = { id, kind: "grant"|"revoke"|"bind_gateway"|"unbind_gateway"|"model_arm
                   title?: string /* exact condition title, e.g. when revoking an existing binding */ },
                   // grant/revoke: no access = unconditional. Revoke fixes (/audit) and the undo of a revoke carry
                   // the binding's condition verbatim as mode "custom"; its English describes what it is.
+                  // modify: the new access.
+  access_from?: Access /* modify (required): the existing binding's condition, exact, as a revoke carries it:
+                          {mode: "custom", expression, title}, or {mode: "all"} when it has none */,
   gateway?:     { name, direction: "egress"|"ingress", extension?: string, policy?: string },
   engine?:      string,
   params?:      SetupParams /* the Model Armor setup kinds */,
@@ -153,6 +156,16 @@ SetupParams = { project? /* default: the gateway project */, delete?: boolean /*
   // of a resource_kind "registry" grant). Rendered on the IAP resource .../iap_web/agentRegistry, gcloud without
   // --agent/--mcp-server/--endpoint, Terraform google_iap_agent_registry_iam_member.
   // gateway.extension / gateway.policy (Model Armor) are filled in by the backend from discovery when omitted.
+  // modify = change a grant's condition (source, destination, access_from and access are required; otherwise the
+  // item is invalid). IAM adds bindings rather than replacing them, so a grant alone would leave the old access in
+  // place; a modify removes the binding matching access_from exactly and adds the new one in ONE setIamPolicy.
+  // English: "Change <source>'s access to <destination>: full access → only read-only tools." Rendered as one
+  // read-modify-write: gcloud iap web get-iam-policy → jq → set-iam-policy (not remove- + add-iam-policy-binding;
+  // not verified live for --resource-type=agent-registry), REST getIamPolicy → jq → setIamPolicy, Python modify();
+  // Terraform: an _iam_member is keyed by its condition, so it is a destroy + create there: the item shows the
+  // block with the new condition and lifecycle { create_before_destroy = true }, and suggests the _iam_policy
+  // resource for whole-policy management. Not destructive (no acknowledge_destructive); render warns and preflight
+  // adds a `warning` when it widens access (e.g. read-only tools → full access).
 
 RenderResult = { context /* resolved, incl. project_number */,
                  items: [{ intent_id, english, error?: string /* this intent failed; others still render */,
@@ -170,13 +183,18 @@ PreflightItem = { intent_id, status: "ok"|"blocked"|"duplicate"|"invalid", reaso
   // blocked: bind_gateway of an engine that can't be bound; model_armor_on with no Model Armor extension in the
   // region and none staged; a kind the caller can't write (apply mode, /auth writable); set_enforcement /
   // dedicate_extension on a gateway with no IAP REQUEST_AUTHZ policy; set_enforcement to the mode the extension is
-  // already in (fix "already"); dedicate_extension to a name that exists, or whose policy targets other gateways too.
+  // already in (fix "already"); dedicate_extension to a name that exists, or whose policy targets other gateways too;
+  // modify whose access equals access_from (fix "already"), or whose access_from binding isn't in the current
+  // inventory ("The grant changed since you looked; Sync and try again").
 
 DiffItem = { intent_id, status: "add"|"present"|"replace"|"remove"|"absent", detail, error? /* invalid intent */,
              current: Binding[] | null /* the member's roles/iap.egressor bindings on the resource today */,
              after:   Binding[] | null /* the same after the change; null for gateway / Model Armor intents */ }
   // "replace": the member already has a different condition. IAM ORs bindings, so after = current + the new one;
-  // revoke the old binding to really replace it.
+  // revoke the old binding to really replace it (or stage a modify).
+  // modify: "replace" (detail "full access → only read-only tools"; after = the member's other bindings + the new
+  // one), "present" (same access, or already changed: the new binding is there and the old one isn't), "absent"
+  // (the binding matching access_from isn't there: it changed since it was read).
   // set_enforcement: "replace" (mode changes; detail "gw: Dry run → Enforce", plus shared gateways), "present" (same
   // mode), with current_mode / target_mode. dedicate_extension: "add" / "present"; revert: "remove" / "absent".
 
@@ -291,6 +309,7 @@ Before any call, duplicates are `skipped` and the `/preflight` blockers `failed`
 
 Each intent is applied, then read back and verified:
 - **IAP grant/revoke:** getIamPolicy → modify → setIamPolicy with the etag, version 3, and the condition preserved; read back and confirm the binding is there (or gone).
+- **modify:** one getIamPolicy → remove the member from the binding matching `access_from` exactly (by expression, whitespace-insensitive) → add the binding for `access` (unless it's already there) → one setIamPolicy with the etag (version 3, other bindings untouched; an etag conflict retries from a fresh read) → read back: the new binding is there and the old one is gone. `access_from` not found: `failed` ("The grant changed since you looked"), or `skipped` when the new binding is already there. Undo: the reverse modify (`access_from` = the new condition verbatim, `access` = the removed one verbatim).
 - **bind/unbind gateway:** an engine PATCH that keeps the other direction, one PATCH per engine at a time. It's a long-running operation; the result reports the operation, and a later read-back confirms `agentGatewayConfig`.
 - **model_armor_on/off:** create or delete the `CONTENT_AUTHZ` authz policy (long-running operation, about 4 min).
 - **model_armor_template:** create (or delete) the template on `modelarmor.<R>.rep.googleapis.com`; read back.

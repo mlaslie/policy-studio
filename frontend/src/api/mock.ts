@@ -9,10 +9,11 @@
 // Applied changes are kept in memory (until reload), so Sync shows them.
 import type { ApplyConfirm, ApplyEvent, AuthInfo, Binding, Ctx, GatewayLogEntry, GatewayLogsResp, GatewaysResp, Intent, PreflightItem, PreflightResult } from "./types";
 import { buildWorld, MOCK_NUMBER, refreshEnforcement, templateFrom, type World } from "./mockData";
-import { mockDiff, mockRender } from "./mockRender";
+import { mockDiff, mockRender, modifyBindings } from "./mockRender";
 import { ROLE, conditionFor, intentEnglish, intentKey, newId, projectPrincipalSet } from "../lib/policy";
 import { NO_IDENTITY_REASON } from "../components/Redeploy";
 import { accessFromCondition } from "../lib/grants";
+import { modifyWarning } from "../lib/apply";
 
 const clone = <T,>(x: T): T => JSON.parse(JSON.stringify(x));
 
@@ -57,6 +58,11 @@ function mutate(w: World, i: Intent) {
       w.iapExts.splice(w.iapExts.indexOf(copy), 1);
     }
     refreshEnforcement(w.gateways, w.iapExts);
+    return;
+  }
+  if (i.kind === "modify") {
+    const res = i.destination?.name ?? "";
+    w.inventory.access[res] = modifyBindings(w.inventory.access[res] ?? [], i).bindings;
     return;
   }
   if (i.kind === "grant" || i.kind === "revoke") {
@@ -323,6 +329,15 @@ export function preflight(ctx: Ctx, intents: Intent[]): PreflightResult {
     if (seen.has(k)) return { intent_id: i.id, status: "duplicate", duplicate_of: seen.get(k), reason: `Same change as ${seen.get(k)}; applied once.` };
     seen.set(k, i.id);
     if (a.writable?.[i.kind] === false) return { intent_id: i.id, status: "blocked", fix: "permission", reason: `You don't have permission for this kind of change in ${ctx.project} (see the “can write” check on Context for the role to ask for).` };
+    if (i.kind === "modify") {
+      // Like the backend: the same access, or a grant that isn't there any more, would certainly fail.
+      const { outcome } = modifyBindings(w.inventory.access[i.destination?.name ?? ""] ?? [], i);
+      if (outcome === "same") return { intent_id: i.id, status: "blocked", fix: "already", reason: "The new access is the same as the current one, so there is nothing to change." };
+      if (outcome === "not_found") return { intent_id: i.id, status: "blocked", fix: "", reason: "The grant changed since you looked: there is no binding with this member and the old condition any more. Sync and try again." };
+      const ro = new Set(w.inventory.mcp_servers.find((m) => m.name === i.destination?.name)?.tools.filter((t) => t.read_only).map((t) => t.name));
+      const warning = modifyWarning(i, i.destination?.kind === "mcp_server" ? ro : undefined);
+      return { intent_id: i.id, status: "ok", ...(warning ? { warning } : {}) };
+    }
     const e = w.inventory.engines.find((x) => x.name === i.engine);
     if (i.kind === "bind_gateway" && e && !e.bindable) return { intent_id: i.id, status: "blocked", fix: "redeploy", reason: `${e.display_name} can't be bound to Agent Gateway. ${e.bindable_reason ?? ""}` };
     if (i.kind === "set_enforcement" || i.kind === "dedicate_extension") {
@@ -360,7 +375,7 @@ export function auth(ctx: Ctx): AuthInfo {
   const P = ctx.project || "my-demo-project";
   const acct = "alex.admin@example.com";
   const GP = ctx.gateway_project || P;
-  const all = (v: boolean) => ({ grant: v, revoke: v, bind_gateway: v, unbind_gateway: v, model_armor_on: v, model_armor_off: v });
+  const all = (v: boolean) => ({ grant: v, revoke: v, modify: v, bind_gateway: v, unbind_gateway: v, model_armor_on: v, model_armor_off: v });
   if (f.mode === "generate")
     return {
       mode: "generate",
@@ -458,6 +473,8 @@ const runOrder = (i: Intent) =>
       ? 5
       : ({ model_armor_template: 0, model_armor_extension: 1, iam_project_grant: 2, dedicate_extension: 3 } as Record<string, number>)[i.kind] ?? 4;
 
+const exactOf = (c: Binding["condition"]): NonNullable<Intent["access"]> => (c?.expression.trim() ? { mode: "custom", expression: c.expression, title: c.title } : { mode: "all" });
+
 /** The inverse of an intent, given the world before it was applied. */
 function inverse(w: World, i: Intent): Intent | Intent[] | null {
   const id = () => newId("u");
@@ -466,6 +483,9 @@ function inverse(w: World, i: Intent): Intent | Intent[] | null {
       const cond = conditionFor(i.access);
       return { id: id(), kind: "revoke", source: i.source, destination: i.destination, access: cond ? { mode: "custom", expression: cond.expression, title: cond.title } : { mode: "all" } };
     }
+    case "modify":
+      // The reverse modify: from the new binding (verbatim) back to the one it replaced.
+      return { ...i, id: id(), access_from: exactOf(conditionFor(i.access)), access: exactOf(conditionFor(i.access_from)) };
     case "revoke": {
       const cur = w.inventory.access[i.destination?.name ?? ""] ?? [];
       const want = conditionFor(i.access);
@@ -544,6 +564,12 @@ export async function* applyStream(ctx: Ctx, intents: Intent[], confirm: ApplyCo
       yield { intent_id: i.id, state: "skipped", detail: `Not needed: ${short(i.extension)} is deleted by the revert in this request.` };
       continue;
     }
+    if (i.kind === "modify" && d.status === "absent") {
+      await sleep(400, signal);
+      counts.failed++;
+      yield { intent_id: i.id, state: "failed", detail: "The grant changed since you looked (no binding with this member, role and the old condition); Sync and try again." };
+      continue;
+    }
     if (d.status === "present" || d.status === "absent") {
       await sleep(400, signal);
       counts.skipped++;
@@ -556,7 +582,7 @@ export async function* applyStream(ctx: Ctx, intents: Intent[], confirm: ApplyCo
       yield { intent_id: i.id, state: "failed", detail: `Model Armor isn't set up in ${ctx.region} yet (no Model Armor authz extension). Stage the setup (template, extension, service agent roles) with this item, then apply again.` };
       continue;
     }
-    const lro = !["grant", "revoke", "model_armor_template", "iam_project_grant"].includes(i.kind);
+    const lro = !["grant", "revoke", "modify", "model_armor_template", "iam_project_grant"].includes(i.kind);
     const op = lro ? `projects/${ctx.project}/locations/${ctx.region}/operations/operation-${Date.now()}-${Math.random().toString(16).slice(2, 10)}` : undefined;
     if (lro)
       yield {
@@ -604,6 +630,8 @@ export async function* applyStream(ctx: Ctx, intents: Intent[], confirm: ApplyCo
           ? "Read back: the binding is there."
           : i.kind === "revoke"
             ? "Read back: the binding is gone."
+            : i.kind === "modify"
+              ? "Read back: the new binding is there and the old one is gone."
             : i.kind.endsWith("gateway")
               ? "Read back: agentGatewayConfig matches."
               : i.kind === "set_enforcement"

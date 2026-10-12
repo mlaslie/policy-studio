@@ -71,7 +71,7 @@ export function Load<T>({ l, what, children }: { l: Loadable<T>; what: string; c
     return (
       <div className="empty">
         <p>Set a project and region first.</p>
-        <button className="btn btn-primary" onClick={() => goto(0)}>
+        <button className="btn btn-primary" onClick={() => goto("context")}>
           Go to Context
         </button>
       </div>

@@ -1,18 +1,22 @@
 """Checks that run before Apply (and back the POST /preflight endpoint): duplicate intents, intents that will
 certainly fail (a bind of an engine that can't be bound, Model Armor on with no extension anywhere, a kind the
-caller can't write), and friendlier text for known Google Cloud errors. Pure functions over a RenderEnv; no calls."""
+caller can't write, a modify of a grant that isn't there or to the same access), and friendlier text for known Google
+Cloud errors. Pure functions over a RenderEnv (and the inventory, when given); no calls."""
 from __future__ import annotations
 
 import json
 import re
 from typing import Any, Optional
 
+from .conditions import EGRESSOR, compare_access, condition_for, same_condition
+from .diff import resource_key
+from .english import access_words
 from .gcp.engines import REASON_IDENTITY, tail
-from .model import Intent
+from .model import Intent, Inventory
 from .render import (PLACEHOLDER_EXT, Blocked, RenderEnv, dedicate_names, enf_spec, engine_full, engine_info_for,
                      english_list, gateway_full, ma_spec, short)
 
-KIND_LABEL = {"grant": "grants", "revoke": "revokes", "bind_gateway": "gateway binds",
+KIND_LABEL = {"grant": "grants", "revoke": "revokes", "modify": "changing grants", "bind_gateway": "gateway binds",
               "unbind_gateway": "gateway unbinds", "model_armor_on": "turning Model Armor on",
               "model_armor_off": "turning Model Armor off", "model_armor_template": "creating Model Armor templates",
               "model_armor_extension": "creating Model Armor extensions",
@@ -39,6 +43,9 @@ def intent_key(it: Intent) -> str:
         key["destination"] = [d.kind, d.id or short(d.name)]
     if a:
         key["access"] = [a.mode, sorted(t for t in (a.tools or []) if t), a.expression or "", a.title]
+    f = it.access_from
+    if f:
+        key["access_from"] = [f.mode, sorted(t for t in (f.tools or []) if t), f.expression or "", f.title]
     if it.params:
         key["params"] = it.params.model_dump(exclude_none=True)
     for f in ("extension", "mode", "scope", "source_extension", "new_name"):
@@ -64,10 +71,11 @@ def duplicates(intents: list[Intent]) -> dict[str, str]:
 
 
 # ------------------------------------------------------------------ certain failures
-def blockers(intents: list[Intent], env: RenderEnv, writable: Optional[dict[str, Any]] = None
-             ) -> dict[str, dict[str, str]]:
+def blockers(intents: list[Intent], env: RenderEnv, writable: Optional[dict[str, Any]] = None,
+             inv: Optional[Inventory] = None) -> dict[str, dict[str, str]]:
     """{intent id: {reason, fix}} for intents that would certainly fail. `env` must include with_staged() so a
-    Model Armor extension staged in the same request counts. fix: ma_setup | redeploy | permission."""
+    Model Armor extension staged in the same request counts. `inv` (optional): the current inventory, to check that
+    the grant a modify changes is there. fix: ma_setup | redeploy | permission | already."""
     out: dict[str, dict[str, str]] = {}
     for it in intents:
         if writable and writable.get(it.kind) is False:
@@ -94,7 +102,31 @@ def blockers(intents: list[Intent], env: RenderEnv, writable: Optional[dict[str,
             b = _enforcement_blocker(it, env)
             if b:
                 out[it.id] = b
+        if it.kind == "modify":
+            b = _modify_blocker(it, env, inv)
+            if b:
+                out[it.id] = b
     return out
+
+
+def _modify_blocker(it: Intent, env: RenderEnv, inv: Optional[Inventory]) -> Optional[dict[str, str]]:
+    """The same access as today ("already"), or (with the inventory) no binding matching access_from exactly and none
+    with the new access either (when the new one is there, it was already changed: apply skips it)."""
+    old, new = condition_for(it.access_from), condition_for(it.access)
+    if same_condition(old, new):
+        return {"reason": "The new access is the same as the current one, so there is nothing to change.",
+                "fix": "already"}
+    if inv is None:
+        return None
+    key = resource_key(it, inv, env)
+    if key is None or key not in inv.access:
+        return None                          # unknown here (unreadable or not listed): apply checks it live
+    member = it.source.principal if it.source else ""
+    mine = [b for b in inv.access[key] if b.member == member and b.role == EGRESSOR]
+    if not any(same_condition(b.condition, c) for b in mine for c in (old, new)):
+        return {"reason": "The grant changed since you looked: there is no binding with this member and the old "
+                          "condition any more. Sync and try again.", "fix": ""}
+    return None
 
 
 def _enforcement_blocker(it: Intent, env: RenderEnv) -> Optional[dict[str, str]]:
@@ -143,9 +175,16 @@ def _enforcement_blocker(it: Intent, env: RenderEnv) -> Optional[dict[str, str]]
 
 def advisories(intents: list[Intent], env: RenderEnv) -> dict[str, str]:
     """{intent id: warning} for intents that are fine to apply but affect more than they name (a shared IAP
-    extension)."""
+    extension), or a modify that widens access."""
     out: dict[str, str] = {}
     for it in intents:
+        if it.kind == "modify":
+            d = it.destination
+            rid = (d.id or short(d.name)) if d else ""
+            ro = {t["name"] for t in env.mcp_tools[rid] if t.get("read_only")} if env.mcp_tools.get(rid) else None
+            if compare_access(it.access_from, it.access, ro) == "broader":
+                out[it.id] = f"This widens access: {access_words(it.access_from)} → {access_words(it.access)}."
+            continue
         if it.kind != "set_enforcement" or env.iap is None:
             continue
         try:

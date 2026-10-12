@@ -1,7 +1,7 @@
-// Step 1: gateways in the region, their policies and bound agents; stage bind / unbind.
+// Gateways step: gateways in the region, their policies and bound agents; stage bind / unbind.
 import { Tip, unavailable } from "../components/Tooltip";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useLookup, useStudio } from "../store";
+import { stepN, useLookup, useStudio } from "../store";
 import { api } from "../api/client";
 import type { EnforcementMode, Engine, Gateway, GatewayEnforcement, GatewayLogEntry, GatewayLogsResp, Intent } from "../api/types";
 import { Badge, Callout, Disclosure, Load, Spinner, StepHeader, Term } from "../components/ui";
@@ -507,7 +507,7 @@ function GatewayCard({ gw }: { gw: Gateway }) {
             ))}
           </div>
         ) : (
-          <p className="muted small">None. {gw.type === "ingress" ? "Prompts reach the agent unscreened. You can turn on Model Armor in step 2." : "Nothing is checked."}</p>
+          <p className="muted small">None. {gw.type === "ingress" ? `Prompts reach the agent unscreened. You can turn on Model Armor in step ${stepN("model-armor")}.` : "Nothing is checked."}</p>
         )}
         {gw.type === "egress" && !hasIap && <Callout tone="warn" title="No IAP policy">Without an IAP REQUEST_AUTHZ policy, grants are not enforced on this gateway.</Callout>}
       </div>

@@ -1,4 +1,4 @@
-// Step 0: project / region / optional gateway project and Gemini Enterprise app, then the access check.
+// Context step: project / region / optional gateway project and Gemini Enterprise app, then the access check.
 import { Tip } from "../components/Tooltip";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { useStudio } from "../store";
@@ -156,8 +156,8 @@ export function ContextStep() {
                   <PermissionsCard ci={ci} />
                 </div>
                 <div className="next-row">
-                  <button className="btn btn-primary" onClick={() => goto(1)}>
-                    Next: see your gateways <ArrowIcon size={16} />
+                  <button className="btn btn-primary" onClick={() => goto("map")}>
+                    Next: see the policy map <ArrowIcon size={16} />
                   </button>
                   {missingApis.length + missingPerms.length > 0 && (
                     <span className="muted small">

@@ -1,0 +1,349 @@
+{
+  "_comment": "Shared by backend/tests/test_dryrun_parity.py (dryrun.member_matches / condition_allows) and frontend/src/map/evaluate.test.ts (memberMatches / conditionAllows): both must give `expected`. null = can't be told here (unknown).",
+  "member_matches": [
+    {
+      "name": "exact principal",
+      "member": "principal://agents.global.org-777.system.id.goog/resources/aiplatform/projects/4242/locations/europe-west4/reasoningEngines/111",
+      "principal": "principal://agents.global.org-777.system.id.goog/resources/aiplatform/projects/4242/locations/europe-west4/reasoningEngines/111",
+      "expected": true
+    },
+    {
+      "name": "allUsers",
+      "member": "allUsers",
+      "principal": "principal://agents.global.org-777.system.id.goog/resources/aiplatform/projects/4242/locations/europe-west4/reasoningEngines/111",
+      "expected": true
+    },
+    {
+      "name": "allAuthenticatedUsers",
+      "member": "allAuthenticatedUsers",
+      "principal": "principal://agents.global.org-777.system.id.goog/resources/aiplatform/projects/4242/locations/europe-west4/reasoningEngines/111",
+      "expected": true
+    },
+    {
+      "name": "project agents principalSet, same project and trust domain",
+      "member": "principalSet://agents.global.org-777.system.id.goog/attribute.platformContainer/aiplatform/projects/4242",
+      "principal": "principal://agents.global.org-777.system.id.goog/resources/aiplatform/projects/4242/locations/europe-west4/reasoningEngines/111",
+      "expected": true
+    },
+    {
+      "name": "project agents principalSet, other project",
+      "member": "principalSet://agents.global.org-777.system.id.goog/attribute.platformContainer/aiplatform/projects/5151",
+      "principal": "principal://agents.global.org-777.system.id.goog/resources/aiplatform/projects/4242/locations/europe-west4/reasoningEngines/111",
+      "expected": false
+    },
+    {
+      "name": "project agents principalSet, other trust domain",
+      "member": "principalSet://agents.global.org-888.system.id.goog/attribute.platformContainer/aiplatform/projects/4242",
+      "principal": "principal://agents.global.org-777.system.id.goog/resources/aiplatform/projects/4242/locations/europe-west4/reasoningEngines/111",
+      "expected": false
+    },
+    {
+      "name": "project agents principalSet, caller is a service account",
+      "member": "principalSet://agents.global.org-777.system.id.goog/attribute.platformContainer/aiplatform/projects/4242",
+      "principal": "serviceAccount:bot@my-demo-project.iam.gserviceaccount.com",
+      "expected": false
+    },
+    {
+      "name": "another agent",
+      "member": "principal://agents.global.org-777.system.id.goog/resources/aiplatform/projects/4242/locations/europe-west4/reasoningEngines/222",
+      "principal": "principal://agents.global.org-777.system.id.goog/resources/aiplatform/projects/4242/locations/europe-west4/reasoningEngines/111",
+      "expected": false
+    },
+    {
+      "name": "group",
+      "member": "group:eng@example.com",
+      "principal": "principal://agents.global.org-777.system.id.goog/resources/aiplatform/projects/4242/locations/europe-west4/reasoningEngines/111",
+      "expected": null
+    },
+    {
+      "name": "domain",
+      "member": "domain:example.com",
+      "principal": "principal://agents.global.org-777.system.id.goog/resources/aiplatform/projects/4242/locations/europe-west4/reasoningEngines/111",
+      "expected": null
+    },
+    {
+      "name": "user",
+      "member": "user:alice@example.com",
+      "principal": "principal://agents.global.org-777.system.id.goog/resources/aiplatform/projects/4242/locations/europe-west4/reasoningEngines/111",
+      "expected": false
+    },
+    {
+      "name": "service account member",
+      "member": "serviceAccount:bot@my-demo-project.iam.gserviceaccount.com",
+      "principal": "principal://agents.global.org-777.system.id.goog/resources/aiplatform/projects/4242/locations/europe-west4/reasoningEngines/111",
+      "expected": false
+    }
+  ],
+  "condition_allows": [
+    {
+      "name": "unconditional, tool call",
+      "condition": null,
+      "mcp_method": "tools/call",
+      "mcp_tool": "delete_ticket",
+      "tools": {
+        "list_tickets": true,
+        "delete_ticket": false,
+        "add_note": false
+      },
+      "expected": true
+    },
+    {
+      "name": "read-only hint, read-only tool",
+      "condition": {
+        "title": "t",
+        "expression": "api.getAttribute('iap.googleapis.com/mcp.tool.isReadOnly', false) == true || api.getAttribute('iap.googleapis.com/mcp.toolName', '') == ''"
+      },
+      "mcp_method": "tools/call",
+      "mcp_tool": "list_tickets",
+      "tools": {
+        "list_tickets": true,
+        "delete_ticket": false,
+        "add_note": false
+      },
+      "expected": true
+    },
+    {
+      "name": "read-only hint, write tool",
+      "condition": {
+        "title": "t",
+        "expression": "api.getAttribute('iap.googleapis.com/mcp.tool.isReadOnly', false) == true || api.getAttribute('iap.googleapis.com/mcp.toolName', '') == ''"
+      },
+      "mcp_method": "tools/call",
+      "mcp_tool": "delete_ticket",
+      "tools": {
+        "list_tickets": true,
+        "delete_ticket": false,
+        "add_note": false
+      },
+      "expected": false
+    },
+    {
+      "name": "read-only hint, tool not in the inventory",
+      "condition": {
+        "title": "t",
+        "expression": "api.getAttribute('iap.googleapis.com/mcp.tool.isReadOnly', false) == true || api.getAttribute('iap.googleapis.com/mcp.toolName', '') == ''"
+      },
+      "mcp_method": "tools/call",
+      "mcp_tool": "unknown_tool",
+      "tools": {
+        "list_tickets": true,
+        "delete_ticket": false,
+        "add_note": false
+      },
+      "expected": null
+    },
+    {
+      "name": "read-only hint, not an MCP server",
+      "condition": {
+        "title": "t",
+        "expression": "api.getAttribute('iap.googleapis.com/mcp.tool.isReadOnly', false) == true || api.getAttribute('iap.googleapis.com/mcp.toolName', '') == ''"
+      },
+      "mcp_method": "tools/call",
+      "mcp_tool": "list_tickets",
+      "tools": null,
+      "expected": null
+    },
+    {
+      "name": "read-only hint, tools/list (no tool name)",
+      "condition": {
+        "title": "t",
+        "expression": "api.getAttribute('iap.googleapis.com/mcp.tool.isReadOnly', false) == true || api.getAttribute('iap.googleapis.com/mcp.toolName', '') == ''"
+      },
+      "mcp_method": "tools/list",
+      "mcp_tool": null,
+      "tools": {
+        "list_tickets": true,
+        "delete_ticket": false,
+        "add_note": false
+      },
+      "expected": true
+    },
+    {
+      "name": "read-only hint, non-MCP call",
+      "condition": {
+        "title": "t",
+        "expression": "api.getAttribute('iap.googleapis.com/mcp.tool.isReadOnly', false) == true || api.getAttribute('iap.googleapis.com/mcp.toolName', '') == ''"
+      },
+      "mcp_method": null,
+      "mcp_tool": null,
+      "tools": null,
+      "expected": true
+    },
+    {
+      "name": "read-only hint with other whitespace, write tool",
+      "condition": {
+        "title": "t",
+        "expression": "api.getAttribute('iap.googleapis.com/mcp.tool.isReadOnly', false) == true\n  ||   api.getAttribute('iap.googleapis.com/mcp.toolName', '') == ''"
+      },
+      "mcp_method": "tools/call",
+      "mcp_tool": "add_note",
+      "tools": {
+        "list_tickets": true,
+        "delete_ticket": false,
+        "add_note": false
+      },
+      "expected": false
+    },
+    {
+      "name": "tools, listed tool",
+      "condition": {
+        "title": "t",
+        "expression": "api.getAttribute('iap.googleapis.com/mcp.toolName', '') in ['list_tickets', 'add_note', '']"
+      },
+      "mcp_method": "tools/call",
+      "mcp_tool": "add_note",
+      "tools": {
+        "list_tickets": true,
+        "delete_ticket": false,
+        "add_note": false
+      },
+      "expected": true
+    },
+    {
+      "name": "tools, other tool",
+      "condition": {
+        "title": "t",
+        "expression": "api.getAttribute('iap.googleapis.com/mcp.toolName', '') in ['list_tickets', 'add_note', '']"
+      },
+      "mcp_method": "tools/call",
+      "mcp_tool": "delete_ticket",
+      "tools": {
+        "list_tickets": true,
+        "delete_ticket": false,
+        "add_note": false
+      },
+      "expected": false
+    },
+    {
+      "name": "tools, tools/list",
+      "condition": {
+        "title": "t",
+        "expression": "api.getAttribute('iap.googleapis.com/mcp.toolName', '') in ['list_tickets', 'add_note', '']"
+      },
+      "mcp_method": "tools/list",
+      "mcp_tool": null,
+      "tools": {
+        "list_tickets": true,
+        "delete_ticket": false,
+        "add_note": false
+      },
+      "expected": true
+    },
+    {
+      "name": "tools without '', tools/list",
+      "condition": {
+        "title": "t",
+        "expression": "api.getAttribute('iap.googleapis.com/mcp.toolName', '') in ['list_tickets']"
+      },
+      "mcp_method": "tools/list",
+      "mcp_tool": null,
+      "tools": {
+        "list_tickets": true,
+        "delete_ticket": false,
+        "add_note": false
+      },
+      "expected": false
+    },
+    {
+      "name": "tools without '', listed tool",
+      "condition": {
+        "title": "t",
+        "expression": "api.getAttribute('iap.googleapis.com/mcp.toolName', '') in ['list_tickets']"
+      },
+      "mcp_method": "tools/call",
+      "mcp_tool": "list_tickets",
+      "tools": {
+        "list_tickets": true,
+        "delete_ticket": false,
+        "add_note": false
+      },
+      "expected": true
+    },
+    {
+      "name": "tools in double quotes",
+      "condition": {
+        "title": "t",
+        "expression": "api.getAttribute('iap.googleapis.com/mcp.toolName', '') in [\"list_tickets\", \"\"]"
+      },
+      "mcp_method": "tools/call",
+      "mcp_tool": "list_tickets",
+      "tools": {
+        "list_tickets": true,
+        "delete_ticket": false,
+        "add_note": false
+      },
+      "expected": true
+    },
+    {
+      "name": "tools, non-MCP call",
+      "condition": {
+        "title": "t",
+        "expression": "api.getAttribute('iap.googleapis.com/mcp.toolName', '') in ['list_tickets', 'add_note', '']"
+      },
+      "mcp_method": null,
+      "mcp_tool": null,
+      "tools": null,
+      "expected": true
+    },
+    {
+      "name": "tool call without a tool name",
+      "condition": {
+        "title": "t",
+        "expression": "api.getAttribute('iap.googleapis.com/mcp.toolName', '') in ['list_tickets', 'add_note', '']"
+      },
+      "mcp_method": "tools/call",
+      "mcp_tool": null,
+      "tools": {
+        "list_tickets": true,
+        "delete_ticket": false,
+        "add_note": false
+      },
+      "expected": null
+    },
+    {
+      "name": "custom condition",
+      "condition": {
+        "title": "t",
+        "expression": "request.time < timestamp('2030-01-01T00:00:00Z')"
+      },
+      "mcp_method": "tools/call",
+      "mcp_tool": "list_tickets",
+      "tools": {
+        "list_tickets": true,
+        "delete_ticket": false,
+        "add_note": false
+      },
+      "expected": null
+    },
+    {
+      "name": "tools list combined with another clause",
+      "condition": {
+        "title": "t",
+        "expression": "api.getAttribute('iap.googleapis.com/mcp.toolName', '') in ['list_tickets', ''] || request.time < timestamp('2030-01-01T00:00:00Z')"
+      },
+      "mcp_method": "tools/call",
+      "mcp_tool": "list_tickets",
+      "tools": {
+        "list_tickets": true,
+        "delete_ticket": false,
+        "add_note": false
+      },
+      "expected": null
+    },
+    {
+      "name": "tools list with a non-string item",
+      "condition": {
+        "title": "t",
+        "expression": "api.getAttribute('iap.googleapis.com/mcp.toolName', '') in ['list_tickets', other]"
+      },
+      "mcp_method": "tools/call",
+      "mcp_tool": "list_tickets",
+      "tools": {
+        "list_tickets": true,
+        "delete_ticket": false,
+        "add_note": false
+      },
+      "expected": null
+    }
+  ]
+}

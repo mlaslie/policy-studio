@@ -5,7 +5,7 @@ import re
 from typing import Mapping, Optional
 
 from .conditions import EGRESSOR, classify
-from .model import Binding, Condition, Intent
+from .model import Access, Binding, Condition, Intent
 
 PROJECT_AGENTS_RE = re.compile(r"^principalSet://[^/]+/attribute\.platformContainer/aiplatform/projects/(\d+)$")
 ENGINE_PRINCIPAL_RE = re.compile(
@@ -57,6 +57,22 @@ def access_phrase(cond: Optional[Condition | dict], kind: str = "mcp_server") ->
     if not cond:
         return "all tools" if kind == "mcp_server" else "full access"
     return condition_english(cond)
+
+
+def access_words(acc: Optional[Access]) -> str:
+    """Short phrase for an access (an exact custom expression is described as what it is): for modify sentences
+    ("full access → only read-only tools")."""
+    if acc and acc.mode == "custom" and (acc.expression or "").strip():
+        acc = classify({"expression": acc.expression})
+    mode = acc.mode if acc else "all"
+    if mode == "all" or (acc and acc.mode == "custom" and not (acc.expression or "").strip()):
+        return "full access"
+    if mode == "read_only_hint":
+        return "only read-only tools"
+    if mode == "tools":
+        tools = [t for t in (acc.tools or []) if t] if acc else []
+        return f"only tools {', '.join(tools)}" if tools else "MCP setup calls only (no tools)"
+    return "a custom condition"
 
 
 def binding_english(member_lbl: str, role: str, cond: Optional[Condition | dict], resource_label: str,
@@ -111,6 +127,9 @@ def intent_english(intent: Intent) -> str:
         if k == "grant":
             return f"{_src_label(intent)} can {what}."
         return f"Revoke: {_src_label(intent)} can no longer {what}."
+    if k == "modify":
+        return (f"Change {_src_label(intent)}'s access to {_dest_label(intent)}: "
+                f"{access_words(intent.access_from)} → {access_words(intent.access)}.")
     gw = intent.gateway
     eng = _short(intent.engine or "") or "the engine"
     if k == "bind_gateway":

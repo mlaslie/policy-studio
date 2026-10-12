@@ -1,8 +1,8 @@
-// Step 3: Agent Registry inventory (agents, MCP servers, endpoints) and Agent Runtime engines,
+// Inventory step: Agent Registry inventory (agents, MCP servers, endpoints) and Agent Runtime engines,
 // each with "Who can reach it" and a shortcut into the builder.
 import { Tip } from "../components/Tooltip";
 import { useMemo, useState } from "react";
-import { useLookup, useStudio } from "../store";
+import { stepN, useLookup, useStudio } from "../store";
 import type { Binding, Engine, Intent, McpServer, McpTool, RegAgent, ResourceKind } from "../api/types";
 import { Badge, Callout, Disclosure, KindIcon, Load, StepHeader, Tabs, Term } from "../components/ui";
 import { CopyButton } from "../components/Glass";
@@ -190,7 +190,7 @@ function EngineCard({ e }: { e: Engine }) {
         </span>
         <span>{e.bindable ? <Badge tone="neutral">bindable</Badge> : <Badge tone="amber" title="Created before 2026-04-29">can't be bound</Badge>}</span>
       </div>
-      {!e.gateways.egress && egress && e.bindable && <p className="small muted">Bind it to {egress.id} in step 1 (Gateways) so its grants are enforced.</p>}
+      {!e.gateways.egress && egress && e.bindable && <p className="small muted">Bind it to {egress.id} in step {stepN("gateways")} (Gateways) so its grants are enforced.</p>}
       <div className="principal">
         <div className="principal-head">
           <span>

@@ -1,4 +1,4 @@
-// Step 7: audit: summary tiles, grants in plain English with filters, findings with fixes, Terraform export.
+// Audit step: audit: summary tiles, grants in plain English with filters, findings with fixes, Terraform export.
 import { Tip } from "../components/Tooltip";
 import { useEffect, useState } from "react";
 import { useLookup, useStudio } from "../store";

@@ -9,6 +9,10 @@ Sources of truth (REST shapes, gcloud flags and Terraform resources verified liv
                         --agent=ID | --mcp-server=ID | --endpoint=ID [--condition=...]
                  Terraform google_iap_agent_registry_{agent,mcp_server,endpoint}_iam_member (+ condition {})
                  Python google-cloud-iap IdentityAwareProxyAdminServiceClient get/set_iam_policy
+  modify         one read-modify-write: the binding with the old condition is replaced by one with the new condition
+                 in a single setIamPolicy (gcloud iap web get-iam-policy -> jq -> set-iam-policy; REST and Python the
+                 same). Terraform keys an _iam_member by its condition, so it is a destroy + create there. Not
+                 verified live: gcloud iap web get-/set-iam-policy with --resource-type=agent-registry.
   bind/unbind    PATCH https://R-aiplatform.googleapis.com/v1/<engine>?updateMask=spec.deploymentSpec.agentGatewayConfig
                  (replaces the whole field, so the other direction is re-sent). No gcloud command exists.
   model armor    networksecurity authzPolicies: CONTENT_AUTHZ, action CUSTOM -> Model Armor authz extension
@@ -42,8 +46,8 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Optional
 
 from . import hcl
-from .conditions import EGRESSOR, condition_for
-from .english import PROJECT_AGENTS_RE, engine_principal_parts, intent_english, member_label
+from .conditions import EGRESSOR, compare_access, condition_for
+from .english import PROJECT_AGENTS_RE, access_words, engine_principal_parts, intent_english, member_label
 from .gcp import model_armor as ma_mod
 from .model import (Anatomy, Bundle, Condition, Context, Intent, Outputs, RenderItem, RenderResult, SetupParams,
                     TemplateFilters)
@@ -63,7 +67,7 @@ KIND_LABEL = {"agent": "A2A agent", "mcp_server": "MCP server", "endpoint": "API
 # on/off, grants. Setup deletes (undo) run after Model Armor off, in reverse.
 ORDER = {"bind_gateway": 0, "unbind_gateway": 0, "model_armor_template": 1, "model_armor_extension": 2,
          "iam_project_grant": 3, "dedicate_extension": 4, "set_enforcement": 5, "model_armor_on": 7,
-         "model_armor_off": 7, "grant": 8, "revoke": 8}
+         "model_armor_off": 7, "grant": 8, "revoke": 8, "modify": 8}
 REVERT_ORDER = 6          # dedicate_extension revert: after set_enforcement (so a flip of the copy runs first)
 DELETE_ORDER = {"iam_project_grant": 9, "model_armor_extension": 10, "model_armor_template": 11}
 PLACEHOLDER_EXT = "MODEL_ARMOR_EXTENSION"
@@ -170,15 +174,16 @@ TOKEN_LINE = 'TOKEN="$(gcloud auth print-access-token)"'
 # ====================================================================== specs
 @dataclass
 class IamSpec:
-    op: str                        # add | remove
-    kind: str                      # agent | mcp_server | endpoint
+    op: str                        # add | remove | modify
+    kind: str                      # agent | mcp_server | endpoint | registry
     rid: str
     member: str
     role: str
-    condition: Optional[Condition]
+    condition: Optional[Condition]   # modify: the new condition
     resource: str                  # IAP resource path (project number)
     dest_label: str
     src_label: str
+    old_condition: Optional[Condition] = None   # modify: the existing binding's condition (None = unconditional)
 
 
 @dataclass
@@ -272,6 +277,14 @@ def iam_spec(intent: Intent, env: RenderEnv, warnings: list[str]) -> IamSpec:
         unknown = [t for t in acc.tools or [] if t and t not in known]
         if unknown:
             warnings.append(f"Not tools of this MCP server (per Agent Registry): {', '.join(unknown)}.")
+    old = condition_for(intent.access_from) if intent.kind == "modify" else None
+    if intent.kind == "modify":
+        ro = {t["name"] for t in env.mcp_tools[rid] if t.get("read_only")} if env.mcp_tools.get(rid) else None
+        change = compare_access(intent.access_from, acc, ro)
+        if change == "same":
+            warnings.append("The new access is the same as the current one: nothing to change.")
+        elif change == "broader":
+            warnings.append(f"This widens access: {access_words(intent.access_from)} → {access_words(acc)}.")
     if member.startswith("serviceAccount:") and s and s.type == "engine":
         warnings.append("This agent runs as a service account, not an Agent Identity. Agent Gateway identifies "
                         "Agent Runtime agents by Agent Identity; redeploy it with identity_type AGENT_IDENTITY.")
@@ -282,10 +295,10 @@ def iam_spec(intent: Intent, env: RenderEnv, warnings: list[str]) -> IamSpec:
     resource = f"projects/{env.gw_number}/locations/{env.region}/iap_web/agentRegistry"
     if kind != "registry":
         resource += f"/{COLLECTION[kind]}/{rid}"
-    return IamSpec(op="add" if intent.kind == "grant" else "remove", kind=kind, rid=rid, member=member,
-                   role=EGRESSOR, condition=cond, resource=resource,
+    return IamSpec(op={"grant": "add", "revoke": "remove"}.get(intent.kind, "modify"), kind=kind, rid=rid,
+                   member=member, role=EGRESSOR, condition=cond, resource=resource,
                    dest_label=(d.label or d.name or d.id or KIND_LABEL[kind]) if d else "the destination",
-                   src_label=(s.label if s and s.label else member_label(member)))
+                   src_label=(s.label if s and s.label else member_label(member)), old_condition=old)
 
 
 def engine_info_for(env: RenderEnv, engine: str) -> dict[str, Any]:
@@ -497,6 +510,11 @@ def iam_anatomy(sp: IamSpec) -> Anatomy:
     if sp.op == "remove":
         notes.append("revoke: IAM matches the binding by member, role and condition, so the revoke repeats the same "
                      "condition")
+    if sp.op == "modify":
+        was = sp.old_condition.expression if sp.old_condition else "none (unconditional)"
+        notes.append(f"change: replaces the binding whose condition is {was}. IAM adds bindings rather than replacing "
+                     "them, so the old binding is removed and the new one added in the same setIamPolicy (one "
+                     "read-modify-write with the etag): no moment without access and none with both")
     return Anatomy(resource=sp.resource, role=sp.role, member=sp.member,
                    condition=sp.condition.expression if sp.condition else None, notes=notes)
 
@@ -514,6 +532,8 @@ def _cond_flag(c: Optional[Condition]) -> list[str]:
 
 
 def gcloud_iam(sp: IamSpec, env: RenderEnv) -> str:
+    if sp.op == "modify":
+        return gcloud_modify(sp, env)
     verb = "add-iam-policy-binding" if sp.op == "add" else "remove-iam-policy-binding"
     flags = [f"gcloud iap web {verb}", f"--project={env.gw_project}", "--resource-type=agent-registry",
              f"--region={env.region}", *([f"{GCLOUD_FLAG[sp.kind]}={sp.rid}"] if sp.kind in GCLOUD_FLAG else []),
@@ -546,22 +566,65 @@ JQ_REMOVE = """{policy: (.version = 3
       | select(.members | length > 0)])}"""
 
 
-def rest_iam(sp: IamSpec) -> str:
+# modify: remove the member from the binding with the old condition ($from) and add the new binding, in one policy
+# edit. Fails (jq error, nothing is written) when the old binding isn't there any more.
+JQ_MODIFY = """.version = 3
+  | if any((.bindings // [])[]; .role == $role and any(.members[]; . == $member)
+                                and ((.condition.expression // "") == $from)) | not
+    then error("the grant to change was not found (it changed since it was read): read it again")
+    else .bindings = ([(.bindings // [])[]
+        | if .role == $role and ((.condition.expression // "") == $from) then .members -= [$member] else . end
+        | select(.members | length > 0)]
+      | if any(.[]; .role == $role and any(.members[]; . == $member) and ((.condition.expression // "") == $expr))
+        then .
+        else . + [{role: $role, members: [$member]}
+                  + (if $expr == "" then {} else {condition: {title: $title, expression: $expr}} end)]
+        end)
+    end"""
+
+
+def _iam_vars(sp: IamSpec) -> list[str]:
     c = sp.condition
+    out = [f"MEMBER={shq(sp.member)}",
+           f"ROLE={sp.role}",
+           sh_assign("TITLE", c.title if c else ""),
+           sh_assign("EXPR", c.expression if c else "")]
+    if sp.op == "modify":
+        out.append(sh_assign("FROM", sp.old_condition.expression if sp.old_condition else ""))
+    return out
+
+
+JQ_ARGS = '--arg role "$ROLE" --arg member "$MEMBER" --arg title "$TITLE" --arg expr "$EXPR"'
+
+
+def gcloud_modify(sp: IamSpec, env: RenderEnv) -> str:
+    where = ["--resource-type=agent-registry", f"--region={env.region}",
+             *([f"{GCLOUD_FLAG[sp.kind]}={sp.rid}"] if sp.kind in GCLOUD_FLAG else []), f"--project={env.gw_project}"]
+    f = f"policy-{sp.rid or 'registry'}"
+    return "\n".join([
+        *_iam_vars(sp),
+        "",
+        "# One read-modify-write: read the policy (with its etag), swap the old binding for the new one with jq, write",
+        "# it back. Not remove- + add-iam-policy-binding: that leaves a moment with no access (or with both).",
+        cont(["gcloud iap web get-iam-policy", *where, "--format=json"]) + f" > {f}.json",
+        f'jq {JQ_ARGS} --arg from "$FROM" \'' + JQ_MODIFY + f"' {f}.json > {f}-new.json",
+        cont([f"gcloud iap web set-iam-policy {f}-new.json", *where])])
+
+
+def rest_iam(sp: IamSpec) -> str:
+    verb = {"add": "add the binding", "remove": "remove the binding",
+            "modify": "swap the old binding for the new one"}[sp.op]
+    filt = {"add": JQ_ADD, "remove": JQ_REMOVE, "modify": "{policy: (" + JQ_MODIFY + ")}"}[sp.op]
     lines = [f"RESOURCE={shq('https://iap.googleapis.com/v1/' + sp.resource)}",
-             f"MEMBER={shq(sp.member)}",
-             f"ROLE={sp.role}",
-             sh_assign("TITLE", c.title if c else ""),
-             sh_assign("EXPR", c.expression if c else ""),
+             *_iam_vars(sp),
              "",
              f"# Read-modify-write: get the policy (version 3 keeps conditions), "
-             f"{'add' if sp.op == 'add' else 'remove'} the binding with jq, set it back (the etag guards against "
-             "concurrent edits).",
+             f"{verb} with jq, set it back (the etag guards against concurrent edits).",
              cont(['curl -sS --fail-with-body -X POST "$RESOURCE:getIamPolicy"',
                    '-H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json"',
                    "-d '{\"options\":{\"requestedPolicyVersion\":3}}'"]) + " \\",
-             '| jq --arg role "$ROLE" --arg member "$MEMBER" --arg title "$TITLE" --arg expr "$EXPR" \'',
-             (JQ_ADD if sp.op == "add" else JQ_REMOVE) + "' \\",
+             f'| jq {JQ_ARGS}' + (' --arg from "$FROM"' if sp.op == "modify" else "") + " '",
+             filt + "' \\",
              cont(['| curl -sS --fail-with-body -X POST "$RESOURCE:setIamPolicy"',
                    '-H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json"', "-d @-"])]
     return "\n".join(lines)
@@ -625,6 +688,37 @@ def revoke(resource, member, role=EGRESSOR, expression=None):
 '''
 
 
+# The modify helper builds on PY_IAP_HELPERS (_get_policy, _matches); the bundle includes it once, after them.
+PY_MODIFY_HELPER = '''def modify(resource, member, old_expression=None, title=None, expression=None, role=EGRESSOR):
+    """Replace member's binding of role with condition old_expression (None = the unconditional one) by one with the
+    new condition, in one read-modify-write: other bindings are untouched, and the etag guards against concurrent
+    edits."""
+    policy = _get_policy(resource)
+    if not any(_matches(b, member, role, old_expression) for b in policy.bindings):
+        raise SystemExit(f"not found: {member}'s grant with this condition on {resource} (it changed; read it again)")
+    kept = []
+    for b in policy.bindings:
+        members = list(b.members)
+        if _matches(b, member, role, old_expression):
+            members.remove(member)
+        if members:
+            nb = policy_pb2.Binding(role=b.role, members=members)
+            if b.HasField("condition"):
+                nb.condition.CopyFrom(b.condition)
+            kept.append(nb)
+    if not any(_matches(b, member, role, expression) for b in kept):
+        nb = policy_pb2.Binding(role=role, members=[member])
+        if expression:
+            nb.condition.CopyFrom(expr_pb2.Expr(title=title or "", expression=expression))
+        kept.append(nb)
+    policy.ClearField("bindings")
+    policy.bindings.extend(kept)
+    policy.version = 3
+    iap.set_iam_policy(request=iam_policy_pb2.SetIamPolicyRequest(resource=resource, policy=policy))
+    print(f"changed {member}'s {role} condition on {resource}")
+'''
+
+
 def py_str(s: str) -> str:
     return json.dumps(s, ensure_ascii=False)
 
@@ -632,7 +726,12 @@ def py_str(s: str) -> str:
 def python_iam_call(sp: IamSpec) -> str:
     c = sp.condition
     args = [py_str(sp.resource), py_str(sp.member)]
-    if sp.op == "add":
+    if sp.op == "modify":
+        old = sp.old_condition
+        args += [f"old_expression={py_str(old.expression)}"] if old else []
+        args += [f"title={py_str(c.title)}", f"expression={py_str(c.expression)}"] if c else []
+        call = "modify(\n    " + ",\n    ".join(args) + ",\n)"
+    elif sp.op == "add":
         call = "grant(\n    " + ",\n    ".join(args + ([f"title={py_str(c.title)}", f"expression={py_str(c.expression)}"]
                                                    if c else [])) + ",\n)"
     else:
@@ -640,7 +739,8 @@ def python_iam_call(sp: IamSpec) -> str:
     return call
 
 
-def tf_iam(sp: IamSpec, env: RenderEnv, name: str, bundle: bool) -> str:
+def _tf_member(sp: IamSpec, env: RenderEnv, name: str, bundle: bool, cond: Optional[Condition],
+               replace_first: bool = False) -> hcl.Block:
     rtype, key = TF_RESOURCE.get(sp.kind, ("google_iap_agent_registry_iam_member", ""))
     b = hcl.Block(f'resource "{rtype}" "{name}"')
     b.attr("project", "local.gateway_project" if bundle else hcl.q(env.gw_project))
@@ -649,12 +749,29 @@ def tf_iam(sp: IamSpec, env: RenderEnv, name: str, bundle: bool) -> str:
         b.s(key, sp.rid)
     b.s("role", sp.role)
     b.s("member", sp.member)
-    if sp.condition:
+    if cond:
         b.blank()
         cb = b.block("condition")
-        cb.s("title", sp.condition.title)
-        cb.s("expression", sp.condition.expression)
-    text = b.render()
+        cb.s("title", cond.title)
+        cb.s("expression", cond.expression)
+    if replace_first:
+        b.blank()
+        b.block("lifecycle").attr("create_before_destroy", "true")
+    return b
+
+
+def tf_iam(sp: IamSpec, env: RenderEnv, name: str, bundle: bool) -> str:
+    if sp.op == "modify":
+        old = _tf_member(sp, env, name, bundle, sp.old_condition).render()
+        new = _tf_member(sp, env, name, bundle, sp.condition, replace_first=True).render()
+        return (hcl.comment_lines(
+            "Change access: an _iam_member resource is keyed by its condition, so Terraform can't change the condition "
+            "in place: it plans a replacement (destroy + create). Edit the condition of the block that manages this "
+            "grant (keep its resource name) as below; create_before_destroy adds the new binding before the old one "
+            "is removed, so access never lapses. If you manage the whole policy with an _iam_policy resource, change "
+            "the condition there instead. If the grant was made outside Terraform, use the gcloud, REST or Python tab "
+            "(one read-modify-write).") + "#\n# Today:\n" + hcl.commented(old) + "\n" + new)
+    text = _tf_member(sp, env, name, bundle, sp.condition).render()
     if sp.op == "add":
         return text
     return (hcl.comment_lines(
@@ -1842,6 +1959,7 @@ class _Rendered:
     rest_body: str
     gcloud_body: str
     tf_name: str
+    py_extra: str = ""             # helpers that build on py_helpers (modify), included once after them
 
 
 def _tf_name(intent: Intent, spec: Any) -> str:
@@ -1894,12 +2012,14 @@ def _from_bind(intent_id: str, kind: str, sp: BindSpec, env: RenderEnv, english:
 def render_one(intent: Intent, env: RenderEnv, tf_name: Optional[str] = None) -> _Rendered:
     warnings: list[str] = []
     k = intent.kind
-    if k in ("grant", "revoke"):
+    if k in ("grant", "revoke", "modify"):
         sp: Any = iam_spec(intent, env, warnings)
         name = tf_name or _tf_name(intent, sp)
-        return _assemble(intent.id, k, intent_english(intent), iam_anatomy(sp), sp, gcloud_iam(sp, env),
-                         rest_iam(sp), PY_IAP_HELPERS, python_iam_call(sp), tf_iam(sp, env, name, bundle=False),
-                         name, warnings)
+        extra = PY_MODIFY_HELPER if k == "modify" else ""
+        r = _assemble(intent.id, k, intent_english(intent), iam_anatomy(sp), sp, gcloud_iam(sp, env),
+                      rest_iam(sp), PY_IAP_HELPERS + ("\n\n" + extra if extra else ""), python_iam_call(sp),
+                      tf_iam(sp, env, name, bundle=False), name, warnings)
+        return replace(r, py_helpers=PY_IAP_HELPERS, py_extra=extra)
     if k in ("bind_gateway", "unbind_gateway"):
         sp = bind_spec(intent, env, warnings)
         name = tf_name or _tf_name(intent, sp)
@@ -2072,8 +2192,9 @@ def bundle(env: RenderEnv, rendered: list[_Rendered]) -> Bundle:
         rest_parts.append(_section(i, n, r.item.english) + r.rest_body + "\n")
     helpers: list[str] = []
     for r in ordered:
-        if r.py_helpers not in helpers:
-            helpers.append(r.py_helpers)
+        for h in (r.py_helpers, r.py_extra):
+            if h and h not in helpers:
+                helpers.append(h)
     py = ('"""Generated by Policy Studio for project ' + env.project + ", region " + env.region
           + '. Review before running."""\n' + "\n\n".join(h.rstrip() + "\n" for h in helpers)
           + "\n\n" + "\n\n".join(f"# [{i}/{n}] {r.item.english}\n{r.py_call}" for i, r in enumerate(ordered, 1))
