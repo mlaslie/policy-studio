@@ -5,6 +5,9 @@
 // Enforcement: in us-east4 corp-egress and corp-ingress share one IAP authz extension in DRY_RUN (shared case + dry
 // run with "would have been denied" log entries); in us-central1 corp-egress enforces on its own extension and
 // corp-ingress has no IAP policy (switch disabled).
+// Policy map cases (docs/VISUALIZATION_PLAN.md §11): a registry-wide grant (a service account on the whole Agent
+// Registry), a custom-CEL grant, a group grant, an endpoint whose IAP policy can't be read, and two agents bound for
+// ingress.
 import type { AuditResp, Binding, ContextInfo, Ctx, EnforcementMode, Finding, Gateway, Grant, Inventory, MaSetup, McpTool, ModelArmorResp, ServiceAgent, Template, TemplateFilters } from "./types";
 import { READ_ONLY_EXPR, ROLE, toolsExpr } from "../lib/policy";
 import { NO_IDENTITY_REASON, REDEPLOY_SNIPPET } from "../components/Redeploy";
@@ -130,7 +133,7 @@ export function buildWorld(ctx: Ctx) {
       display_name: "HR Assistant",
       principal: principalOf(R, "8840217731518464"),
       identity_type: "AGENT_IDENTITY",
-      gateways: { egress },
+      gateways: { egress, ingress },
       create_time: "2026-07-23T09:41:07Z",
       bindable: true,
     },
@@ -184,7 +187,10 @@ export function buildWorld(ctx: Ctx) {
       governed_access_path: "CLIENT_TO_AGENT",
       registries: [`//agentregistry.googleapis.com/${loc}`],
       authz_policies: [],
-      bound_engines: [{ engine: helpdesk.name, display_name: helpdesk.display_name, direction: "ingress" }],
+      bound_engines: [
+        { engine: helpdesk.name, display_name: helpdesk.display_name, direction: "ingress" },
+        { engine: hr.name, display_name: hr.display_name, direction: "ingress" },
+      ],
       create_time: "2026-05-04T10:31:00Z",
     },
   ];
@@ -217,6 +223,12 @@ export function buildWorld(ctx: Ctx) {
       malicious_uri: { enabled: true },
     },
     block_message: "Sorry, this request was blocked by your organization's AI safety policy.",
+    summary: [
+      "Blocks prompt injection and jailbreak attempts (medium confidence and above).",
+      "Finds sensitive data (basic: credit card numbers, ID numbers and the like).",
+      "Blocks hate speech and harassment (medium and above), dangerous content (high) and sexually explicit content (low and above).",
+      "Blocks known malicious URLs.",
+    ],
     raw: {},
   };
   template.raw = {
@@ -239,6 +251,7 @@ export function buildWorld(ctx: Ctx) {
       rai: [{ category: "DANGEROUS", level: "MEDIUM_AND_ABOVE" }],
       malicious_uri: { enabled: false },
     },
+    summary: ["Blocks prompt injection and jailbreak attempts (low confidence and above).", "Finds sensitive data with your inspect template (advanced).", "Blocks dangerous content (medium and above)."],
     raw: { name: `${loc}/templates/strict-pii`, filterConfig: { piAndJailbreakFilterSettings: { filterEnforcement: "ENABLED", confidenceLevel: "LOW_AND_ABOVE" }, sdpSettings: { advancedConfig: { inspectTemplate: `${loc}/inspectTemplates/pii`, deidentifyTemplate: "" } } } },
   };
 
@@ -387,7 +400,11 @@ export function buildWorld(ctx: Ctx) {
   const kb = agents[3], billing = agents[4], cal = agents[5];
   const tickets = mcp_servers[0], hrdir = mcp_servers[1];
   const access: Record<string, Binding[]> = {
-    [kb.name]: [b(helpdesk.principal, "Helpdesk Agent (Agent Identity)", "Helpdesk Agent can call Knowledge Base Agent (full access).")],
+    [kb.name]: [
+      b(helpdesk.principal, "Helpdesk Agent (Agent Identity)", "Helpdesk Agent can call Knowledge Base Agent (full access)."),
+      // A group member: whether an agent is in the group can't be told here (conditional on the map).
+      b("group:support-agents@example.com", "Group support-agents@example.com", "Members of support-agents@example.com can call Knowledge Base Agent."),
+    ],
     [tickets.name]: [
       b(helpdesk.principal, "Helpdesk Agent (Agent Identity)", "Helpdesk Agent can call only the read-only tools of Tickets MCP.", { title: "MCP read-only tools (by hint)", expression: READ_ONLY_EXPR }),
       b(hr.principal, "HR Assistant (Agent Identity)", "HR Assistant can call only get_ticket and create_ticket on Tickets MCP.", { title: "MCP tools: get_ticket, create_ticket", expression: toolsExpr(["get_ticket", "create_ticket"]) }),
@@ -397,7 +414,13 @@ export function buildWorld(ctx: Ctx) {
       b(travel.principal, "Travel Planner (Agent Identity)", "Travel Planner can call Calendar Agent (full access)."),
       b("allAuthenticatedUsers", "Any signed-in Google account", "Any signed-in Google account can call Calendar Agent."),
     ],
-    [billing.name]: [b(deleted, "Deleted agent (reasoningEngines/9001772810240000)", "A deleted agent can still call Billing Agent.")],
+    [billing.name]: [
+      b(deleted, "Deleted agent (reasoningEngines/9001772810240000)", "A deleted agent can still call Billing Agent."),
+      // A custom CEL condition: not evaluated client-side (conditional on the map).
+      b(hr.principal, "HR Assistant (Agent Identity)", "HR Assistant can call Billing Agent until 2026-12-31 (custom condition).", { title: "Until end of 2026", expression: "request.time < timestamp('2026-12-31T00:00:00Z')" }),
+    ],
+    // Registry-wide (every entry in this region's Agent Registry), held by a service account.
+    [reg]: [b(`serviceAccount:ops-bot@${P}.iam.gserviceaccount.com`, "ops-bot (service account)", "ops-bot can call every agent, MCP server and endpoint in the Agent Registry (registry-wide).")],
   };
   for (const h of ["aiplatform", "logging", "telemetry"]) {
     const e = endpoints.find((x) => x.id === `${h}-googleapis`)!;
@@ -405,12 +428,16 @@ export function buildWorld(ctx: Ctx) {
   }
 
   for (const x of [...agents, ...mcp_servers, ...endpoints]) access[x.name] ??= [];
+  // One endpoint whose IAP policy couldn't be read: no key in `access`, the reason in `access_errors` (API.md).
+  const unreadable = endpoints.find((e) => e.id === "sqladmin-googleapis")!;
+  delete access[unreadable.name];
+  const access_errors: Record<string, string> = { [unreadable.name]: "Permission denied on iap.webServices.getIamPolicy for this endpoint (403)." };
 
   const labelOf = (name: string) =>
-    agents.find((a) => a.name === name)?.display_name ?? mcp_servers.find((m) => m.name === name)?.display_name ?? endpoints.find((e) => e.name === name)?.display_name ?? name;
-  const kindOf = (name: string): Grant["resource_kind"] => (name.includes("/mcpServers/") ? "mcp_server" : name.includes("/endpoints/") ? "endpoint" : "agent");
+    name === reg ? "Agent Registry (all entries)" : (agents.find((a) => a.name === name)?.display_name ?? mcp_servers.find((m) => m.name === name)?.display_name ?? endpoints.find((e) => e.name === name)?.display_name ?? name);
+  const kindOf = (name: string): Grant["resource_kind"] => (name === reg ? "registry" : name.includes("/mcpServers/") ? "mcp_server" : name.includes("/endpoints/") ? "endpoint" : "agent");
 
-  const inventory: Inventory = { engines, agents, mcp_servers, endpoints, access, access_errors: {}, project_agents_principal: projectSet, errors: [] };
+  const inventory: Inventory = { engines, agents, mcp_servers, endpoints, access, access_errors, project_agents_principal: projectSet, errors: [] };
 
   const grants = (): Grant[] =>
     Object.entries(inventory.access).flatMap(([res, bs]) => bs.map((x) => ({ ...x, resource: res, resource_kind: kindOf(res), resource_label: labelOf(res) })));
@@ -460,7 +487,7 @@ export function buildWorld(ctx: Ctx) {
     {
       severity: "medium",
       title: "Ingress gateway corp-ingress has no Model Armor",
-      detail: "Prompts coming from Gemini Enterprise into Helpdesk Agent are not screened for prompt injection or sensitive data.",
+      detail: "Prompts coming from Gemini Enterprise into Helpdesk Agent and HR Assistant are not screened for prompt injection or sensitive data.",
       resource: ingress,
       fix: { id: "fix-ma-ingress", kind: "model_armor_on", gateway: { name: ingress, direction: "ingress" } },
     },

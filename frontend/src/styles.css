@@ -37,6 +37,11 @@
   --e-error: var(--dark-red);
   --e-neutral: #80868b;
   --e-registry: #9aa0a6;
+  /* Policy map verdicts (VISUALIZATION_PLAN §10): ≥3:1 against --surface-2 in both schemes. */
+  --e-partial: #00897b;
+  --e-would-deny: #b06000;
+  --e-dormant: #80868b;
+  --e-screened: #c45500;
   /* Per-orchestrator accents (CONTRACTS §12): 0 = primary, 1.. = additional agents. */
   --agent-0: #4285f4;
   --agent-1: #a142f4;
@@ -78,6 +83,10 @@
     --e-unknown: #5f6368;
     --e-neutral: #9aa0a6;
     --e-registry: #6f747a;
+    --e-partial: #5fd4c4;
+    --e-would-deny: #fdd663;
+    --e-dormant: #8a9096;
+    --e-screened: #fcad70;
     --agent-0: #8ab4f8;
     --agent-1: #d7aefb;
     --agent-2: #78d9ec;
@@ -3867,4 +3876,983 @@ body.resizing * {
 }
 .undo-staged {
   margin-left: 6px;
+}
+
+/* ======================================================================
+   Policy map (map/*): the canvas look is ported from the demo's diagram CSS (nodes, lines, badges, shield, legend),
+   scoped under .pmap. Verdict line styles follow VISUALIZATION_PLAN §5.2; color is never the only cue.
+   ====================================================================== */
+.pmap {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+.pmap-defs {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+}
+.pmap-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.pmap-tools-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  min-width: 0;
+}
+.pmap-tools-end {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-left: auto;
+}
+.pmap-tools-end .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.pmap-select {
+  height: 30px;
+  padding: 0 8px;
+  font-size: 13px;
+  width: auto;
+}
+.pmap-search {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text-2);
+  flex: 1 1 200px;
+  max-width: 340px;
+  min-width: 0;
+}
+.pmap-search input[type="search"] {
+  border: 0;
+  background: transparent;
+  height: 28px;
+  padding: 0;
+  font-size: 13px;
+  min-width: 0;
+  width: 100%;
+  box-shadow: none;
+}
+.pmap-search:focus-within {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 1px var(--blue);
+}
+.pmap-types {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+}
+.pmap-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-2);
+  cursor: pointer;
+  padding: 3px 9px 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.pmap-check.on {
+  color: var(--blue);
+  background: var(--blue-weak);
+  border-color: color-mix(in srgb, var(--blue) 40%, transparent);
+}
+.pmap-check.plain {
+  border-color: transparent;
+  padding-left: 0;
+}
+.pmap-check.disabled {
+  color: var(--text-3);
+  cursor: not-allowed;
+}
+.pmap-selbar {
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+.pmap-more {
+  font-size: 12px;
+  color: var(--text-2);
+  background: var(--surface-3);
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+.pmap-stage {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--surface-2);
+}
+.pmap-canvas {
+  position: relative;
+  height: max(460px, calc(100vh - var(--topbar-h) - 290px));
+  min-width: 0;
+}
+.pmap-stage.is-table {
+  background: var(--surface);
+}
+.pmap-table-wrap {
+  max-height: max(460px, calc(100vh - var(--topbar-h) - 290px));
+  overflow: auto;
+  padding: 4px 8px;
+}
+.pmap-table tbody tr {
+  cursor: pointer;
+}
+.pmap-table tbody tr:hover,
+.pmap-table tbody tr.sel {
+  background: var(--blue-weak);
+}
+.th-sort {
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+.pmap-foot {
+  margin: 0;
+}
+.pmap-verdict {
+  display: inline-block;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border-left: 4px solid var(--e-unknown);
+  background: var(--surface-3);
+}
+.pmap-verdict.st-allowed,
+.pmap-verdict.st-conditional {
+  border-left-color: var(--e-allowed);
+  background: var(--green-weak);
+}
+.pmap-verdict.st-partial {
+  border-left-color: var(--e-partial);
+  background: var(--green-weak);
+}
+.pmap-verdict.st-blocked {
+  border-left-color: var(--e-denied);
+  background: var(--red-weak);
+}
+.pmap-verdict.st-would_deny {
+  border-left-color: var(--e-would-deny);
+  background: var(--amber-weak);
+}
+.pmap-verdict.st-dormant,
+.pmap-verdict.st-unchecked,
+.pmap-verdict.st-unscreened {
+  border-left-color: var(--e-dormant);
+}
+.pmap-verdict.st-direct {
+  border-left-color: var(--e-direct);
+  background: var(--blue-weak);
+}
+.pmap-verdict.st-screened {
+  border-left-color: var(--e-screened);
+  background: var(--orange-weak);
+}
+
+/* details stub (the policy panel is phase 3) */
+.pmap-panel {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 6;
+  width: min(360px, calc(100% - 20px));
+  max-height: calc(100% - 64px);
+  overflow: auto;
+  padding: 14px 16px;
+  border-radius: 16px;
+}
+.pmap-panel:focus {
+  outline: none;
+}
+.pmap-panel-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.pmap-panel h3 {
+  font-size: 15px;
+  overflow-wrap: anywhere;
+}
+.pmap-reasons {
+  list-style: none;
+  margin: 6px 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.pmap-reasons li {
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  font-size: 13px;
+}
+.pmap-panel-foot {
+  margin: 8px 0 0;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+
+/* ---------- canvas (React Flow) ---------- */
+.pmap .react-flow {
+  --xy-background-color: transparent;
+  --xy-controls-button-background-color: var(--surface);
+  --xy-controls-button-background-color-hover: var(--surface-3);
+  --xy-controls-button-color: var(--text-2);
+  --xy-controls-button-border-color: var(--border);
+  --xy-edge-label-background-color: var(--surface);
+  font-family: var(--font);
+}
+.pmap .diagram-bg {
+  --xy-background-pattern-color: var(--border);
+}
+.pmap .react-flow__node {
+  cursor: grab;
+}
+.pmap .react-flow__node.dragging {
+  cursor: grabbing;
+}
+.pmap .react-flow__node-section {
+  cursor: default;
+  pointer-events: none;
+}
+.pmap .react-flow__node:focus-visible {
+  outline: none;
+}
+.pmap .react-flow__node:focus-visible > .node,
+.pmap .react-flow__node.selected > .node {
+  box-shadow: 0 0 0 3px var(--blue), var(--shadow-2);
+}
+.pmap .react-flow__handle.hnd {
+  width: 8px;
+  height: 8px;
+  min-width: 0;
+  min-height: 0;
+  background: var(--border-strong);
+  border: 2px solid var(--surface);
+  opacity: 0;
+}
+.pmap .node {
+  position: relative;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: var(--shadow-1);
+  padding: 12px 14px;
+  transition: opacity 0.3s, border-color 0.3s, box-shadow 0.3s, background 0.3s;
+}
+.pmap .node.dim {
+  opacity: 0.38;
+}
+.pmap .node.hit {
+  animation: pmap-hit 0.9s ease-in-out 3;
+}
+@keyframes pmap-hit {
+  50% {
+    box-shadow: 0 0 0 6px color-mix(in srgb, var(--blue) 45%, transparent), var(--shadow-2);
+  }
+}
+.pmap .node-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.pmap .node-titles {
+  min-width: 0;
+  flex: 1;
+}
+.pmap .node-title {
+  font-size: 15px;
+  font-weight: 500;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pmap .node-sub {
+  font-size: 12px;
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pmap .node-sub.wrap-sub {
+  white-space: normal;
+}
+.pmap .node-icon {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+}
+.pmap .icon-person {
+  background: var(--purple-weak);
+  color: var(--purple);
+}
+.pmap .icon-client {
+  background: var(--blue-weak);
+  color: var(--blue);
+}
+.pmap .icon-gateway {
+  background: var(--blue-weak);
+  color: var(--blue);
+}
+.pmap .icon-orch {
+  background: linear-gradient(135deg, #4285f4, #9b72cb);
+  color: #fff;
+}
+.pmap .icon-registry,
+.pmap .icon-sink {
+  background: var(--surface-3);
+  color: var(--text-2);
+}
+.pmap .icon-a2a {
+  background: var(--green-weak);
+  color: var(--green);
+}
+.pmap .icon-api {
+  background: var(--purple-weak);
+  color: var(--purple);
+}
+.pmap .icon-mcp {
+  background: var(--amber-weak);
+  color: var(--amber);
+}
+.pmap .node-badge {
+  position: absolute;
+  top: -11px;
+  left: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-2);
+}
+.pmap .badge-runtime {
+  background: #1a73e8;
+  border-color: #1a73e8;
+  color: #fff;
+}
+.pmap .badge-runtime .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #fff;
+}
+.pmap .badge-cloudrun {
+  color: var(--blue);
+}
+.pmap .node-open-btn {
+  position: absolute;
+  top: -11px;
+  right: 10px;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-2);
+  cursor: pointer;
+}
+.pmap .node-open-btn:hover {
+  color: var(--blue);
+  border-color: var(--blue);
+}
+.pmap .node-chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+.pmap .chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11.5px;
+  font-weight: 500;
+  padding: 2px 9px;
+  border-radius: 999px;
+  white-space: nowrap;
+  background: var(--surface-3);
+  color: var(--text-2);
+}
+.pmap .chip-red {
+  background: var(--red-weak);
+  color: var(--red);
+}
+.pmap .chip-green {
+  background: var(--green-weak);
+  color: var(--green);
+}
+.pmap .chip-amber {
+  background: var(--amber-weak);
+  color: var(--amber);
+}
+.pmap .chip-orange {
+  background: var(--orange-weak);
+  color: var(--orange);
+}
+.pmap .chip-blue {
+  background: var(--blue-weak);
+  color: var(--blue);
+}
+.pmap .node-user,
+.pmap .node-sink {
+  width: 240px;
+}
+.pmap .node-user.public {
+  border-color: var(--red);
+  box-shadow: 0 0 0 3px var(--red-weak), var(--shadow-1);
+}
+.pmap .node-orch {
+  width: 250px;
+  padding-top: 16px;
+  border: 2px solid #4285f4;
+}
+.pmap .node-orch.unbound {
+  border-style: dashed;
+}
+.pmap .node-gateway {
+  width: 240px;
+  border-width: 2px;
+}
+.pmap .node-gateway.attached {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 4px var(--blue-weak), var(--shadow-2);
+}
+.pmap .node-gateway.attached.dry {
+  border-color: var(--amber);
+  box-shadow: 0 0 0 4px var(--amber-weak), var(--shadow-2);
+}
+.pmap .node-gateway.faded {
+  opacity: 0.6;
+  border-style: dashed;
+  box-shadow: none;
+  background: var(--surface-2);
+}
+.pmap .node-gateway.faded .icon-gateway {
+  background: var(--surface-3);
+  color: var(--text-3);
+}
+.pmap .ma-shield {
+  position: absolute;
+  top: -14px;
+  right: -14px;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  background: #e8710a;
+  border: 3px solid var(--surface);
+  box-shadow: var(--shadow-1);
+}
+.pmap .ma-shield.outlined {
+  background: var(--surface);
+  color: #e8710a;
+  border-color: #e8710a;
+}
+.pmap .node-sink {
+  width: 190px;
+  border-style: dashed;
+  background: var(--surface-2);
+}
+.pmap .node-dest {
+  padding-top: 16px;
+}
+.pmap .node-a2a,
+.pmap .node-runtime_dest {
+  width: 270px;
+}
+.pmap .node-endpoint {
+  width: 260px;
+}
+.pmap .node-registry {
+  width: 260px;
+  border-style: dashed;
+  border-width: 1.5px;
+  border-color: var(--border-strong);
+}
+.pmap .node.unreadable {
+  background: repeating-linear-gradient(135deg, var(--surface), var(--surface) 8px, var(--red-weak) 8px, var(--red-weak) 14px);
+  border-color: var(--red);
+}
+.pmap .node-group {
+  width: 260px;
+  padding: 10px 14px;
+  border-style: dashed;
+  background: var(--surface-2);
+  cursor: pointer;
+}
+.pmap .node-group:hover {
+  border-color: var(--blue);
+}
+.pmap .node-section {
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pmap .node-mcp {
+  width: 290px;
+  padding: 16px 0 10px;
+}
+.pmap .node-mcp > .node-head,
+.pmap .node-mcp > .node-chips {
+  padding: 0 14px;
+}
+.pmap .skills {
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.pmap .skill {
+  font-size: 12px;
+  color: var(--text-2);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 7px 0 3px;
+  border-radius: 6px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+}
+.pmap .skill-tag {
+  font-size: 9.5px;
+  text-transform: uppercase;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--green-weak);
+  color: var(--green);
+}
+.pmap .tools {
+  margin-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.pmap .tool-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 31px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--border);
+  border-left: 4px solid transparent;
+}
+.pmap .tool-row:last-child {
+  border-bottom: 0;
+}
+.pmap .tool-kind {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+}
+.pmap .tool-kind.ro {
+  background: var(--blue-weak);
+  color: var(--blue);
+}
+.pmap .tool-kind.rw {
+  background: var(--red-weak);
+  color: var(--red);
+}
+.pmap .tool-name {
+  flex: 1;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pmap .tool-access {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text-3);
+}
+.pmap .tool-access.rw {
+  color: var(--red);
+}
+.pmap .tool-row.st-allowed {
+  border-left-color: var(--e-allowed);
+  background: color-mix(in srgb, var(--green-weak) 70%, transparent);
+}
+.pmap .tool-row.st-denied {
+  border-left-color: var(--e-denied);
+  background: color-mix(in srgb, var(--red-weak) 70%, transparent);
+}
+.pmap .tool-row.st-denied .tool-name {
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, var(--red) 60%, transparent);
+}
+.pmap .tool-row.st-unknown {
+  border-left-color: var(--e-unknown);
+  border-left-style: dotted;
+}
+.pmap .state-dot {
+  flex-shrink: 0;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--e-unknown);
+}
+.pmap .state-dot.st-allowed,
+.pmap .state-dot.st-conditional {
+  background: var(--e-allowed);
+}
+.pmap .state-dot.st-partial {
+  background: var(--e-partial);
+}
+.pmap .state-dot.st-blocked {
+  background: var(--e-denied);
+}
+.pmap .state-dot.st-would_deny {
+  background: var(--e-would-deny);
+}
+.pmap .state-dot.st-dormant {
+  background: var(--e-dormant);
+}
+.pmap .node.ring-allowed {
+  border-color: var(--e-allowed);
+}
+.pmap .node.ring-partial {
+  border-color: var(--e-partial);
+}
+.pmap .node.ring-blocked {
+  border-color: var(--e-denied);
+}
+.pmap .node.ring-would_deny {
+  border-color: var(--e-would-deny);
+}
+
+/* ---------- lines ---------- */
+.pmap .edge-path {
+  fill: none;
+  stroke-width: 3px;
+  stroke: var(--e-unknown);
+  transition: stroke 0.3s, opacity 0.3s;
+}
+.pmap .react-flow__edge-path.edge-path {
+  stroke-width: 3px;
+}
+.pmap .edge-halo {
+  fill: none;
+  stroke: var(--surface-2);
+  stroke-width: 7px;
+  opacity: 0.8;
+}
+.pmap .edge-hit {
+  stroke: transparent;
+  stroke-width: 16px;
+  pointer-events: stroke;
+}
+.pmap .edge-path.st-allowed {
+  stroke: var(--e-allowed);
+  stroke-width: 3.5px;
+}
+.pmap .edge-path.st-partial {
+  stroke: var(--e-partial);
+  stroke-width: 3.5px;
+}
+.pmap .edge-path.st-conditional {
+  stroke: var(--e-allowed);
+  stroke-dasharray: 1 6;
+  stroke-linecap: round;
+}
+.pmap .edge-path.st-blocked {
+  stroke: var(--e-denied);
+  stroke-width: 1.8px;
+  stroke-dasharray: 6 5;
+}
+.pmap .edge-path.st-would_deny {
+  stroke: var(--e-would-deny);
+  stroke-width: 2.2px;
+  stroke-dasharray: 8 5;
+}
+.pmap .edge-path.st-unchecked {
+  stroke: var(--e-unknown);
+  stroke-dasharray: 8 5;
+}
+.pmap .edge-path.st-dormant {
+  stroke: var(--e-dormant);
+  stroke-width: 2.5px;
+  stroke-dasharray: 2 6;
+  stroke-linecap: round;
+}
+.pmap .edge-path.st-direct {
+  stroke: var(--e-direct);
+}
+.pmap .edge-path.st-screened {
+  stroke: var(--e-screened);
+  stroke-width: 3.5px;
+}
+.pmap .edge-path.st-unscreened {
+  stroke: var(--e-neutral);
+}
+.pmap .edge-path.st-path {
+  stroke: var(--e-neutral);
+  stroke-width: 4px;
+}
+.pmap .edge-path.inherited {
+  stroke-dasharray: 10 4 2 4;
+  opacity: 0.8;
+}
+.pmap .edge-path.st-conditional.inherited {
+  stroke-dasharray: 1 6;
+}
+.pmap .react-flow__edge.dim {
+  opacity: 0.15;
+}
+.pmap .react-flow__edge.sel .edge-path,
+.pmap .react-flow__edge.selected .edge-path {
+  stroke-width: 5px;
+}
+.pmap .react-flow__edge.sel .edge-halo {
+  stroke: color-mix(in srgb, var(--blue) 30%, transparent);
+  stroke-width: 11px;
+}
+.pmap .react-flow__edge:focus-visible .edge-halo {
+  stroke: var(--blue);
+  stroke-width: 10px;
+}
+.pmap .edge-arrow {
+  fill: var(--e-unknown);
+}
+.pmap .edge-arrow.st-allowed,
+.pmap .edge-arrow.st-conditional {
+  fill: var(--e-allowed);
+}
+.pmap .edge-arrow.st-partial {
+  fill: var(--e-partial);
+}
+.pmap .edge-arrow-outline {
+  fill: var(--surface-2);
+  stroke: var(--e-partial);
+  stroke-width: 1.4px;
+}
+.pmap .edge-arrow.st-dormant {
+  fill: var(--e-dormant);
+}
+.pmap .edge-arrow.st-direct {
+  fill: var(--e-direct);
+}
+.pmap .edge-arrow.st-screened {
+  fill: var(--e-screened);
+}
+.pmap .edge-arrow.st-unscreened,
+.pmap .edge-arrow.st-path {
+  fill: var(--e-neutral);
+}
+.pmap .edge-shield circle {
+  fill: #e8710a;
+  stroke: var(--surface);
+  stroke-width: 1.5px;
+}
+.pmap .edge-shield svg {
+  color: #fff;
+}
+.pmap .edge-shield.outlined circle {
+  fill: var(--surface);
+  stroke: #e8710a;
+}
+.pmap .edge-shield.outlined svg {
+  color: #e8710a;
+}
+.pmap .edge-particle {
+  fill: var(--blue);
+  filter: drop-shadow(0 0 4px var(--blue));
+}
+.pmap .edge-particles.st-allowed .edge-particle,
+.pmap .edge-particles.st-partial .edge-particle {
+  fill: var(--e-allowed);
+}
+.pmap .edge-badge-wrap {
+  position: absolute;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  pointer-events: none;
+  z-index: 10;
+}
+.pmap .edge-badge-wrap.dim {
+  opacity: 0.2;
+}
+.pmap .edge-badge {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  color: #fff;
+  border: 2px solid var(--surface);
+  box-shadow: var(--shadow-1);
+  font-weight: 700;
+  font-size: 12px;
+}
+.pmap .badge-denied {
+  background: #d93025;
+}
+.pmap .badge-would-deny {
+  background: var(--amber-weak);
+  color: #d93025;
+  border-color: #d93025;
+}
+.pmap .badge-conditional {
+  background: var(--surface);
+  color: var(--e-allowed);
+  border-color: var(--e-allowed);
+}
+.pmap .edge-label {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text-2);
+  white-space: nowrap;
+}
+.pmap .edge-label.st-partial {
+  border-color: var(--e-partial);
+  color: var(--text);
+}
+
+/* ---------- legend (doubles as the verdict filter) ---------- */
+.pmap .legend {
+  flex-shrink: 0;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 4px 12px;
+  padding: 6px 12px;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-2);
+}
+.pmap .legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  padding: 2px 4px;
+  border-radius: 6px;
+}
+button.legend-item {
+  cursor: pointer;
+}
+button.legend-item:hover {
+  background: var(--surface-3);
+}
+.pmap .legend-item.off {
+  opacity: 0.45;
+  text-decoration: line-through;
+}
+.pmap .legend-line .edge-path {
+  animation: none;
+}
+.pmap .legend-icon {
+  display: grid;
+  place-items: center;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  color: #fff;
+  margin-left: -4px;
+  font-size: 10px;
+  font-weight: 700;
+}
+.pmap .li-blocked {
+  background: #d93025;
+}
+.pmap .li-would_deny {
+  background: var(--amber-weak);
+  color: #d93025;
+  box-shadow: inset 0 0 0 1.5px #d93025;
+}
+.pmap .li-conditional {
+  background: var(--surface);
+  color: var(--e-allowed);
+  box-shadow: inset 0 0 0 1.5px var(--e-allowed);
+}
+.pmap .li-shield {
+  background: #e8710a;
+  margin-left: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  .pmap .node.hit {
+    animation: none;
+    box-shadow: 0 0 0 4px var(--blue), var(--shadow-2);
+  }
+  .pmap .node,
+  .pmap .edge-path {
+    transition: none;
+  }
+}
+@media (max-width: 640px) {
+  .pmap-tools-end {
+    margin-left: 0;
+  }
+  .pmap-search {
+    max-width: none;
+  }
 }
