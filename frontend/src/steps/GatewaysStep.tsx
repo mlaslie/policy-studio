@@ -267,7 +267,13 @@ function WouldDeny({ gw }: { gw: Gateway }) {
   }, [load]);
   const rows = (data?.entries ?? []).filter((e) => e.decision === "would_deny");
   const unknown = (data?.entries ?? []).filter((e) => e.decision === "unknown");
-  const checked = (data?.entries ?? []).filter((e) => e.computed).length;
+  // Platform calls: unregistered ones (decision "platform", not checked) and registered ones that were allowed (the
+  // aiplatform endpoint, usually through a project-wide grant). A registered one that would be denied stays above.
+  const platform = (data?.entries ?? []).filter((e) => e.decision === "platform" || (e.platform && e.decision === "allowed"));
+  const platformHosts = [...platform.reduce((m, e) => m.set(e.host, (m.get(e.host) ?? 0) + 1), new Map<string, number>())].sort((a, b) => b[1] - a[1]);
+  const checked = (data?.entries ?? []).filter((e) => e.computed && e.decision !== "platform").length;
+  // The would-deny list covers the window unless the platform-free query was capped too (older backends: truncated).
+  const partial = !!data && (data.checked_truncated ?? data.truncated);
   const shown = all ? rows : rows.slice(0, 6);
   const dest = (e: GatewayLogEntry) => {
     const r = e.registry_resource;
@@ -312,7 +318,7 @@ function WouldDeny({ gw }: { gw: Gateway }) {
         <h5>
           Would have been denied <span className="muted">(last 24 h, computed)</span>
         </h5>
-        {data && <Badge tone={rows.length ? "amber" : "neutral"}>{rows.length}{data.truncated ? "+" : ""}</Badge>}
+        {data && <Badge tone={rows.length ? "amber" : "neutral"}>{rows.length}{partial ? "+" : ""}</Badge>}
         <span className="grow" />
         <Tip tip="Read the gateway's request log again from Cloud Logging (read-only).">
           <button className="icon-btn" aria-label="Refresh the would-be-denied list" onClick={() => void load(true)} disabled={busy}>
@@ -341,7 +347,7 @@ function WouldDeny({ gw }: { gw: Gateway }) {
       ) : rows.length === 0 ? (
         <p className="small muted">
           No call in the last 24 hours would have been denied by the current grants ({plural(checked, "allowed call")} checked
-          {data.entries.length > checked ? `, ${plural(data.entries.length - checked, "other entry", "other entries")}` : ""}). Either every call has a grant, or there was little traffic.
+          {data.entries.length > checked + platform.length ? `, ${plural(data.entries.length - checked - platform.length, "other entry", "other entries")}` : ""}). Either every call has a grant, or there was little traffic.
         </p>
       ) : (
         <>
@@ -353,9 +359,33 @@ function WouldDeny({ gw }: { gw: Gateway }) {
           )}
         </>
       )}
+      {data && data.truncated && (
+        <p className="tiny muted wd-caveat">
+          {partial
+            ? "The log had more entries than Policy Studio reads (up to 1000), so older would-be-denied calls may be missing."
+            : "Older platform calls were left out; every other call of the last 24 hours was checked."}
+        </p>
+      )}
       {data && unknown.length > 0 && (
         <Disclosure summary={<span className="small">{plural(unknown.length, "call")} couldn't be checked</span>}>
           <ul className="would-deny-list">{unknown.slice(0, 20).map(row)}</ul>
+        </Disclosure>
+      )}
+      {data && platform.length > 0 && (
+        <Disclosure summary={<span className="small muted">{plural(platform.length, "platform call")}</span>}>
+          <p className="tiny muted wd-caveat">
+            The agent runtime's own traffic (Agent Platform APIs, internal addresses such as 240.0.0.2). Unregistered hosts aren't covered by roles/iap.egressor grants, so they aren't checked; a registered one (an aiplatform endpoint in Agent Registry) is
+            checked like any destination and listed above if it would be denied.
+          </p>
+          <ul className="would-deny-list wd-platform">
+            {platformHosts.map(([h, n]) => (
+              <li key={h}>
+                <span className="mono tiny">{h || "(no host)"}</span>
+                <span className="grow" />
+                <span className="tiny muted">× {n}</span>
+              </li>
+            ))}
+          </ul>
         </Disclosure>
       )}
     </section>

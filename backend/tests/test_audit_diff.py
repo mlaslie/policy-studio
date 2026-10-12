@@ -43,7 +43,7 @@ def test_findings_from_fixture(state):
     # grant to a deleted engine (999) -> revoke with the same condition
     gone = f["Grant to a deleted agent on Tickets MCP"]
     assert gone.severity == "medium" and gone.fix.kind == "revoke"
-    assert gone.fix.access.mode == "read_only_hint" and gone.fix.access.title == "ro"
+    assert gone.fix.access.mode == "custom" and gone.fix.access.expression == F.RO_EXPR and gone.fix.access.title == "ro"
     # public member
     pub = f["allUsers on KB Agent"]
     assert pub.severity == "high" and pub.fix.kind == "revoke" and pub.fix.source.principal == "allUsers"

@@ -11,8 +11,9 @@ const TF_TYPE = {
   agent: ["google_iap_agent_registry_agent_iam_member", "agent_id", "agent"],
   mcp_server: ["google_iap_agent_registry_mcp_server_iam_member", "mcp_server_id", "mcp-server"],
   endpoint: ["google_iap_agent_registry_endpoint_iam_member", "endpoint_id", "endpoint"],
+  registry: ["google_iap_agent_registry_iam_member", "", ""],   // registry-wide: no id, no gcloud flag
 } as const;
-const REG_PATH = { agent: "agents", mcp_server: "mcpServers", endpoint: "endpoints" } as const;
+const REG_PATH = { agent: "agents", mcp_server: "mcpServers", endpoint: "endpoints", registry: "" } as const;
 
 const ident = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 60) || "item";
 const hcl = (s: string) => JSON.stringify(s).replace(/\$\{/g, "$${");
@@ -20,13 +21,15 @@ const sq = (s: string) => `'${s.replace(/'/g, `'"'"'`)}'`;
 
 function iapResource(ctx: Ctx, i: Intent) {
   const d = i.destination!;
-  return `projects/${MOCK_NUMBER}/locations/${ctx.region}/iap_web/agentRegistry/${REG_PATH[d.kind]}/${d.id}`;
+  const base = `projects/${MOCK_NUMBER}/locations/${ctx.region}/iap_web/agentRegistry`;
+  return d.kind === "registry" ? base : `${base}/${REG_PATH[d.kind]}/${d.id}`;
 }
 
 function grantOutputs(ctx: Ctx, i: Intent, revoke: boolean): { outputs: Outputs; warnings: string[]; notes: string[] } {
   const d = i.destination!;
   const member = i.source!.principal;
-  const cond = revoke ? null : conditionFor(i.access);
+  // A revoke repeats the condition: IAM matches the binding by member, role and condition expression.
+  const cond = conditionFor(i.access);
   const [tfType, tfKey, gFlag] = TF_TYPE[d.kind];
   const name = ident(`${i.source!.label}_${d.label}`);
   const res = iapResource(ctx, i);
@@ -49,8 +52,8 @@ function grantOutputs(ctx: Ctx, i: Intent, revoke: boolean): { outputs: Outputs;
   } else {
     const body = [
       `resource "${tfType}" "${name}" {`,
-      ...([["project", "var.project_id"], ["location", "var.region"], [tfKey, hcl(d.id)], ["role", `"${ROLE}"`], ["member", hcl(member)]] as const).map(
-        ([k, v]) => `  ${k.padEnd(tfKey.length)} = ${v}`,
+      ...([["project", "var.project_id"], ["location", "var.region"], ...(tfKey ? [[tfKey, hcl(d.id)]] : []), ["role", `"${ROLE}"`], ["member", hcl(member)]] as const).map(
+        ([k, v]) => `  ${k.padEnd(Math.max(tfKey.length, 8))} = ${v}`,
       ),
     ];
     if (cond) body.push(`  condition {`, `    title      = ${hcl(cond.title)}`, `    expression = ${hcl(cond.expression)}`, `  }`);
@@ -61,15 +64,16 @@ function grantOutputs(ctx: Ctx, i: Intent, revoke: boolean): { outputs: Outputs;
   // ---------- gcloud
   const flags = [
     `  --resource-type=agent-registry \\`,
-    `  --${gFlag}=${d.id} \\`,
+    ...(gFlag ? [`  --${gFlag}=${d.id} \\`] : []),
     `  --region=${ctx.region} \\`,
     `  --project=${ctx.project} \\`,
     `  --member=${sq(member)} \\`,
     `  --role=${ROLE}`,
   ];
   let gcloud: string;
-  if (revoke) {
-    gcloud = [`# ${intentEnglish(i)}`, `gcloud iap web remove-iam-policy-binding \\`, ...flags.slice(0, -1), `  --role=${ROLE} \\`, `  --all`].join("\n");
+  const verb = revoke ? "remove" : "add";
+  if (revoke && !cond) {
+    gcloud = [`# ${intentEnglish(i)}`, `gcloud iap web remove-iam-policy-binding \\`, ...flags.slice(0, -1), `  --role=${ROLE} \\`, `  --condition=None`].join("\n");
   } else if (cond) {
     gcloud = [
       `# ${intentEnglish(i)}`,
@@ -78,7 +82,7 @@ function grantOutputs(ctx: Ctx, i: Intent, revoke: boolean): { outputs: Outputs;
       `title: ${JSON.stringify(cond.title)}`,
       `expression: ${JSON.stringify(cond.expression)}`,
       `EOF`,
-      `gcloud iap web add-iam-policy-binding \\`,
+      `gcloud iap web ${verb}-iam-policy-binding \\`,
       ...flags.slice(0, -1),
       `  --role=${ROLE} \\`,
       `  --condition-from-file=condition.yaml`,
@@ -98,7 +102,7 @@ function grantOutputs(ctx: Ctx, i: Intent, revoke: boolean): { outputs: Outputs;
     `  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \\`,
     `  -d '{"options":{"requestedPolicyVersion":3}}' > policy.json`,
     revoke
-      ? `jq --arg m ${sq(member)} '.bindings |= map(if .role=="${ROLE}" then .members -= [$m] else . end | select(.members|length>0)) | .version=3' policy.json > new.json`
+      ? `jq --arg m ${sq(member)} --arg e ${sq(cond?.expression ?? "")} '.bindings |= map(if .role=="${ROLE}" and ((.condition.expression // "") == $e) then .members -= [$m] else . end | select(.members|length>0)) | .version=3' policy.json > new.json`
       : `jq --argjson b ${sq(bindingJson)} '.bindings += [$b] | .version=3' policy.json > new.json`,
     `curl -sS -X POST "${IAP}/$RES:setIamPolicy" \\`,
     `  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \\`,
@@ -121,7 +125,7 @@ function grantOutputs(ctx: Ctx, i: Intent, revoke: boolean): { outputs: Outputs;
     ...(revoke
       ? [
           `for b in policy.bindings:`,
-          `    if b.role == ${JSON.stringify(ROLE)} and ${JSON.stringify(member)} in b.members:`,
+          `    if b.role == ${JSON.stringify(ROLE)} and ${JSON.stringify(member)} in b.members and b.condition.expression == ${JSON.stringify(cond?.expression ?? "")}:`,
           `        b.members.remove(${JSON.stringify(member)})`,
           `keep = [b for b in policy.bindings if b.members]`,
           `del policy.bindings[:]`,
@@ -482,7 +486,9 @@ export function mockRender(ctx: Ctx, w: World, intents: Intent[]): RenderResult 
   };
 }
 
-const sameCond = (a: Binding["condition"], b: Binding["condition"]) => (a?.expression ?? "") === (b?.expression ?? "");
+// Like the backend's same_condition: by expression, whitespace-insensitive (the title doesn't count).
+const normExpr = (c: Binding["condition"]) => (c?.expression ?? "").replace(/\s+/g, " ").trim();
+const sameCond = (a: Binding["condition"], b: Binding["condition"]) => normExpr(a) === normExpr(b);
 
 export function mockDiff(w: World, intents: Intent[]): DiffResult {
   const items: DiffItem[] = intents.map((i) => {
@@ -491,17 +497,13 @@ export function mockDiff(w: World, intents: Intent[]): DiffResult {
       const current = w.inventory.access[res] ?? [];
       const mine = current.filter((b) => b.member === i.source?.principal && b.role === ROLE);
       if (i.kind === "revoke") {
-        // access.title = revoke only the binding with exactly this condition title ("" = unconditional).
-        const t = i.access?.title;
-        if (t !== undefined) {
-          const hit = mine.filter((b) => (b.condition?.title ?? "") === t);
-          return hit.length
-            ? { intent_id: i.id, status: "remove", current, detail: `Removes ${i.source?.label}'s ${t ? `“${t}”` : "unconditional"} binding; other bindings are kept.` }
-            : { intent_id: i.id, status: "absent", current, detail: `${i.source?.label} has no ${t ? `“${t}”` : "unconditional"} grant on ${i.destination?.label}; nothing to remove.` };
-        }
-        return mine.length
-          ? { intent_id: i.id, status: "remove", current, detail: `Removes ${mine.length} binding${mine.length > 1 ? "s" : ""} for ${i.source?.label}.` }
-          : { intent_id: i.id, status: "absent", current, detail: `${i.source?.label} has no grant on ${i.destination?.label}; nothing to remove.` };
+        // Like the backend: only the binding with exactly this condition expression (no access = unconditional).
+        const want = conditionFor(i.access);
+        const t = want ? `“${want.title}”` : "unconditional";
+        const hit = mine.filter((b) => sameCond(b.condition, want));
+        return hit.length
+          ? { intent_id: i.id, status: "remove", current, after: mine.filter((b) => !hit.includes(b)), detail: `Removes ${i.source?.label}'s ${t} binding; other bindings are kept.` }
+          : { intent_id: i.id, status: "absent", current, detail: `${i.source?.label} has no ${t} grant on ${i.destination?.label}; nothing to remove.` };
       }
       const cond = conditionFor(i.access);
       if (mine.some((b) => sameCond(b.condition, cond))) return { intent_id: i.id, status: "present", current, detail: "An identical grant already exists." };

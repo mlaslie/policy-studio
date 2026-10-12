@@ -486,20 +486,21 @@ NUM_LOC = f"projects/123456789012/locations/{F.R}"     # log entries name regist
 
 
 def entry(status=200, result="ALLOWED", tool=None, resource="mcpServers/agentregistry-mcp", fp="fp-hr",
-          ts="2026-10-09T14:09:23Z", policy_result=None, method="tools/call"):
+          ts="2026-10-09T14:09:23Z", policy_result=None, method="tools/call",
+          host="tickets-mcp-123456789012.europe-west4.run.app", iid=None):
     """A gateway_requests entry in the format seen live (identifiers replaced with placeholders). In dry run a call
     IAP would deny looks exactly like this too: status 200, result ALLOWED, matchedRules default_denied."""
     gi = {"agentRegistryResource": f"{NUM_LOC}/{resource}"} if resource else {}
     if tool or (method and method != "tools/call"):
         gi["mcpInfo"] = {"method": method, **({"parameter": tool} if tool else {})}
-    e = {"insertId": f"id-{status}-{result}-{tool}-{resource}-{fp}", "timestamp": ts,
+    e = {"insertId": iid or f"id-{status}-{result}-{tool}-{resource}-{fp}", "timestamp": ts,
          "logName": "projects/my-demo-project/logs/networkservices.googleapis.com%2Fgateway_requests",
          "resource": {"type": "networkservices.googleapis.com/Gateway",
                       "labels": {"gateway_name": "corp-out", "location": F.R, "resource_container": "123456789012"}},
          "httpRequest": {"requestMethod": "POST", "status": status,
                          "requestUrl": "https://tickets-mcp-123456789012.europe-west4.run.app/mcp"},
          "jsonPayload": {"enforcedGatewaySecurityPolicy": {
-                             "hostname": "tickets-mcp-123456789012.europe-west4.run.app",
+                             "hostname": host,
                              "matchedRules": [{"action": "ALLOWED", "name": "default_denied"}]},
                          "agentGatewayInfo": gi}}
     if fp:
@@ -625,7 +626,7 @@ def test_gateway_logs_endpoint(read_client):
     rest.log_entries = [entry(tool="delete_ticket"), entry(resource="agents/agentregistry-rt1", method=None),
                         entry(403, "DENIED", "close_ticket"), entry(resource=None, method=None)]
     r = c.get("/api/studio/gateway-logs", params={**Q, "gateway": "corp-out", "since": "24h", "limit": 50}).json()
-    assert r["counts"] == {"allowed": 1, "denied": 1, "would_deny": 1, "unknown": 1}, r["entries"]
+    assert r["counts"] == {"allowed": 1, "denied": 1, "would_deny": 1, "unknown": 1, "platform": 0}, r["entries"]
     assert [e["decision"] for e in r["entries"]] == ["allowed", "would_deny", "denied", "unknown"]
     assert [e["computed"] for e in r["entries"]] == [True, True, False, True]
     wd = r["entries"][1]
@@ -671,3 +672,88 @@ def test_gateway_logs_enforcing_gateway_is_not_computed(read_client, monkeypatch
     r = c.get("/api/studio/gateway-logs", params={**Q, "gateway": "corp-out"}).json()
     assert [e["decision"] for e in r["entries"]] == ["allowed", "denied"] and r["dry_run"] is False
     assert not any(e["computed"] for e in r["entries"])
+
+
+# ---------------------------------------------------------------------- platform traffic, window coverage
+AIP = "us-east4-aiplatform.mtls.googleapis.com"
+
+
+def test_platform_hosts():
+    assert logs_mod.is_platform("240.0.0.2:443", False) and logs_mod.is_platform("240.0.0.2", True)
+    assert logs_mod.is_platform("[fd00::2]:443", False) and logs_mod.is_platform("metadata.google.internal", False)
+    assert logs_mod.is_platform(AIP, True) and logs_mod.is_platform(f"{AIP}:443", False)
+    assert logs_mod.is_platform("logging.googleapis.com", False)             # unregistered Google API
+    assert not logs_mod.is_platform("logging.googleapis.com", True)          # registered: an agent's destination
+    assert not logs_mod.is_platform("tickets-mcp-123456789012.europe-west4.run.app", False)
+    assert not logs_mod.is_platform("", False)
+    rx = __import__("re").compile(logs_mod.PLATFORM_HOST_RE)                   # what the second query leaves out
+    assert rx.match(AIP) and rx.match(f"{AIP}:443") and rx.match("240.0.0.2:443") and rx.match("europe-west4-aiplatform.googleapis.com")
+    assert not rx.match("tickets-mcp-123456789012.europe-west4.run.app") and not rx.match("logging.googleapis.com")
+    assert "\\" not in logs_mod.PLATFORM_HOST_RE
+    f = logs_mod.checked_filter([F.P], "corp-out", "2026-10-09T08:00:00Z")
+    assert f.endswith(f' AND NOT jsonPayload.enforcedGatewaySecurityPolicy.hostname=~"{logs_mod.PLATFORM_HOST_RE}"')
+
+
+def test_would_deny_platform(inv):
+    hr = caller("111", name="HR Assistant")
+    # unregistered platform address: "platform", whoever the caller is and even without the grants
+    for c, i in ((hr, inv), (None, inv), (hr, None)):
+        d, why = check(entry(resource=None, method=None, host="240.0.0.2:443"), c, i)
+        assert d == "platform" and "240.0.0.2:443" in why
+    # registered aiplatform endpoint: still checked against the grants (all agents in project hold egressor)
+    p = logs_mod.parse_entry(entry(resource="endpoints/agentregistry-ep", method=None, host=AIP), F.P)
+    assert p["platform"] is True
+    d, why = dryrun.check(p, hr, inv)
+    assert d == "allowed" and "through All agents in project" in why
+    # an unregistered non-platform host is still unknown
+    assert check(entry(resource=None, method=None), hr, inv)[0] == "unknown"
+
+
+def test_gateway_logs_platform_and_window_coverage(read_client):
+    """Dry run, limit 3: the newest entries are platform calls, so a second query without the platform hosts adds
+    the older would-deny entry; platform calls aren't unknown."""
+    c, rest = read_client
+    plat = [entry(resource=None, method=None, host="240.0.0.2:443", ts=f"2026-10-09T14:5{i}:00Z", iid=f"ip{i}")
+            for i in range(3)]
+    aip = [entry(resource="endpoints/agentregistry-ep", method=None, host=AIP, ts=f"2026-10-09T14:4{i}:00Z",
+                 iid=f"aip{i}") for i in range(3)]
+    old = entry(resource="agents/agentregistry-rt1", method=None, ts="2026-10-09T10:00:00Z", iid="old")
+    rest.log_entries = plat[::-1] + aip[::-1] + [old]
+    r = c.get("/api/studio/gateway-logs", params={**Q, "gateway": "corp-out", "limit": 3}).json()
+    assert [e["insert_id"] for e in r["entries"]] == ["ip2", "ip1", "ip0", "old"]
+    assert [e["decision"] for e in r["entries"]] == ["platform"] * 3 + ["would_deny"]
+    assert r["counts"] == {"allowed": 0, "denied": 0, "would_deny": 1, "unknown": 0, "platform": 3}
+    assert r["truncated"] is True and r["checked_truncated"] is False
+    assert any("every non-platform entry of the window was checked" in n for n in r["notes"])
+    main, second = rest.log_requests
+    assert main["pageSize"] == 3 and "NOT jsonPayload" not in main["filter"]
+    assert second["filter"] == logs_mod.checked_filter([F.P], "corp-out", main["filter"].split('timestamp>="')[1][:20])
+    # the second query is capped (and paged): checked_truncated, and the note says older entries were left out
+    service.cache.clear()
+    rest.log_requests.clear()
+    rest.log_entries = plat[::-1] + [entry(resource="agents/agentregistry-rt1", method=None,
+                                           ts=f"2026-10-09T1{i % 10}:00:00Z", iid=f"x{i}") for i in range(12)]
+    orig = logs_mod.CHECK_CAP
+    logs_mod.CHECK_CAP = 5
+    try:
+        r = c.get("/api/studio/gateway-logs", params={**Q, "gateway": "corp-out", "limit": 3, "refresh": 1}).json()
+    finally:
+        logs_mod.CHECK_CAP = orig
+    assert r["truncated"] is True and r["checked_truncated"] is True and r["counts"]["would_deny"] == 5
+    assert any("may be missing" in n for n in r["notes"])
+
+
+def test_gateway_logs_second_query_only_when_needed(read_client, monkeypatch):
+    c, rest = read_client
+    rest.log_entries = [entry(resource=None, method=None, host="240.0.0.2:443"), entry(tool="delete_ticket")]
+    r = c.get("/api/studio/gateway-logs", params={**Q, "gateway": "corp-out", "limit": 50}).json()
+    assert len(rest.log_requests) == 1 and r["truncated"] is False and r["counts"]["platform"] == 1
+    # enforcing gateway: no second query even when truncated; platform entries keep their logged decision
+    exts = [dict(x) for x in F.EXTENSIONS]
+    exts[0] = {**exts[0], "metadata": {"iapPolicyVersion": "V1"}, "failOpen": False}
+    monkeypatch.setattr(F, "EXTENSIONS", exts)
+    service.cache.clear()
+    rest.log_requests.clear()
+    r = c.get("/api/studio/gateway-logs", params={**Q, "gateway": "corp-out", "limit": 1}).json()
+    assert len(rest.log_requests) == 1 and r["truncated"] is True and r["checked_truncated"] is False
+    assert r["entries"][0]["decision"] == "allowed" and r["entries"][0]["platform"] is True

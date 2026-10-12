@@ -14,12 +14,14 @@ export function toolsExpr(tools: string[]): string {
   return `api.getAttribute('${TOOL_ATTR}', '') in [${list}]`;
 }
 
-/** The IAM condition for an access choice (null = unconditional). */
+/** The IAM condition for an access choice (null = unconditional). access.title overrides the generated title, like
+ *  the backend's condition_for. */
 export function conditionFor(access: Intent["access"]): { title: string; expression: string } | null {
   if (!access || access.mode === "all") return null;
-  if (access.mode === "read_only_hint") return { title: "MCP read-only tools (by hint)", expression: READ_ONLY_EXPR };
-  if (access.mode === "tools") return { title: `MCP tools: ${(access.tools ?? []).join(", ") || "none"}`, expression: toolsExpr(access.tools ?? []) };
-  return { title: "Custom condition", expression: access.expression ?? "" };
+  const title = access.title || undefined;
+  if (access.mode === "read_only_hint") return { title: title ?? "MCP read-only tools (by hint)", expression: READ_ONLY_EXPR };
+  if (access.mode === "tools") return { title: title ?? `MCP tools: ${(access.tools ?? []).join(", ") || "none"}`, expression: toolsExpr(access.tools ?? []) };
+  return { title: title ?? "Custom condition", expression: access.expression ?? "" };
 }
 
 export const ACCESS_LABEL: Record<AccessMode, string> = {
@@ -51,10 +53,11 @@ export function intentEnglish(i: Intent): string {
       }
       return a.title ? `${who} can call ${dest} under the condition “${a.title}”.` : `${who} can call ${dest} when a custom condition is true.`;
     }
-    case "revoke":
-      if (i.access?.title !== undefined)
-        return i.access.title ? `Remove ${who}'s “${i.access.title}” grant on ${dest}.` : `Remove ${who}'s unconditional grant on ${dest}.`;
-      return `Remove ${who}'s access to ${dest}.`;
+    case "revoke": {
+      // Like the backend: no access = the unconditional binding; otherwise the binding with exactly this condition.
+      const c = conditionFor(i.access);
+      return c ? `Remove ${who}'s “${c.title}” grant on ${dest}.` : `Remove ${who}'s unconditional grant on ${dest}.`;
+    }
     case "bind_gateway":
       return i.gateway?.direction === "ingress"
         ? `Route traffic into ${eng} through ingress gateway ${gw}.`

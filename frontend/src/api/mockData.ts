@@ -448,7 +448,7 @@ export function buildWorld(ctx: Ctx) {
       title: "Any signed-in Google account can call Calendar Agent",
       detail: "allAuthenticatedUsers holds roles/iap.egressor on Calendar Agent. Egress grants should name agent identities, not public groups.",
       resource: cal.name,
-      fix: { id: "fix-revoke-allauth", kind: "revoke", source: { type: "custom", principal: "allAuthenticatedUsers", label: "Any signed-in Google account" }, destination: { kind: "agent", id: cal.id, name: cal.name, label: cal.display_name } },
+      fix: { id: "fix-revoke-allauth", kind: "revoke", source: { type: "custom", principal: "allAuthenticatedUsers", label: "Any signed-in Google account" }, destination: { kind: "agent", id: cal.id, name: cal.name, label: cal.display_name }, access: { mode: "all" } },
     },
     {
       severity: "medium",

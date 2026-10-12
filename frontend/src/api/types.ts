@@ -219,7 +219,8 @@ export type Intent = {
   id: string;
   kind: IntentKind;
   source?: { type: SourceType; principal: string; label: string; engine?: string };
-  destination?: { kind: ResourceKind; id: string; name: string; label: string };
+  /** registry = the whole Agent Registry (a registry-wide grant): id "", name projects/P/locations/R. */
+  destination?: { kind: ResourceKind | "registry"; id: string; name: string; label: string };
   access?: { mode: AccessMode; tools?: string[]; expression?: string; title?: string };
   gateway?: { name: string; direction: Direction; extension?: string; policy?: string };
   engine?: string;
@@ -297,7 +298,8 @@ export type PreflightItem = { intent_id: string; status: "ok" | "blocked" | "dup
 // ---- Gateway request logs (GET /gateway-logs) ----
 /** allowed / denied as logged; on a dry-run egress gateway allowed entries are computed into would_deny / allowed /
  *  unknown from the caller's current grants (computed: true, with a reason). Google doesn't report would-deny. */
-export type LogDecision = "allowed" | "denied" | "would_deny" | "unknown";
+/** platform: dry run, the agent runtime's own call with no Agent Registry resource (not checked). */
+export type LogDecision = "allowed" | "denied" | "would_deny" | "unknown" | "platform";
 export type GatewayLogEntry = {
   decision: LogDecision;
   status: number | null;
@@ -321,16 +323,21 @@ export type GatewayLogEntry = {
   client_cert?: string | null;
   /** True when `decision` was computed from the grants (dry run), not read from the log. */
   computed?: boolean;
-  /** Why it was computed as would_deny / allowed / unknown. */
+  /** Why it was computed as would_deny / allowed / unknown / platform. */
   reason?: string | null;
+  /** The agent runtime's own traffic, by host: IP literals (240.0.0.2:443), aiplatform*.googleapis.com, *.google.internal. */
+  platform?: boolean;
 };
 export type GatewayLogsResp = {
   gateway: string;
   since: string;
   filter: string;
   entries: GatewayLogEntry[];
-  counts: Record<LogDecision, number>;
+  counts: Partial<Record<LogDecision, number>>;
+  /** Some entries of the window aren't in `entries` (notes say which). */
   truncated: boolean;
+  /** Dry run: even the platform-free second query was capped, so older would-be-denied calls may be missing. */
+  checked_truncated?: boolean;
   console_url: string;
   notes: string[];
   errors: string[];

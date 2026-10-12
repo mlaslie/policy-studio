@@ -8,7 +8,7 @@ import { Badge, Callout, KindIcon, Load, StepHeader, Term } from "../components/
 import { GlassModal } from "../components/Glass";
 import { CodeView } from "../components/CodeView";
 import { AuditIcon, DownloadIcon, PencilIcon, TrashIcon, WarnIcon, CheckIcon, InfoIcon } from "../components/Icons";
-import { grantToIntent } from "../lib/grants";
+import { grantToIntent, revokesGrant } from "../lib/grants";
 import { downloadBlob, makeZip } from "../lib/zip";
 import { ago } from "../lib/util";
 import { KIND_LABEL, intentEnglish, intentKey } from "../lib/policy";
@@ -98,7 +98,7 @@ export function AuditStep() {
   const [exporting, setExporting] = useState(false);
 
   const staged = (f: Finding) => !!f.fix && cart.some((c) => intentKey(c) === intentKey(f.fix!));
-  const revokeStaged = (g: Grant) => cart.some((c) => c.kind === "revoke" && c.source?.principal === g.member && c.destination?.name === g.resource);
+  const revokeStaged = (g: Grant) => cart.some((c) => revokesGrant(c, g));
 
   return (
     <>

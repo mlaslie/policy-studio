@@ -298,8 +298,9 @@ def gateway_logs_view(ctx: Context, gateway: str, since: str = "24h", limit: int
                       refresh: bool = False) -> dict[str, Any]:
     """GET /gateway-logs: recent request log entries of one gateway. Logged decisions are allowed / denied; on an
     egress gateway in dry run, allowed entries are checked against the caller's current grants (dryrun.py) and
-    become would_deny / allowed / unknown with a reason. `gateway` is an id or a full name (its project is then
-    where the logs are read)."""
+    become would_deny / allowed / unknown with a reason (platform for the agent runtime's own unregistered calls; a
+    second, platform-free query covers the window when the newest `limit` entries don't). `gateway` is an id or a
+    full name (its project is then where the logs are read)."""
     gid = gateway.rstrip("/").split("/")[-1]
     projects = [gateway.split("/")[1]] if gateway.startswith("projects/") else \
         list(dict.fromkeys([ctx.gw_project, ctx.project]))
@@ -316,7 +317,6 @@ def gateway_logs_view(ctx: Context, gateway: str, since: str = "24h", limit: int
         for coll in ((inv.agents, inv.mcp_servers, inv.endpoints) if inv else ()):
             for x in coll:
                 labels[eng_mod.tail(x.name)] = x.display_name
-        out = logs_mod.fetch(r, projects, gid, since, limit, labels)
         g = None
         engines: list[Engine] = []
         try:
@@ -328,6 +328,8 @@ def gateway_logs_view(ctx: Context, gateway: str, since: str = "24h", limit: int
         bound = [by_name[b.engine] for b in (g.bound_engines if g else []) if b.direction == g.type
                  and b.engine in by_name]
         dry = bool(g and g.type == "egress" and g.enforcement and g.enforcement.mode == "DRY_RUN")
+        out = logs_mod.fetch(r, projects, gid, since, limit, labels, checked=dry)
+        extra = out.pop("checked_extra", 0)
         fps = _callers(r, ctx, projects, gid, out["since"], bound)
         for e in out["entries"]:
             eng, how = fps.get(e.get("client_cert") or ""), "mtls"
@@ -352,6 +354,25 @@ def gateway_logs_view(ctx: Context, gateway: str, since: str = "24h", limit: int
                          "the ones IAP would deny. Would-be-denied is computed by Policy Studio from the caller's "
                          "current roles/iap.egressor grants on the destination, not reported by Google. Grants on "
                          "the project or above aren't counted; a condition it can't evaluate gives unknown.")
+        n_platform = sum(1 for e in out["entries"] if e["platform"])
+        if n_platform:
+            notes.append(f"{n_platform} of the entries are platform traffic (the agent runtime's own calls: "
+                         "aiplatform*.googleapis.com, IP-literal hosts such as 240.0.0.2, *.google.internal). "
+                         "Unregistered ones are marked platform and not checked; registered ones (an aiplatform "
+                         "endpoint in Agent Registry) are checked like any destination.")
+        if out["truncated"]:
+            n = len(out["entries"]) - extra
+            if not dry:
+                notes.append(f"Only the newest {n} entries of the window are shown; older entries were left out.")
+            elif out["checked_truncated"]:
+                notes.append(f"The newest {n} entries of the window, plus {extra} older non-platform entries from a "
+                             f"second query capped at {logs_mod.CHECK_CAP}: older entries (platform or not) were left "
+                             "out, so older would-be-denied calls may be missing.")
+            else:
+                notes.append(f"The newest {n} entries of the window, plus {extra} older non-platform entries from a "
+                             "second query that leaves out platform hosts: every non-platform entry of the window "
+                             "was checked; only older platform calls (aiplatform*.googleapis.com, IPv4 hosts) "
+                             "were left out.")
         out.update(notes=notes, errors=errors, synced_at=now_iso(), projects=projects, dry_run=dry)
         return out
     return cache.get((ctx.key(), "gateway_logs", gid, since, int(limit)), build, refresh)

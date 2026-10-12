@@ -95,6 +95,8 @@ def intent_english(intent: Intent) -> str:
         dest = _dest_label(intent)
         kind = intent.destination.kind if intent.destination else "mcp_server"
         acc = intent.access
+        if acc and acc.mode == "custom" and (acc.expression or "").strip():
+            acc = classify({"expression": acc.expression})     # an exact existing condition: describe what it is
         mode = acc.mode if acc else "all"
         if mode == "all":
             what = f"call all tools of {dest}" if kind == "mcp_server" else f"call {dest} (full access)"

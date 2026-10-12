@@ -90,6 +90,10 @@ Inventory = {
   project_agents_principal: string | null, errors: string[], synced_at }
 Binding = { role, member, member_label, condition?: {title, expression}, english }
 Grant  = Binding & { resource, resource_kind: "agent"|"mcp_server"|"endpoint"|"registry", resource_label }
+  // To revoke a Grant, send its exact condition: access {mode: "custom", expression: <condition.expression>,
+  // title: <condition.title>} ({mode: "all"} when it has none) and destination.kind = resource_kind (id "" for
+  // "registry"). IAM matches the binding by its exact expression; a revoke without access removes only the
+  // unconditional binding, and regenerating the expression from the mode (tools, read_only_hint) may not match.
 Finding = { severity: "high"|"medium"|"info", title, detail, resource?, fix?: Intent, fixes?: Intent[],
             redeploy?: string /* Python: redeploy with Agent Identity, for engines that can't be bound (no fix) */ }
   // fix intents for grant/revoke carry full source and destination objects with labels; bind fixes carry source too
@@ -101,6 +105,8 @@ Intent = { id, kind: "grant"|"revoke"|"bind_gateway"|"unbind_gateway"|"model_arm
   destination?: { kind: "agent"|"mcp_server"|"endpoint"|"registry", id, name, label },
   access?:      { mode: "all"|"read_only_hint"|"tools"|"custom", tools?: string[], expression?: string,
                   title?: string /* exact condition title, e.g. when revoking an existing binding */ },
+                  // grant/revoke: no access = unconditional. Revoke fixes (/audit) and the undo of a revoke carry
+                  // the binding's condition verbatim as mode "custom"; its English describes what it is.
   gateway?:     { name, direction: "egress"|"ingress", extension?: string, policy?: string },
   engine?:      string,
   params?:      SetupParams /* the Model Armor setup kinds */,
@@ -174,17 +180,22 @@ DiffItem = { intent_id, status: "add"|"present"|"replace"|"remove"|"absent", det
   // set_enforcement: "replace" (mode changes; detail "gw: Dry run → Enforce", plus shared gateways), "present" (same
   // mode), with current_mode / target_mode. dedicate_extension: "add" / "present"; revert: "remove" / "absent".
 
-GatewayLogs = { gateway, since /* RFC 3339 */, filter, console_url, truncated, notes: [str], errors: [str],
+GatewayLogs = { gateway, since /* RFC 3339 */, filter, console_url, notes: [str], errors: [str],
+                truncated /* some entries of the window aren't in entries (see notes for which) */,
+                checked_truncated /* dry run: even the platform-free second query hit its cap (1000), so older
+                                     would-be-denied calls may be missing; false when not dry run */,
                 dry_run /* egress gateway in dry run: allowed entries were checked against the grants */,
-                counts: {allowed, denied, would_deny, unknown},
-                entries: [{ decision: "allowed"|"denied"|"would_deny"|"unknown", status, host, mcp_tool, mcp_method,
+                counts: {allowed, denied, would_deny, unknown, platform},
+                entries: [{ decision: "allowed"|"denied"|"would_deny"|"unknown"|"platform", status, host, mcp_tool,
+                            mcp_method,
                             registry_resource, destination, policies: [{name, result}], authz_result, timestamp,
                             method, url, insert_id, console_url /* this entry in Cloud Logging */,
                             client_cert /* jsonPayload.mtls.clientCertSha256Fingerprint */,
                             caller: {engine, display_name, how: "mtls"|"only_bound_agent"} | null,
                             agent /* = caller.display_name (inferred: logs don't name the caller) */,
                             agent_inferred, computed /* decision computed from the grants */,
-                            reason /* why would_deny / allowed / unknown, when computed */ }] }
+                            platform /* the agent runtime's own traffic, by host (below) */,
+                            reason /* why would_deny / allowed / unknown / platform, when computed */ }] }
   // filter: logName="projects/P/logs/networkservices.googleapis.com%2Fgateway_requests"
   //         AND resource.labels.gateway_name="GATEWAY" AND timestamp>="SINCE"   (since: 24h, 30m, 7d or RFC 3339)
   // Live format (enforcing gateway): jsonPayload.authzPolicyInfo {result ALLOWED|DENIED, policies[{name, result}]},
@@ -203,6 +214,21 @@ GatewayLogs = { gateway, since /* RFC 3339 */, filter, console_url, truncated, n
   //            tools/call, '' otherwise); other conditions, tools missing from the inventory, group / domain members,
   //            unreadable IAP policies and destinations outside the inventory give "unknown", never would_deny.
   //            Project-level (and higher) grants aren't read.
+  // Platform traffic (seen live): much of an egress gateway's log is the agent runtime's own calls, e.g. to
+  //   <region>-aiplatform.mtls.googleapis.com (registered in Agent Registry as an endpoint, so it has an
+  //   agentRegistryResource) and to 240.0.0.2:443 (an internal platform address, none). platform: true when the
+  //   host is an IP literal (240.0.0.0/4 is the platform's range), *.google.internal or aiplatform*.googleapis.com,
+  //   or, with no agentRegistryResource, any *.googleapis.com host. Decision "platform" (dry run, computed: true) =
+  //   a platform entry with no agentRegistryResource: no grant names it, so it isn't checked, and it isn't "unknown".
+  //   Registered platform hosts (the aiplatform endpoint) are checked like any destination (usually "allowed"
+  //   through a project-wide grant) and keep platform: true, so the UI can group them. "platform" is only computed in
+  //   dry run; on an enforcing gateway entries stay allowed / denied (as logged) with the flag.
+  // Window coverage (dry run): when the newest `limit` entries don't cover the window (often: mostly platform
+  //   calls), a second entries:list adds the window's other entries, newest first, up to 1000 (at most 10 pages):
+  //     <filter> AND NOT jsonPayload.enforcedGatewaySecurityPolicy.hostname=~"^([a-z0-9-]*aiplatform[a-z0-9.-]*[.]
+  //     googleapis[.]com|[0-9]+[.][0-9]+[.][0-9]+[.][0-9]+)(:[0-9]+)?$"            (one line; verified live)
+  //   merged by insertId, so entries can exceed `limit`. truncated stays true (older platform calls were left out);
+  //   checked_truncated says whether the non-platform entries were capped too. notes say which entries were left out.
   // Needs logging.logEntries.list (roles/logging.viewer).
 ```
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from typing import Any
 
 from policy_studio.gcp.rest import READ_ONLY_POSTS, GcpError
@@ -170,8 +171,18 @@ class FakeRest:
             return {"ancestor": [{"resourceId": {"type": "organization", "id": ORG}}]}
         if url.endswith("/v2/entries:list"):
             self.log_requests.append(copy.deepcopy(json))
-            src = self.platform_entries if "httpRequest.requestUrl:" in json.get("filter", "") else self.log_entries
-            return {"entries": copy.deepcopy(src[:json.get("pageSize", 50)])}
+            flt = json.get("filter", "")
+            src = self.platform_entries if "httpRequest.requestUrl:" in flt else self.log_entries
+            m = re.search(r'NOT jsonPayload\.enforcedGatewaySecurityPolicy\.hostname=~"([^"]*)"', flt)
+            if m:                                    # the platform-free query: drop entries whose hostname matches
+                rx = re.compile(m.group(1))
+                src = [e for e in src if not rx.search(((e.get("jsonPayload") or {}).get(
+                    "enforcedGatewaySecurityPolicy") or {}).get("hostname") or "\0")]
+            start, size = int(json.get("pageToken") or 0), json.get("pageSize", 50)
+            page = {"entries": copy.deepcopy(src[start:start + size])}
+            if start + size < len(src):
+                page["nextPageToken"] = str(start + size)
+            return page
         if "cloudresourcemanager" in url and url.endswith(":getIamPolicy"):
             return copy.deepcopy(PROJECT_POLICY)
         if url.endswith(":getIamPolicy"):

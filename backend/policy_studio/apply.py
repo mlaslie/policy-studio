@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 from typing import Any, Iterator, Optional
 
 from . import settings
-from .conditions import classify, same_condition
+from .conditions import exact_access, same_condition
 from .gcp.engines import gateways_of, tail
 from .gcp import model_armor as ma_mod
 from .preflight import blockers, duplicates, friendly
@@ -349,8 +349,7 @@ class Applier:
             if sp.condition is not None:
                 acc.title = sp.condition.title
             return it.model_copy(update={"id": f"undo-{it.id}", "kind": "revoke", "access": acc})
-        cond = removed[0] if removed else None
-        acc = classify(cond) if cond else Access(mode="all")
+        acc = exact_access(removed[0] if removed else None)          # restore the removed binding verbatim
         return it.model_copy(update={"id": f"undo-{it.id}", "kind": "grant", "access": acc})
 
     # ---------------------------------------------------------- engine bind / unbind

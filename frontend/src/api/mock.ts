@@ -30,7 +30,9 @@ function flags() {
 // ---- in-memory "project": intents applied in this page session, replayed onto a fresh world ----
 const applied: Intent[] = [];
 
-const sameCond = (a: Binding["condition"], b: Binding["condition"]) => (a?.expression ?? "") === (b?.expression ?? "");
+// Like the backend's same_condition: IAM tells bindings apart by expression (whitespace-insensitive), not title.
+const normExpr = (c: Binding["condition"]) => (c?.expression ?? "").replace(/\s+/g, " ").trim();
+const sameCond = (a: Binding["condition"], b: Binding["condition"]) => normExpr(a) === normExpr(b);
 
 const short = (n: string | undefined) => (n ?? "").split("/").pop() ?? "";
 const extFull = (source: string, name: string) => source.replace(/\/authzExtensions\/[^/]+$/, `/authzExtensions/${name}`);
@@ -61,12 +63,13 @@ function mutate(w: World, i: Intent) {
     const res = i.destination?.name ?? "";
     const cur = (w.inventory.access[res] ??= []);
     const member = i.source?.principal ?? "";
+    const cond = conditionFor(i.access);
     if (i.kind === "grant") {
-      const cond = i.access?.mode === "custom" && i.access.title ? { title: i.access.title, expression: i.access.expression ?? "" } : conditionFor(i.access);
       if (!cur.some((b) => b.member === member && sameCond(b.condition, cond)))
         cur.push({ role: ROLE, member, member_label: i.source?.label ?? member, condition: cond, english: intentEnglish(i) });
     } else {
-      w.inventory.access[res] = cur.filter((b) => !(b.member === member && (i.access?.title === undefined || (b.condition?.title ?? "") === i.access.title)));
+      // Like the backend: remove only the binding with exactly this condition (no access = the unconditional one).
+      w.inventory.access[res] = cur.filter((b) => !(b.member === member && sameCond(b.condition, cond)));
     }
     return;
   }
@@ -156,6 +159,13 @@ export const gateways = (ctx: Ctx): GatewaysResp => ({
     "Agent Runtime agents created before 2026-04-29 can't be bound to a gateway.",
   ],
 });
+/** Like logs.is_platform in the backend: the agent runtime's own traffic, by host. */
+function isPlatformHost(host: string, registered: boolean): boolean {
+  const h = host.toLowerCase().replace(/:\d+$/, "");
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(h) || h.startsWith("[") || h.endsWith(".google.internal") || /^[a-z0-9-]*aiplatform[a-z0-9.-]*\.googleapis\.com$/.test(h)) return true;
+  return !registered && h.endsWith(".googleapis.com");
+}
+
 /** Like dryrun.check in the backend: would the caller's current roles/iap.egressor grants on the destination allow
  *  this call? [decision, reason]. Conditions other than tools-by-name and read-only-by-hint give "unknown". */
 function mockCheck(w: World, caller: { display_name: string; principal: string } | null, destName: string, tool: string | null): ["allowed" | "would_deny" | "unknown", string] {
@@ -196,7 +206,15 @@ export function gatewayLogs(ctx: Ctx, gateway: string, since: string): GatewayLo
   const now = Date.now();
   const byId = (coll: { name: string; id: string }[], id: string) => coll.find((x) => x.id === id)?.name ?? "";
   // [minutes ago, caller engine (index into the bound agents; -1 = certificate not recognized), destination, tool, host]
+  // Destination "" = no agentRegistryResource (the platform's internal address 240.0.0.2, seen live).
+  const aip = `${w.R}-aiplatform.mtls.googleapis.com`;
   const calls: [number, number, string, string | null, string][] = [
+    [1, 0, "", null, "240.0.0.2:443"],
+    [2, 0, byId(w.inventory.endpoints, "aiplatform-googleapis"), null, aip],
+    [3, 0, byId(w.inventory.endpoints, "aiplatform-googleapis"), null, aip],
+    [7, 1, "", null, "240.0.0.2:443"],
+    [12, 1, byId(w.inventory.endpoints, "aiplatform-googleapis"), null, aip],
+    [33, 0, "", null, "240.0.0.2:443"],
     [4, 0, byId(w.inventory.mcp_servers, "tickets-mcp-6a21"), "close_ticket", "tickets-mcp-a1b2c3-uk.a.run.app"],
     [9, 1, byId(w.inventory.mcp_servers, "tickets-mcp-6a21"), "get_ticket", "tickets-mcp-a1b2c3-uk.a.run.app"],
     [17, 1, byId(w.inventory.mcp_servers, "tickets-mcp-6a21"), "update_ticket", "tickets-mcp-a1b2c3-uk.a.run.app"],
@@ -214,7 +232,9 @@ export function gatewayLogs(ctx: Ctx, gateway: string, since: string): GatewayLo
         .map(([min, who, destName, tool, host]) => {
           const eng = who >= 0 ? engines[who] : engines.length === 1 ? engines[0] : null;
           const how = who >= 0 && engines.length > 1 ? ("mtls" as const) : ("only_bound_agent" as const);
-          const [verdict, reason] = mockCheck(w, eng ?? null, destName, tool);
+          const platform = isPlatformHost(host, !!destName);
+          const [verdict, reason]: [GatewayLogEntry["decision"], string] =
+            !destName && platform ? ["platform", `Platform traffic (${host}): the agent runtime's own call, with no Agent Registry resource, so no roles/iap.egressor grant applies. Not checked.`] : mockCheck(w, eng ?? null, destName, tool);
           const decision: GatewayLogEntry["decision"] = dry ? verdict : verdict === "would_deny" ? "denied" : "allowed";
           const ts = new Date(now - min * 60_000).toISOString();
           const insert = `mock${min}${decision}`;
@@ -225,8 +245,8 @@ export function gatewayLogs(ctx: Ctx, gateway: string, since: string): GatewayLo
             host,
             mcp_tool: tool,
             mcp_method: tool ? "tools/call" : null,
-            registry_resource: regRes(destName),
-            destination: short(destName),
+            registry_resource: destName ? regRes(destName) : null,
+            destination: destName ? short(destName) : host,
             policies: [{ name: g.enforcement?.policy ?? "", result: logged }],
             authz_result: logged,
             timestamp: ts,
@@ -240,9 +260,10 @@ export function gatewayLogs(ctx: Ctx, gateway: string, since: string): GatewayLo
             client_cert: who >= 0 ? `mock-cert-${who}` : "mock-cert-unknown",
             computed: dry,
             reason: dry ? reason : null,
+            platform,
           };
         });
-  const counts = { allowed: 0, denied: 0, would_deny: 0, unknown: 0 };
+  const counts = { allowed: 0, denied: 0, would_deny: 0, unknown: 0, platform: 0 };
   for (const e of entries) counts[e.decision]++;
   const filter = `logName="projects/${w.GP}/logs/networkservices.googleapis.com%2Fgateway_requests" AND resource.labels.gateway_name="${short(gateway)}"`;
   return {
@@ -251,9 +272,12 @@ export function gatewayLogs(ctx: Ctx, gateway: string, since: string): GatewayLo
     filter,
     entries,
     counts,
-    truncated: false,
+    // Like a live dry-run gateway: the newest entries were mostly platform calls, and the platform-free second query
+    // covered the rest of the window.
+    truncated: dry,
+    checked_truncated: false,
     console_url: `https://console.cloud.google.com/logs/query;query=${encodeURIComponent(filter)}?project=${encodeURIComponent(w.GP)}`,
-    notes: [`Mock log entries (since ${since}).`],
+    notes: [`Mock log entries (since ${since}).`, ...(dry ? ["Older platform calls (aiplatform*.googleapis.com, IPv4 hosts) were left out; every non-platform entry of the window was checked."] : [])],
     errors: [],
     dry_run: dry,
   };
@@ -440,11 +464,12 @@ function inverse(w: World, i: Intent): Intent | Intent[] | null {
   switch (i.kind) {
     case "grant": {
       const cond = conditionFor(i.access);
-      return { id: id(), kind: "revoke", source: i.source, destination: i.destination, access: { mode: i.access?.mode ?? "all", title: cond?.title ?? "" } };
+      return { id: id(), kind: "revoke", source: i.source, destination: i.destination, access: cond ? { mode: "custom", expression: cond.expression, title: cond.title } : { mode: "all" } };
     }
     case "revoke": {
       const cur = w.inventory.access[i.destination?.name ?? ""] ?? [];
-      const removed = cur.filter((b) => b.member === i.source?.principal && (i.access?.title === undefined || (b.condition?.title ?? "") === i.access.title));
+      const want = conditionFor(i.access);
+      const removed = cur.filter((b) => b.member === i.source?.principal && sameCond(b.condition, want));
       return removed.map((b) => ({
         id: id(),
         kind: "grant" as const,

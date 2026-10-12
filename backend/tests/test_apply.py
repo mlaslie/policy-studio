@@ -308,7 +308,88 @@ def test_revoke_precision(client, gcp, adc):
     assert f["state"] == "verified"
     after = gcp.iap[MCP_RES]["bindings"]
     assert after == [before[0], before[2], before[3]]                  # only the conditional 999 binding went
-    assert f["undo"]["kind"] == "grant" and f["undo"]["access"] == {"mode": "read_only_hint", "title": "ro"}
+    # the undo restores the removed binding verbatim (exact expression and title)
+    assert f["undo"]["kind"] == "grant" and f["undo"]["access"] == {"mode": "custom", "expression": F.RO_EXPR,
+                                                                   "title": "ro"}
+
+
+# A hand-written tools condition without the '' branch: classify() would regenerate it with '' (a different binding).
+HAND_TOOLS = "api.getAttribute('iap.googleapis.com/mcp.toolName', '') in ['get_ticket']"
+
+
+def revoke_from_grant(g: dict, iid: str) -> dict:
+    """What the UI builds from a /audit Grant (lib/grants.ts grantToIntent(g, ..., "revoke")): the binding's exact
+    condition as access mode "custom", or mode "all" when it has none."""
+    c = g.get("condition")
+    return {"id": iid, "kind": "revoke", "source": {"type": "custom", "principal": g["member"], "label": "x"},
+            "destination": {"kind": g["resource_kind"], "id": g["resource"].rsplit("/", 1)[-1],
+                            "name": g["resource"], "label": g["resource_label"]},
+            "access": {"mode": "custom", "expression": c["expression"], "title": c["title"]} if c else {"mode": "all"}}
+
+
+def audit_grant(client, member, expr=None):
+    gs = client.get("/api/studio/audit", params={**Q, "refresh": 1}).json()["grants"]
+    return next(g for g in gs if g["resource"] == F.MCP and g["member"] == member
+                and ((g.get("condition") or {}).get("expression") == expr))
+
+
+@pytest.mark.parametrize("access,expr", [
+    ({"mode": "read_only_hint"}, READ_ONLY_EXPRESSION),
+    ({"mode": "tools", "tools": ["get_ticket"]}, "api.getAttribute('iap.googleapis.com/mcp.toolName', '') in "
+                                                 "['get_ticket', '']"),
+    ({"mode": "all"}, None),
+])
+def test_grant_then_revoke_from_read_grant(client, gcp, adc, access, expr):
+    """Grant (with or without a condition), read it back through /audit, revoke what was read: verified and gone,
+    with the policy's other bindings untouched. Also the same member's other binding stays."""
+    p = F.principal("222")
+    before = json.loads(json.dumps(gcp.iap[MCP_RES]["bindings"]))
+    other = {"mode": "all"} if expr else {"mode": "read_only_hint"}
+    for iid, acc in (("g", access), ("o", other)):
+        assert final(run(client, [grant_intent(iid, access=acc)]))[iid]["state"] == "verified"
+    g = audit_grant(client, p, expr)
+    it = revoke_from_grant(g, "r")
+    assert client.post("/api/studio/diff", json={"context": CTX, "intents": [it]}).json()["items"][0]["status"] \
+        == "remove"
+    item = client.post("/api/studio/render", json={"context": CTX, "intents": [it]}).json()["items"][0]
+    assert item["anatomy"]["condition"] == expr and "remove-iam-policy-binding" in item["outputs"]["gcloud"]
+    f = final(run(client, [it], ack=True))["r"]
+    assert f["state"] == "verified", f
+    mine = [b for b in gcp.iap[MCP_RES]["bindings"] if p in b["members"]]
+    assert [(b.get("condition") or {}).get("expression") for b in mine] == \
+        [(F.RO_EXPR if other["mode"] == "read_only_hint" else None)]           # only the revoked binding went
+    assert [b for b in gcp.iap[MCP_RES]["bindings"] if p not in b["members"]] == before
+    # undo puts the same binding back
+    assert final(run(client, [f["undo"]]))[f["undo"]["id"]]["state"] == "verified"
+    assert audit_grant(client, p, expr)["condition"] == g.get("condition")
+
+
+def test_revoke_without_access_misses_conditional_binding(client, gcp, adc):
+    """The bug the exact access fixes: a revoke with no access means the unconditional binding, so a conditional
+    grant isn't found ("Not granted")."""
+    g = audit_grant(client, F.principal("999"), F.RO_EXPR)
+    it = revoke_from_grant(g, "r")
+    del it["access"]
+    f = final(run(client, [it], ack=True))["r"]
+    assert f["state"] == "skipped" and "Not granted" in f["detail"] and not gcp.writes
+
+
+def test_audit_revoke_fix_keeps_exact_condition(client, gcp, adc):
+    """A grant whose condition doesn't round-trip through classify() (no '' branch): the audit's
+    revoke fix carries it verbatim, renders it, and removes it."""
+    gcp.iap[MCP_RES]["bindings"].append({"role": "roles/iap.egressor", "members": ["allUsers"],
+                                         "condition": {"title": "hand", "expression": HAND_TOOLS}})
+    a = client.get("/api/studio/audit", params=Q).json()
+    fix = next(f["fix"] for f in a["findings"] if f["fix"] and f["fix"]["kind"] == "revoke"
+               and f["fix"]["source"]["principal"] == "allUsers" and f["resource"] == F.MCP)
+    assert {k: v for k, v in fix["access"].items() if v is not None} == \
+        {"mode": "custom", "expression": HAND_TOOLS, "title": "hand"}
+    item = client.post("/api/studio/render", json={"context": CTX, "intents": [fix]}).json()["items"][0]
+    assert item["anatomy"]["condition"] == HAND_TOOLS and "only these tools" in item["english"]
+    f = final(run(client, [fix], ack=True))[fix["id"]]
+    assert f["state"] == "verified", f
+    assert not [b for b in gcp.iap[MCP_RES]["bindings"] if "allUsers" in b["members"]]
+    assert f["undo"]["access"] == {"mode": "custom", "expression": HAND_TOOLS, "title": "hand"}
 
 
 def test_revoke_absent_is_skipped(client, gcp, adc):

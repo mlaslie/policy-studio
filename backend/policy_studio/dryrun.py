@@ -15,6 +15,10 @@ each allowed entry Policy Studio works out the answer itself:
                jsonPayload.agentGatewayInfo.mcpInfo.parameter; other calls carry no tool name, i.e. ''). Any other
                condition, a tool missing from the inventory, a group / domain member or an unreadable IAP policy
                gives "unknown", never would_deny.
+  platform     an entry with no Agent Registry resource whose host is platform traffic (logs.is_platform: an IP
+               literal such as 240.0.0.2:443, *.google.internal, *.googleapis.com) is "platform": the agent runtime's
+               own calls, which no roles/iap.egressor grant names, so they're neither checked nor "unknown". Platform
+               hosts that are registered (an aiplatform endpoint) are checked like any destination.
 Grants above the Agent Registry (project, folder, organization) aren't read.
 """
 from __future__ import annotations
@@ -81,7 +85,10 @@ def _cond_text(b: Binding) -> str:
 
 
 def check(entry: dict[str, Any], caller: Optional[Caller], inv: Optional[Inventory]) -> tuple[str, str]:
-    """(would_deny | allowed | unknown, reason) for an allowed entry of a dry-run egress gateway."""
+    """(would_deny | allowed | unknown | platform, reason) for an allowed entry of a dry-run egress gateway."""
+    if not entry.get("registry_resource") and entry.get("platform"):
+        return "platform", (f"Platform traffic ({entry.get('host')}): the agent runtime's own call, with no Agent "
+                            "Registry resource, so no roles/iap.egressor grant applies. Not checked.")
     if inv is None:
         return "unknown", "The grants couldn't be read (inventory unavailable), so this can't be checked."
     if caller is None:

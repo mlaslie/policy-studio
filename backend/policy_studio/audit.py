@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 from typing import Any, Optional
 
-from .conditions import EGRESSOR, classify
+from .conditions import EGRESSOR, exact_access
 from .english import PROJECT_AGENTS_RE, engine_principal_parts
 from .gcp.engines import REDEPLOY_SNIPPET
 from .model import (Access, Context, Destination, Finding, Gateway, GatewayRef, Grant, Intent, Inventory,
@@ -62,7 +62,7 @@ def revoke_intent(g: Grant, engines_by_principal: dict[str, Any]) -> Optional[In
     return Intent(id=_id("revoke", g.resource, g.member, g.condition.expression if g.condition else ""),
                   kind="revoke", source=_source(g.member, g.member_label, engines_by_principal),
                   destination=Destination(kind=g.resource_kind, id=rid, name=g.resource, label=g.resource_label),
-                  access=classify(g.condition))
+                  access=exact_access(g.condition))
 
 
 def _project_number(inv: Inventory, ctx: Optional[Context]) -> str:

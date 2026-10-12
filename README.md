@@ -149,7 +149,10 @@ Studio computes them from each caller's current `roles/iap.egressor` grants on t
 "all agents in project" grants count; `toolName in [...]` and read-only-hint conditions are evaluated; anything it
 can't evaluate is shown as "couldn't be checked", never as a denial; project-level grants aren't read). The log
 doesn't name the caller either: it's matched by the agent's mTLS client certificate (seen on its own Agent Runtime
-calls through the gateway), or is the only agent bound to the gateway.
+calls through the gateway), or is the only agent bound to the gateway. The agent runtime's own platform calls
+(`aiplatform*.googleapis.com`, IP-literal hosts such as `240.0.0.2:443`) are counted as "platform calls", not as
+calls that couldn't be checked; and since they can fill the newest entries, a second read-only query without them
+makes sure every other call of the window is checked (up to 1000).
 
 One extension can serve several gateways, and then they switch together. When it's shared, the switch offers
 **Change for all N gateways** or **Give this gateway its own extension** (recommended): a copy of the extension, then

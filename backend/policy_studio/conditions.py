@@ -81,6 +81,20 @@ def classify(cond: Optional[Condition | dict]) -> Access:
     return Access(mode="custom", expression=expr, title=title or None)
 
 
+def exact_access(cond: Optional[Condition | dict]) -> Access:
+    """An existing binding's condition, verbatim, as Access: mode "custom" with its exact expression and title (None
+    = unconditional, mode "all"). For revokes (and the undo of a revoke) built from a binding that exists: classify()
+    would regenerate the expression (a tools list gains '', quotes and order are normalized), and IAM matches a
+    binding by its exact expression, so the revoke would find nothing."""
+    if not cond:
+        return Access(mode="all")
+    expr = cond.get("expression", "") if isinstance(cond, dict) else cond.expression
+    title = cond.get("title", "") if isinstance(cond, dict) else cond.title
+    if not (expr or "").strip():
+        return Access(mode="all")
+    return Access(mode="custom", expression=expr, title=title or None)
+
+
 def same_condition(a: Optional[Condition | dict], b: Optional[Condition | dict]) -> bool:
     """IAM treats bindings as distinct by expression; compare expressions (whitespace-insensitive)."""
     ea = (a.get("expression") if isinstance(a, dict) else a.expression) if a else ""

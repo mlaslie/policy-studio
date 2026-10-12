@@ -8,7 +8,7 @@ import type { AccessMode, Binding, Grant, Intent, RenderItem, SourceType } from 
 import { Badge, Callout, KindIcon, Load, StepHeader, Tabs, Term } from "../components/ui";
 import { ToolBadge, useDestinations } from "./InventoryStep";
 import { WarningCallouts } from "./ModelArmorSetup";
-import { grantToIntent } from "../lib/grants";
+import { grantToIntent, revokesGrant } from "../lib/grants";
 import { CheckIcon, PlusIcon, RobotIcon, SearchIcon, WarnIcon } from "../components/Icons";
 import {
   READ_ONLY_EXPR,
@@ -183,7 +183,7 @@ function RevokePicker({ onStage, initial }: { onStage: (i: Intent) => void; init
   const grants: Grant[] = audit.data?.grants ?? [];
   useEffect(() => {
     if (!initial?.source || !initial.destination) return;
-    const idx = grants.findIndex((g) => g.member === initial.source!.principal && g.resource === initial.destination!.name);
+    const idx = grants.findIndex((g) => revokesGrant({ ...initial, kind: "revoke" }, g));
     if (idx >= 0) setSel(idx);
   }, [initial, grants]);
   const toIntent = (g: Grant): Intent => grantToIntent(g, engineByPrincipal, "revoke");
