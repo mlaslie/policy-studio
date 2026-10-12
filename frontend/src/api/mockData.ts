@@ -7,10 +7,12 @@
 // corp-ingress has no IAP policy (switch disabled).
 // Policy map cases (docs/VISUALIZATION_PLAN.md §11): a registry-wide grant (a service account on the whole Agent
 // Registry), a custom-CEL grant, a group grant, an endpoint whose IAP policy can't be read, and two agents bound for
-// ingress.
+// ingress. Region us-west1 is the scale scenario (mockScale.ts): about 50 agents and 500 grants, two egress gateways
+// (one in dry run), and corp-ingress with Model Armor on (screened Client-to-Agent lines).
 import type { AuditResp, Binding, ContextInfo, Ctx, EnforcementMode, Finding, Gateway, Grant, Inventory, MaSetup, McpTool, ModelArmorResp, ServiceAgent, Template, TemplateFilters } from "./types";
 import { READ_ONLY_EXPR, ROLE, toolsExpr } from "../lib/policy";
 import { NO_IDENTITY_REASON, REDEPLOY_SNIPPET } from "../components/Redeploy";
+import { SCALE_REGION, addScale, scaleFactor } from "./mockScale";
 
 export const MOCK_NUMBER = "482915730164";
 const ORG = "739104826351";
@@ -433,6 +435,12 @@ export function buildWorld(ctx: Ctx) {
   delete access[unreadable.name];
   const access_errors: Record<string, string> = { [unreadable.name]: "Permission denied on iap.webServices.getIamPolicy for this endpoint (403)." };
 
+  // us-west1: the scale scenario (§11.5–11.6) on top of the base world.
+  if (R === SCALE_REGION) {
+    addScale({ P, R, GP, reg, inventory: { engines, mcp_servers, endpoints, access }, gateways, iapExts, modelArmor, template, principalOf, engineName: eng, projectSet }, scaleFactor());
+    refreshEnforcement(gateways, iapExts);
+  }
+
   const labelOf = (name: string) =>
     name === reg ? "Agent Registry (all entries)" : (agents.find((a) => a.name === name)?.display_name ?? mcp_servers.find((m) => m.name === name)?.display_name ?? endpoints.find((e) => e.name === name)?.display_name ?? name);
   const kindOf = (name: string): Grant["resource_kind"] => (name === reg ? "registry" : name.includes("/mcpServers/") ? "mcp_server" : name.includes("/endpoints/") ? "endpoint" : "agent");
@@ -484,13 +492,17 @@ export function buildWorld(ctx: Ctx) {
       resource: hrdir.name,
       fix: { id: "fix-hr-ro", kind: "grant", source: { type: "engine", principal: hr.principal, label: hr.display_name, engine: hr.name }, destination: { kind: "mcp_server", id: hrdir.id, name: hrdir.name, label: hrdir.display_name }, access: { mode: "read_only_hint" } },
     },
-    {
-      severity: "medium",
-      title: "Ingress gateway corp-ingress has no Model Armor",
-      detail: "Prompts coming from Gemini Enterprise into Helpdesk Agent and HR Assistant are not screened for prompt injection or sensitive data.",
-      resource: ingress,
-      fix: { id: "fix-ma-ingress", kind: "model_armor_on", gateway: { name: ingress, direction: "ingress" } },
-    },
+    ...(modelArmor.gateways.find((g) => g.gateway === ingress)?.enabled
+      ? []
+      : [
+          {
+            severity: "medium" as const,
+            title: "Ingress gateway corp-ingress has no Model Armor",
+            detail: "Prompts coming from Gemini Enterprise into Helpdesk Agent and HR Assistant are not screened for prompt injection or sensitive data.",
+            resource: ingress,
+            fix: { id: "fix-ma-ingress", kind: "model_armor_on" as const, gateway: { name: ingress, direction: "ingress" as const } },
+          },
+        ]),
     {
       severity: "info",
       title: "A grant points at an agent that no longer exists",

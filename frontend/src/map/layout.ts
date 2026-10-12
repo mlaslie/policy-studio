@@ -1,7 +1,8 @@
 // Auto layout for the policy map (docs/VISUALIZATION_PLAN.md §7): fixed columns by type, left to right (callers →
 // gateways → destinations → Anywhere), like the demo's build.ts. Within a column: group by section, order with two
 // barycenter passes (destinations by the average y of the callers that reach them, then callers by the average y of
-// their destinations; ties by label, then id), and wrap a section of more than 25 nodes into sub-columns.
+// their destinations; ties by label, then id), and wrap a section of more than 25 nodes into sub-columns (callers
+// sooner, once there are more than 25 of them).
 // Deterministic: the same view gives the same positions.
 import { DEST_SECTIONS, NOGW, SECTION_LABEL, type Chip, type PEdge, type PNode, type PNodeKind } from "./graph";
 import type { MapView } from "./view";
@@ -13,6 +14,9 @@ const HEADER_H = 26;
 const SUB_GAP = 46;
 /** A section with more nodes than this wraps into sub-columns. */
 export const WRAP = 25;
+/** Callers wrap sooner once there are more than WRAP of them (engine nodes carry several chips, so they're tall): at
+ *  the §7 scale (about 50 agents) the column then stays about as tall as the destinations'. */
+export const CALLER_WRAP = 10;
 
 export const W: Record<PNodeKind, number> = {
   engine: 250,
@@ -120,19 +124,19 @@ export function layoutView(view: Pick<MapView, "nodes" | "edges">, opts: { expan
   const headers: Layout["headers"] = [];
 
   /** Stack sections top to bottom (sub-columns past WRAP), centered on 0. Writes y (center) and x offsets. */
-  const stack = (secs: [string, PNode[]][], colX: number, colW: number, withHeaders: boolean) => {
+  const stack = (secs: [string, PNode[]][], colX: number, colW: number, withHeaders: boolean, wrap = WRAP) => {
     const out: { id: string; top: number; dx: number }[] = [];
     const hdr: { section: string; top: number; w: number }[] = [];
     let top = 0;
     for (const [section, ns] of secs) {
       if (withHeaders) {
-        hdr.push({ section, top, w: colW + (Math.ceil(ns.length / WRAP) - 1) * (colW + SUB_GAP) });
+        hdr.push({ section, top, w: colW + (Math.ceil(ns.length / wrap) - 1) * (colW + SUB_GAP) });
         top += HEADER_H;
       }
       let tallest = 0;
-      for (let c = 0; c * WRAP < ns.length; c++) {
+      for (let c = 0; c * wrap < ns.length; c++) {
         let t = top;
-        for (const n of ns.slice(c * WRAP, (c + 1) * WRAP)) {
+        for (const n of ns.slice(c * wrap, (c + 1) * wrap)) {
           out.push({ id: n.id, top: t, dx: c * (colW + SUB_GAP) });
           t += h(n) + GAP_Y;
         }
@@ -164,21 +168,24 @@ export function layoutView(view: Pick<MapView, "nodes" | "edges">, opts: { expan
   const cw = colW("callers") || W.engine;
   const gw = colW("gateways") || W.gateway;
   const dw = colW("dests") || W.endpoint;
-  const X = { callers: 0, gateways: cw + GAP_X, dests: cw + GAP_X + gw + GAP_X };
+  const cwrap = callerIds.size > WRAP ? CALLER_WRAP : WRAP;
+  const callerCols = Math.max(1, ...callerSecs.map(([, ns]) => Math.ceil(ns.length / cwrap)));
+  const callersW = callerCols * cw + (callerCols - 1) * SUB_GAP;
+  const X = { callers: 0, gateways: callersW + GAP_X, dests: callersW + GAP_X + gw + GAP_X };
   const subCols = Math.max(1, ...destSecs.map(([, ns]) => Math.ceil(ns.length / WRAP)));
   const sinkX = X.dests + subCols * dw + (subCols - 1) * SUB_GAP + GAP_X;
   const headed = (secs: [string, PNode[]][]) => secs.length > 1 || secs.some(([s]) => s !== "clients");
 
   // ---------- two barycenter passes ----------
-  stack(callerSecs, X.callers, cw, false);
+  stack(callerSecs, X.callers, cw, false, cwrap);
   for (let pass = 0; pass < 2; pass++) {
     destSecs = order(destSecs, 1);
     stack(destSecs, X.dests, dw, false);
     callerSecs = order(callerSecs, 0);
-    stack(callerSecs, X.callers, cw, false);
+    stack(callerSecs, X.callers, cw, false, cwrap);
   }
   headers.length = 0;
-  stack(callerSecs, X.callers, cw, headed(callerSecs));
+  stack(callerSecs, X.callers, cw, headed(callerSecs), cwrap);
   stack(destSecs, X.dests, dw, true);
 
   // ---------- gateways: centered on the agents behind them, then pushed apart ----------

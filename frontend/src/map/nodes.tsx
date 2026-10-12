@@ -109,6 +109,9 @@ const GatewayNode = memo(({ id, data }: NodeProps<MNode>) => {
   const none = n.kind === "no_gateway";
   const ma = n.modelArmor;
   const maTitle = ma?.enabled ? [`Model Armor${ma.dryRun ? " (dry run: screening, not blocking)" : ""}${ma.template ? `: template ${ma.template}` : ""}`, ...(ma.summary ?? [])].join("\n") : undefined;
+  // A staged Model Armor change: a pending shield (dashed, with a clock), struck through when it's turned off.
+  const shield = n.pending?.shield;
+  const shieldTitle = shield ? `Model Armor ${shield.to === "on" ? "on" : "off"} (staged)${shield.template ? `: template ${shield.template}` : ""}` : undefined;
   return (
     <div className={cls(data, "node-gateway", none ? "faded" : "attached", n.mode === "DRY_RUN" && n.sub?.startsWith("Egress") && "dry")}>
       <Handles />
@@ -125,10 +128,19 @@ const GatewayNode = memo(({ id, data }: NodeProps<MNode>) => {
         </div>
       </div>
       <Chips chips={n.chips} />
-      {ma?.enabled && (
-        <div className={`ma-shield ${ma.dryRun ? "outlined" : ""}`} title={maTitle} aria-label={maTitle}>
+      {shield ? (
+        <div className={`ma-shield pending-${shield.to}`} title={shieldTitle} aria-label={shieldTitle}>
           <ShieldIcon size={20} />
+          <span className="ma-shield-clock">
+            <ClockIcon size={10} />
+          </span>
         </div>
+      ) : (
+        ma?.enabled && (
+          <div className={`ma-shield ${ma.dryRun ? "outlined" : ""}`} title={maTitle} aria-label={maTitle}>
+            <ShieldIcon size={20} />
+          </div>
+        )
       )}
     </div>
   );

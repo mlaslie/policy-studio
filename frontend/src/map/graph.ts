@@ -78,7 +78,9 @@ export interface PNode {
   skills?: string[];
   /** access_errors[D]: the IAP policy couldn't be read (no lines are guessed). */
   unreadable?: string;
-  /** Gateway: IAP enforcement mode and Model Armor. */
+  /** Gateway: its direction (egress = Agent-to-Anywhere, ingress = Client-to-Agent), IAP enforcement mode and Model
+   *  Armor. */
+  gwType?: Direction;
   mode?: EnforcementMode | null;
   shared?: string[];
   modelArmor?: { enabled: boolean; template?: string; summary?: string[]; dryRun?: boolean } | null;
@@ -95,7 +97,8 @@ export interface PNode {
   /** Lowercase label + id + sub, for search. */
   search: string;
   /** Staged-change view (diff.ts): what the cart changes on this node, and the cart intents that do it. */
-  pending?: { text: string[]; removed?: boolean; intents: string[] };
+  /** shield: Model Armor turned on or off by the cart (drawn as a pending shield on the gateway). */
+  pending?: { text: string[]; removed?: boolean; intents: string[]; shield?: { to: "on" | "off"; template?: string } };
 }
 
 export interface PEdge {
@@ -154,6 +157,9 @@ export interface GraphInput {
   /** Add group / public / registry-wide grants to the focused agent's lines (default true). */
   inherited?: boolean;
 }
+
+/** The tooltip of an ingress gateway's IAP policy (§6.3, open question 3). */
+export const IAP_INGRESS_NOTE = "Configured; Client-to-Agent doesn't check caller identity.";
 
 /** Registry-wide IAM key: projects/<GP>/locations/<R>. */
 export const REGISTRY_KEY_RE = /^projects\/[^/]+\/locations\/[^/]+$/;
@@ -244,8 +250,9 @@ function gatewayNode(input: GraphInput, g: Gateway): PNode {
     else chips.push({ text: "No IAP policy", tone: "neutral", title: g.enforcement?.reason ?? "Nothing is checked against roles/iap.egressor grants." });
   } else {
     chips.push({ text: "In the path", tone: "blue", title: "Client-to-Agent gateways screen content; they don't check caller identity." });
-    if (g.authz_policies.some((p) => p.provider === "iap" && p.profile === "REQUEST_AUTHZ"))
-      chips.push({ text: "IAP policy configured", tone: "neutral", title: "Configured; Client-to-Agent doesn't check caller identity." });
+    // shown exactly as configured (a shared IAP extension can put one here), but it isn't an identity check
+    const iap = g.authz_policies.find((p) => p.provider === "iap" && p.profile === "REQUEST_AUTHZ");
+    if (iap) chips.push({ text: `IAP REQUEST_AUTHZ${iap.enforcement ? ` · ${iap.enforcement === "DRY_RUN" ? "dry run" : "enforce"}` : ""}`, tone: "neutral", title: IAP_INGRESS_NOTE });
   }
   if (ma?.enabled) chips.push({ text: ma.dryRun ? "Model Armor (dry run)" : "Model Armor", tone: "orange", title: ma.template ? `Template ${ma.template}` : undefined });
   if (g.enforcement?.shared_with.length) chips.push({ text: "Shared extension", tone: "neutral", title: `The IAP extension also serves ${g.enforcement.shared_with.map(short).join(", ")}: they change together.` });
@@ -258,6 +265,7 @@ function gatewayNode(input: GraphInput, g: Gateway): PNode {
     section: "gateways",
     chips,
     gateway: g.name,
+    gwType: g.type,
     mode,
     shared: g.enforcement?.shared_with ?? [],
     modelArmor: ma,

@@ -23,7 +23,7 @@ import { ClockIcon, CloseIcon, ExpandIcon, SearchIcon, ShieldIcon } from "../com
 import { useStudio } from "../store";
 import { plural } from "../lib/util";
 import { buildPolicyGraph, type Direction, type PEdge, type PolicyGraph, type Verdict } from "./graph";
-import { DEFAULT_DIRECTION, DEFAULT_FILTERS, type Affiliation, type DestType, type MapFilters, viewOf } from "./view";
+import { DEFAULT_DIRECTION, DEFAULT_FILTERS, TOO_MANY_LINES, type Affiliation, type DestType, type MapFilters, viewOf } from "./view";
 import { layoutView } from "./layout";
 import { VERDICT_LABEL, edgeAria, expandedMcp, toFlow, type MNode } from "./toFlow";
 import { nodeTypes, MapActions } from "./nodes";
@@ -36,8 +36,8 @@ import { posKey, usePositions } from "./usePositions";
 import { findFocusEdge, type MapFocus } from "./focus";
 
 const PAD = { top: "40px", bottom: "40px", left: "24px", right: "40px" } as const;
-/** Combined lines past this suggest narrowing the filters (§7). */
-const TOO_MANY = 400;
+/** Low enough for Fit to show a map of the §7 scale (about 100 destinations) whole. */
+const MIN_ZOOM = 0.08;
 
 const DEST_TYPES: { id: DestType; label: string }[] = [
   { id: "a2a", label: "A2A agents" },
@@ -549,7 +549,7 @@ function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
             The gateway screens content with Model Armor. Who may call an agent is decided by the agent's Agent Runtime IAM, which Policy Studio doesn't read, so callers are shown as “Any allowed caller”.
           </Callout>
         )}
-        {view.lines > TOO_MANY && (
+        {view.lines > TOO_MANY_LINES && (
           <Callout tone="warn" title={`${view.lines} lines on the map`}>
             Narrow the filters (a gateway, fewer destination types, or one agent) to keep it readable.
           </Callout>
@@ -596,7 +596,7 @@ function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
                 ariaLabelConfig={ARIA}
                 fitView
                 fitViewOptions={{ padding: PAD, maxZoom: 1.15 }}
-                minZoom={0.2}
+                minZoom={MIN_ZOOM}
                 maxZoom={2}
                 zoomOnDoubleClick={false}
                 onlyRenderVisibleElements

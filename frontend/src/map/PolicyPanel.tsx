@@ -1,7 +1,8 @@
-// The policy panel (docs/VISUALIZATION_PLAN.md §8, §9): a glass overlay on the right of the canvas with the details
-// of a clicked line or node and what you can do about it. One card per Reason (the binding, its condition and its
-// context). Every action only stages: Revoke, Change access (one `modify`), Limit to this agent, Allow…, Bind; the
-// footer says so and leads to Review. Esc closes it and focus returns to the line or node it was opened from (a line's
+// The policy panel (docs/VISUALIZATION_PLAN.md §6.3, §8, §9): a glass overlay on the right of the canvas with the
+// details of a clicked line or node and what you can do about it. One card per Reason (the binding, its condition and
+// its context); a Client-to-Agent line has no Reason, so it shows its gateway and Model Armor instead. Every action
+// only stages: Revoke, Change access (one `modify`), Limit to this agent, Allow…, Bind, Unbind, Model Armor on or off;
+// the footer says so and leads to Review. Esc closes it and focus returns to the line or node it was opened from (a line's
 // panel takes focus when it opens; a node's doesn't, so the arrow keys keep moving the node).
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import type { Engine, Gateway, Intent, Inventory } from "../api/types";
@@ -16,13 +17,14 @@ import { AccessChooser, accessOf, blocking, draftLint, draftOf, type AccessDraft
 import { ArrowIcon, BookIcon, CheckIcon, ClockIcon, CloseIcon, PencilIcon, TrashIcon, WarnIcon } from "../components/Icons";
 import { checksFor, type Check } from "../lib/checks";
 import { grantToIntent, revokesGrant } from "../lib/grants";
-import { KIND_LABEL, ROLE, accessFromCondition, accessWords, intentEnglish, intentKey } from "../lib/policy";
+import { KIND_LABEL, ROLE, accessFromCondition, accessWords, intentEnglish, intentKey, shortName } from "../lib/policy";
+import { TemplateCard } from "../steps/ModelArmorStep";
 import { plural } from "../lib/util";
 import type { PEdge, PNode, Reason } from "./graph";
 import { evaluateTools } from "./evaluate";
 import { PENDING_WORD, VERDICT_LABEL, VIA_LABEL } from "./toFlow";
 import { pendingText } from "./diff";
-import { allowFor, bindFor, isGroupGrant, limitToAgent, modifyFor, reachedBy, reasonGrant, revokeFor, sameAccess } from "./actions";
+import { allowFor, bindFor, ingressInfo, isGroupGrant, limitToAgent, modifyFor, reachedBy, reasonGrant, revokeFor, sameAccess } from "./actions";
 
 type Props = {
   edge: PEdge | null;
@@ -160,7 +162,7 @@ function EdgeDetails({ edge, inv, gateways, nodeOf, label }: { edge: PEdge; inv:
           ) : null}
         </dl>
       )}
-      {ma?.enabled && ma.summary?.length ? (
+      {edge.direction === "egress" && ma?.enabled && ma.summary?.length ? (
         <Disclosure summary="Model Armor filters">
           <ul className="plain-list small">
             {ma.summary.map((s) => (
@@ -177,7 +179,7 @@ function EdgeDetails({ edge, inv, gateways, nodeOf, label }: { edge: PEdge; inv:
           </button>
         </Callout>
       )}
-      {edge.direction === "ingress" && <p className="small">There's no allow policy to show: a Client-to-Agent gateway screens content, it doesn't check who calls.</p>}
+      {edge.direction === "ingress" && <IngressDetails edge={edge} inv={inv} gateways={gateways} />}
 
       {/* default deny: Allow… */}
       {edge.implicit && caller && dest && (
@@ -206,6 +208,182 @@ function EdgeDetails({ edge, inv, gateways, nodeOf, label }: { edge: PEdge; inv:
         </>
       )}
     </>
+  );
+}
+
+/** Lists of agents longer than this are folded (a Client-to-Agent lane can hold dozens). */
+const FOLD = 6;
+
+/** A Client-to-Agent line (§6.3): the gateway, its Model Armor template (summary and filters), an IAP policy exactly as
+ *  configured, and what can be staged: Model Armor on or off (or the guided setup), Unbind, Bind. There's no allow
+ *  policy: the gateway screens content, it doesn't check who calls. */
+function IngressDetails({ edge, inv, gateways }: { edge: PEdge; inv: Inventory; gateways: Gateway[] }) {
+  const { modelArmor, cart, addIntents, openMaSetup } = useStudio();
+  const info = useMemo(() => ingressInfo(edge, inv, gateways, modelArmor.data), [edge, inv, gateways, modelArmor.data]);
+  const { gateway: gw, ma, maAction } = info;
+  const tmpl = ma?.template ?? null;
+  const maDry = !!gw?.authz_policies.some((p) => p.profile === "CONTENT_AUTHZ" && p.enforcement === "DRY_RUN");
+  const maStaged = gw ? cart.find((i) => (i.kind === "model_armor_on" || i.kind === "model_armor_off") && i.gateway?.name === gw.name) : undefined;
+  const staged = (kind: Intent["kind"], engine: string) => cart.some((i) => i.kind === kind && i.engine === engine && i.gateway?.direction === "ingress");
+  const fold = (n: number, body: ReactNode, what: string) => (n > FOLD ? <Disclosure summary={`${plural(n, "agent")} ${what}`}>{body}</Disclosure> : body);
+  return (
+    <>
+      <Callout tone="info" title="No allow policy to show here">
+        A Client-to-Agent gateway doesn't check caller identity: it screens content with Model Armor. Who may call an agent is decided by the agent's Agent Runtime IAM, which Policy Studio doesn't read.
+      </Callout>
+      <dl className="pmap-dl">
+        <dt>Gateway</dt>
+        <dd>
+          {gw ? (
+            <>
+              <b>{gw.id}</b> · Client-to-Agent
+            </>
+          ) : (
+            "None: calls reach the agent directly and nothing is screened"
+          )}
+        </dd>
+        {gw && (
+          <>
+            <dt>Model Armor</dt>
+            <dd>{ma?.enabled ? `On${maDry ? " (dry run: screening, not blocking)" : ""}${tmpl ? `, template ${tmpl.id}` : ""}` : "Off: prompts and answers aren't screened"}</dd>
+          </>
+        )}
+        {info.iap && (
+          <>
+            <dt>IAP policy</dt>
+            <dd>
+              <Badge tone="neutral" title="Configured; Client-to-Agent doesn't check caller identity.">
+                IAP REQUEST_AUTHZ{info.iap.enforcement ? ` · ${info.iap.enforcement === "DRY_RUN" ? "dry run" : "enforce"}` : ""}
+              </Badge>
+              <div className="small muted">Configured; Client-to-Agent doesn't check caller identity.</div>
+              <div className="mono tiny muted pmap-wrap">{shortName(info.iap.name)}</div>
+            </dd>
+          </>
+        )}
+      </dl>
+      {ma?.enabled && tmpl && (
+        <>
+          {tmpl.summary?.length ? (
+            <ul className="plain-list small" aria-label={`What template ${tmpl.id} screens`}>
+              {tmpl.summary.map((x) => (
+                <li key={x}>{x}</li>
+              ))}
+            </ul>
+          ) : null}
+          <Disclosure summary={`Filters of template ${tmpl.id}`}>
+            <TemplateCard t={tmpl} />
+          </Disclosure>
+        </>
+      )}
+      {ma?.enabled && !tmpl && <p className="small warn-text">The Model Armor policy is attached, but its template couldn't be read.</p>}
+
+      {gw && maAction && (
+        <div className="pmap-actions">
+          {maStaged ? (
+            <Badge tone={maStaged.kind === "model_armor_off" ? "red" : "blue"}>
+              <ClockIcon size={11} /> {maStaged.kind === "model_armor_on" ? "Model Armor on staged" : "Model Armor off staged"}
+            </Badge>
+          ) : maAction.kind === "off" ? (
+            <Tip tip={`Stage turning off Model Armor on ${gw.id} (removes its content-screening policy): prompts reach its agents unscreened. Apply asks you to confirm it. Nothing changes until you Review and Apply.`}>
+              <button type="button" className="btn btn-small btn-danger" onClick={() => addIntents([maAction.intent])}>
+                Turn Model Armor off
+              </button>
+            </Tip>
+          ) : maAction.kind === "on" ? (
+            <Tip tip={`Stage turning on Model Armor for ${gw.id} (attaches a content-screening policy). Nothing changes until you Review and Apply.`}>
+              <button type="button" className="btn btn-small btn-primary" onClick={() => addIntents([maAction.intent])}>
+                Turn Model Armor on
+              </button>
+            </Tip>
+          ) : (
+            <Tip tip="This region has no Model Armor authz extension yet. The guided setup stages the template, the extension and the service agent roles, and turning it on here.">
+              <button type="button" className="btn btn-small btn-tonal" onClick={openMaSetup}>
+                Set up Model Armor <ArrowIcon size={13} />
+              </button>
+            </Tip>
+          )}
+        </div>
+      )}
+
+      {info.bound.length > 0 &&
+        fold(
+          info.bound.length,
+          <ul className="pmap-agents">
+            {info.bound.map(({ engine, unbind }) => (
+              <li key={engine.name}>
+                <span className="grow small">
+                  <b>{engine.display_name}</b> is bound to {gw!.id}
+                </span>
+                {staged("unbind_gateway", engine.name) ? (
+                  <Badge tone="red">
+                    <ClockIcon size={11} /> Unbind staged
+                  </Badge>
+                ) : (
+                  <Tip tip={`Stage unbinding ${engine.display_name} from ${gw!.id}: calls then reach it directly, unscreened. The agent redeploys when it's applied, and Apply asks you to confirm it.`}>
+                    <button type="button" className="btn btn-small btn-danger" onClick={() => addIntents([unbind])}>
+                      Unbind
+                    </button>
+                  </Tip>
+                )}
+              </li>
+            ))}
+          </ul>,
+          `bound to ${gw?.id ?? "the gateway"}`,
+        )}
+      {info.unbound.length > 0 &&
+        fold(
+          info.unbound.length,
+          <ul className="pmap-agents">
+            {info.unbound.map(({ engine, why }) => (
+              <IngressBind key={engine.name} engine={engine} why={why} ingress={info.ingress} prefer={gw?.name} staged={staged("bind_gateway", engine.name)} />
+            ))}
+          </ul>,
+          "not bound for ingress",
+        )}
+    </>
+  );
+}
+
+/** Bind an agent that has no ingress gateway: a gateway choice when there's more than one; disabled with the reason
+ *  (and the redeploy help) when it can't be bound. */
+function IngressBind({ engine, why, ingress, prefer, staged }: { engine: Engine; why: string | null; ingress: Gateway[]; prefer?: string; staged: boolean }) {
+  const { addIntents } = useStudio();
+  const [gw, setGw] = useState(prefer && ingress.some((g) => g.name === prefer) ? prefer : (ingress[0]?.name ?? ""));
+  const target = ingress.find((g) => g.name === gw);
+  return (
+    <li>
+      <span className="grow small">
+        <b>{engine.display_name}</b> has no ingress gateway
+        {why && (
+          <span className="warn-text">
+            {" "}
+            <WarnIcon size={12} /> {why}
+          </span>
+        )}
+      </span>
+      {staged ? (
+        <Badge tone="blue">
+          <ClockIcon size={11} /> Binding staged
+        </Badge>
+      ) : (
+        <>
+          {ingress.length > 1 && (
+            <select className="pmap-select" value={gw} onChange={(e) => setGw(e.target.value)} aria-label={`Ingress gateway for ${engine.display_name}`} disabled={!!why}>
+              {ingress.map((g) => (
+                <option key={g.name} value={g.name}>
+                  {g.id}
+                </option>
+              ))}
+            </select>
+          )}
+          <Tip tip={why ?? `Stage binding ${engine.display_name} to ${target?.id}: calls to it then go through the gateway. The agent redeploys when it's applied.`}>
+            <button type="button" className="btn btn-small btn-primary" disabled={!!why || !target} onClick={() => addIntents([bindFor(engine, target!, "ingress")])}>
+              Bind{ingress.length > 1 ? "" : ` to ${target?.id ?? "a gateway"}`}
+            </button>
+          </Tip>
+        </>
+      )}
+    </li>
   );
 }
 
@@ -587,14 +765,23 @@ function NodeDetails({ node, inv, gateways, label }: { node: PNode; inv: Invento
     body = (
       <>
         <dl className="pmap-dl">
-          <dt>Enforcement</dt>
-          <dd>{node.mode === "ENFORCE" ? "Enforcing: default deny" : node.mode === "DRY_RUN" ? "Dry run: nothing is blocked" : "No IAP policy"}</dd>
+          {node.gwType === "ingress" ? (
+            <>
+              <dt>Caller identity</dt>
+              <dd>Not checked: a Client-to-Agent gateway screens content{node.mode ? `. Its IAP policy (${node.mode === "DRY_RUN" ? "dry run" : "enforce"}) is configured, not an identity check here` : ""}</dd>
+            </>
+          ) : (
+            <>
+              <dt>Enforcement</dt>
+              <dd>{node.mode === "ENFORCE" ? "Enforcing: default deny" : node.mode === "DRY_RUN" ? "Dry run: nothing is blocked" : "No IAP policy"}</dd>
+            </>
+          )}
           <dt>Model Armor</dt>
           <dd>{node.modelArmor?.enabled ? `On${node.modelArmor.dryRun ? " (dry run)" : ""}${node.modelArmor.template ? `, template ${node.modelArmor.template}` : ""}` : "Off"}</dd>
         </dl>
         <div className="pmap-actions">
           <button type="button" className="btn btn-small btn-tonal" onClick={() => openGateway(node.id)}>
-            {node.mode === "DRY_RUN" ? "Enforce it on the gateway card" : "Open the gateway card"} <ArrowIcon size={13} />
+            {node.mode === "DRY_RUN" && node.gwType !== "ingress" ? "Enforce it on the gateway card" : "Open the gateway card"} <ArrowIcon size={13} />
           </button>
         </div>
       </>

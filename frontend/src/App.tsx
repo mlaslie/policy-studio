@@ -3,6 +3,7 @@ import { Suspense, lazy, useEffect, useState, type CSSProperties } from "react";
 import { STEPS, stepN, useStudio, type StepKey } from "./store";
 import { IS_MOCK } from "./api/client";
 import { ago } from "./lib/util";
+import { mapBadge } from "./lib/mapBadge";
 import { CartButton } from "./panels/Cart";
 import { LearnPanel, useRailWidth } from "./panels/Learn";
 import { Tip } from "./components/Tooltip";
@@ -96,6 +97,8 @@ function useStepBadges(): Partial<Record<StepKey, { text: string; tone: string; 
     const i = inventory.data;
     b.inventory = { text: `${i.agents.filter((a) => a.kind === "a2a").length + i.mcp_servers.length + i.endpoints.length}`, tone: "neutral", title: "Registered destinations" };
   }
+  const onMap = mapBadge(cart);
+  if (onMap) b.map = onMap;
   if (cart.length) b.review = { text: `${cart.length}`, tone: "blue", title: "Staged items" };
   if (audit.data) {
     const high = audit.data.findings.filter((f) => f.severity === "high").length;

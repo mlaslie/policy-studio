@@ -20,6 +20,7 @@ const EGRESS = w0.gateways.find((g) => g.type === "egress")!;
 const INGRESS = w0.gateways.find((g) => g.type === "ingress")!;
 const hd = eng("Helpdesk Agent");
 const travel = eng("Travel Planner");
+const hr = eng("HR Assistant");
 const tickets = dest("Tickets MCP");
 const hrd = dest("HR Directory MCP");
 const src = (e = hd) => ({ type: "engine" as const, principal: e.principal, label: e.display_name, engine: e.name });
@@ -162,11 +163,68 @@ describe("diff: pending add, remove and change for each kind", () => {
     const on: Intent = { id: "on", kind: "model_armor_on", gateway: { name: INGRESS.name, direction: "ingress" } };
     const { merged } = staged([on], "ingress");
     expect(merged.edges.find((x) => x.id === `i:${INGRESS.name}|${hd.name}`)).toMatchObject({ pending: "change", before: "unscreened", verdict: "screened", intents: ["on"] });
-    expect(merged.nodes.find((n) => n.id === INGRESS.name)!.pending).toEqual({ text: ["Model Armor on (staged)"], intents: ["on"] });
+    expect(merged.nodes.find((n) => n.id === INGRESS.name)!.pending).toEqual({ text: ["Model Armor on (staged)"], intents: ["on"], shield: { to: "on", template: "corp-agent-shield" } });
     const off: Intent = { id: "off", kind: "model_armor_off", gateway: { name: EGRESS.name, direction: "egress" } };
     expect(staged([off]).merged.nodes.find((n) => n.id === EGRESS.name)!.pending?.text).toEqual(["Model Armor off (staged)"]);
   });
 
+});
+
+describe("diff: Client-to-Agent (§6.3)", () => {
+  /** us-east4 with Model Armor on for corp-ingress today. */
+  const screenedState = (): MapState => {
+    const s = structuredClone(state);
+    const m = s.modelArmor!.gateways.find((g) => g.gateway === INGRESS.name)!;
+    m.enabled = true;
+    m.template = s.modelArmor!.templates[0];
+    return s;
+  };
+  const stagedFrom = (st: MapState, cart: Intent[]) => {
+    const sim = simulate(st, cart);
+    const before = buildPolicyGraph({ inventory: st.inventory, gateways: st.gateways, modelArmor: st.modelArmor, direction: "ingress", ctx: CTX });
+    const after = buildPolicyGraph({ inventory: sim.inventory, gateways: sim.gateways, modelArmor: sim.modelArmor, direction: "ingress", ctx: CTX });
+    return mergeStaged(before, after, diffGraphs(before, after), cart, st.inventory, sim.effects);
+  };
+
+  it("Model Armor off: screened lines become unscreened; the gateway keeps a pending shield with today's template", () => {
+    const off: Intent = { id: "off", kind: "model_armor_off", gateway: { name: INGRESS.name, direction: "ingress" } };
+    const merged = stagedFrom(screenedState(), [off]);
+    expect(merged.edges.find((x) => x.id === `i:${INGRESS.name}|${hd.name}`)).toMatchObject({ pending: "change", before: "screened", verdict: "unscreened", intents: ["off"] });
+    expect(merged.edges.find((x) => x.id === `i:client:any|${INGRESS.name}`)).toMatchObject({ pending: "change", before: "screened", verdict: "unscreened", intents: ["off"] });
+    const gw = merged.nodes.find((n) => n.id === INGRESS.name)!;
+    expect(gw.modelArmor?.enabled).toBe(false);
+    expect(gw.pending).toEqual({ text: ["Model Armor off (staged)"], intents: ["off"], shield: { to: "off", template: "corp-agent-shield" } });
+  });
+
+  it("bind for ingress: the agent's direct line moves into the gateway lane (one pending change)", () => {
+    const b: Intent = { id: "b", kind: "bind_gateway", engine: travel.name, gateway: { name: INGRESS.name, direction: "ingress" } };
+    const { merged } = staged([b], "ingress");
+    const mine = merged.edges.filter((e) => e.caller === travel.name);
+    expect(mine).toHaveLength(1);
+    expect(mine[0]).toMatchObject({ id: `i:${INGRESS.name}|${travel.name}`, pending: "change", before: "direct", verdict: "unscreened", intents: ["b"] });
+    expect(merged.nodes.find((n) => n.id === travel.name)!.pending).toEqual({ text: ["Binding to corp-ingress staged"], intents: ["b"] });
+    // the client's line into the lane counts one more agent; the line into "No ingress gateway" one fewer
+    expect(merged.edges.find((e) => e.id === `i:client:any|${INGRESS.name}`)).toMatchObject({ pending: "change", label: "3 agents", beforeLabel: "2 agents", intents: ["b"] });
+    expect(merged.edges.find((e) => e.id === `i:client:any|${NOGW.ingress}`)).toMatchObject({ pending: "change", label: undefined, beforeLabel: "2 agents", intents: ["b"] });
+  });
+
+  it("unbind for ingress: the agent leaves the lane; screened today, direct after", () => {
+    const u: Intent = { id: "u", kind: "unbind_gateway", engine: hd.name, gateway: { name: INGRESS.name, direction: "ingress" } };
+    const merged = stagedFrom(screenedState(), [u]);
+    expect(merged.edges.filter((e) => e.caller === hd.name)).toEqual([expect.objectContaining({ id: `i:${NOGW.ingress}|${hd.name}`, pending: "change", before: "screened", verdict: "direct", intents: ["u"] })]);
+    expect(merged.nodes.find((n) => n.id === hd.name)!.pending?.text).toEqual(["Unbinding from corp-ingress staged"]);
+    // with Model Armor off staged too, the unbind alone is behind the agent's line (it leaves the gateway)
+    const off: Intent = { id: "off", kind: "model_armor_off", gateway: { name: INGRESS.name, direction: "ingress" } };
+    const both = stagedFrom(screenedState(), [off, u]);
+    expect(both.edges.find((e) => e.caller === hd.name)?.intents).toEqual(["u"]);
+    expect(both.edges.find((e) => e.caller === hr.name)).toMatchObject({ pending: "change", verdict: "unscreened", intents: ["off"] });
+    // an egress unbind of the same agent doesn't touch this view
+    const ue: Intent = { id: "ue", kind: "unbind_gateway", engine: hd.name, gateway: { name: EGRESS.name, direction: "egress" } };
+    expect(staged([ue], "ingress").merged.edges.some((e) => e.pending)).toBe(false);
+  });
+});
+
+describe("diff: views", () => {
   it("Changes only: just the pending lines, the trunks to them, and their nodes", () => {
     const g: Intent = { id: "g", kind: "grant", source: src(), destination: dst(hrd), access: { mode: "read_only_hint" } };
     const v = viewOf(staged([g]).merged, DEFAULT_FILTERS, null, { changesOnly: true });

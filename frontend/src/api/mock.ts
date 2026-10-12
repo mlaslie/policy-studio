@@ -143,11 +143,13 @@ export const context = (ctx: Ctx) => {
   const f = flags();
   const canWrite = f.mode === "apply" && f.adc !== "missing";
   const P = c.project;
-  // Write permissions share role grants, so the UI can show one command for several permissions.
+  // Write permissions share role grants, so the UI can show one command for several permissions. The read permission
+  // Apply also needs (read-back) is already in the list: it gains its role and purpose, it isn't listed twice.
   c.permissions = [
-    ...c.permissions.filter((p) => !p.permission.endsWith("setIamPolicy") && !p.permission.endsWith("reasoningEngines.update")),
+    ...c.permissions
+      .filter((p) => !p.permission.endsWith("setIamPolicy") && !p.permission.endsWith("reasoningEngines.update"))
+      .map((p) => (p.permission === "iap.webServices.getIamPolicy" ? { ...p, write: false, role: "roles/iap.admin", needed_for: `${p.needed_for}, and read grants back after Apply` } : p)),
     { permission: "iap.webServices.setIamPolicy", granted: canWrite, write: true, role: "roles/iap.admin", needed_for: "Apply grants and revokes", fix: `gcloud projects add-iam-policy-binding ${P} --member=user:alex.admin@example.com --role=roles/iap.admin` },
-    { permission: "iap.webServices.getIamPolicy", granted: true, write: false, role: "roles/iap.admin", needed_for: "Read back grants after Apply" },
     { permission: "aiplatform.reasoningEngines.update", granted: canWrite, write: true, role: "roles/aiplatform.admin", needed_for: "Bind and unbind agents to gateways", fix: `gcloud projects add-iam-policy-binding ${P} --member=user:alex.admin@example.com --role=roles/aiplatform.admin` },
     { permission: "aiplatform.reasoningEngines.get", granted: canWrite, write: true, role: "roles/aiplatform.admin", needed_for: "Read back gateway bindings after Apply", fix: `gcloud projects add-iam-policy-binding ${P} --member=user:alex.admin@example.com --role=roles/aiplatform.admin` },
     { permission: "networksecurity.authzPolicies.create", granted: canWrite, write: true, role: "roles/networksecurity.admin", needed_for: "Turn Model Armor on", fix: `gcloud projects add-iam-policy-binding ${P} --member=user:alex.admin@example.com --role=roles/networksecurity.admin` },

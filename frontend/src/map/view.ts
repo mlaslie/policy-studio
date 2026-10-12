@@ -34,6 +34,8 @@ export const DEFAULT_FILTERS: MapFilters = {
 };
 /** Default-deny lines drawn for the selected agent, at most (then "+N more"). */
 export const IMPLICIT_CAP = 60;
+/** Combined lines past this suggest narrowing the filters (§7). */
+export const TOO_MANY_LINES = 400;
 
 export interface MapView {
   nodes: PNode[];

@@ -2,11 +2,13 @@
 // the cart (simulate.ts), compared line by line. Pure.
 //
 // Lines are paired by id, except that an agent's default-deny line (x:<agent>|<dest>) pairs with its granted line
-// (a:<agent>|<dest>), and its trunk to a gateway with its direct line (a bind or unbind): a grant turns the red ✕ into
-// a pending add, a revoke turns the green line into a pending remove ("blocked by default" after). The merged graph
+// (a:<agent>|<dest>), and its trunk to a gateway with its direct line (a bind or unbind, in either direction): a grant
+// turns the red ✕ into a pending add, a revoke turns the green line into a pending remove ("blocked by default" after),
+// a bind or unbind is a pending change that moves the agent's lane. The merged graph
 // holds every line as it will be, plus the removed lines as they are today, each marked with its cart intents.
 import type { Engine, Intent, Inventory } from "../api/types";
 import type { Chip, PEdge, PNode, PolicyGraph, Verdict } from "./graph";
+import { NOGW } from "./ids";
 import { VERDICT_LABEL } from "./toFlow";
 
 export interface EdgeChange {
@@ -20,12 +22,15 @@ export interface GraphDiff {
   focus: EdgeChange[];
   /** Node id → what changes on it (lane, enforcement mode, Model Armor). */
   nodes: Map<string, string[]>;
+  /** Gateway id → Model Armor turned on or off by the cart (the pending shield). */
+  shields: Map<string, "on" | "off">;
 }
 
 /** The pairing key: default-deny and granted lines of one agent and destination are the same line; so are an agent's
- *  trunk and its direct line. */
+ *  trunk and its direct line, and (Client-to-Agent) its line from a gateway and from "No ingress gateway". */
 export function pairKey(e: PEdge): string {
   if (e.id.startsWith("x:")) return `a:${e.id.slice(2)}`;
+  if (e.direction === "ingress" && e.caller) return `lane:${e.caller}`;
   if (e.id.startsWith("trunk:") || (e.id.startsWith("direct:") && e.id !== "direct:nogw")) return `lane:${e.caller ?? e.source}`;
   return e.id;
 }
@@ -56,6 +61,7 @@ function compare(before: PEdge[], after: PEdge[]): EdgeChange[] {
 
 export function diffGraphs(before: PolicyGraph, after: PolicyGraph): GraphDiff {
   const nodes = new Map<string, string[]>();
+  const shields = new Map<string, "on" | "off">();
   const bn = new Map(before.nodes.map((n) => [n.id, n]));
   const label = (id: string | null | undefined) => (id ? (bn.get(id)?.label ?? after.nodes.find((n) => n.id === id)?.label ?? id.split("/").pop()!) : "");
   for (const n of after.nodes) {
@@ -64,10 +70,13 @@ export function diffGraphs(before: PolicyGraph, after: PolicyGraph): GraphDiff {
     const t: string[] = [];
     if (n.kind === "engine" && (o.gateway ?? null) !== (n.gateway ?? null)) t.push(n.gateway ? `Binding to ${label(n.gateway)} staged` : `Unbinding from ${label(o.gateway)} staged`);
     if (n.kind === "gateway" && (o.mode ?? null) !== (n.mode ?? null)) t.push(`${modeText(o.mode)} → ${modeText(n.mode)} (staged)`);
-    if (n.kind === "gateway" && !!o.modelArmor?.enabled !== !!n.modelArmor?.enabled) t.push(n.modelArmor?.enabled ? "Model Armor on (staged)" : "Model Armor off (staged)");
+    if (n.kind === "gateway" && !!o.modelArmor?.enabled !== !!n.modelArmor?.enabled) {
+      t.push(n.modelArmor?.enabled ? "Model Armor on (staged)" : "Model Armor off (staged)");
+      shields.set(n.id, n.modelArmor?.enabled ? "on" : "off");
+    }
     if (t.length) nodes.set(n.id, t);
   }
-  return { edges: compare(before.edges, after.edges), focus: before.focusLines && after.focusLines ? compare(before.focusLines, after.focusLines) : [], nodes };
+  return { edges: compare(before.edges, after.edges), focus: before.focusLines && after.focusLines ? compare(before.focusLines, after.focusLines) : [], nodes, shields };
 }
 
 const modeText = (m: PNode["mode"]) => (m === "ENFORCE" ? "Enforce" : m === "DRY_RUN" ? "Dry run" : "No IAP policy");
@@ -108,11 +117,16 @@ export function intentsFor(c: Pick<EdgeChange, "before" | "after">, cart: Intent
   const nodes = new Set([...callersOf(c.before), ...callersOf(c.after)]);
   const resources = new Set([...resourcesOf(c.before), ...resourcesOf(c.after)]);
   const gws = new Set([c.before?.gateway, c.after?.gateway].filter(Boolean));
+  // a client's line into an ingress lane counts the agents in it: a bind or unbind on that lane changes it
+  const lane = (c.after ?? c.before)?.direction === "ingress" && !(c.after ?? c.before)?.caller ? new Set([...gws, ...[c.before?.target, c.after?.target].filter((x) => x === NOGW.ingress)]) : new Set<string | undefined>();
   return cart
     .filter((i) => {
       if (i.kind === "grant" || i.kind === "revoke" || i.kind === "modify") return !!i.source && !!i.destination && principals.has(i.source.principal) && resources.has(i.destination.name);
-      if (i.kind === "bind_gateway" || i.kind === "unbind_gateway") return !!i.engine && nodes.has(i.engine);
-      if (i.kind === "set_enforcement" || i.kind === "model_armor_on" || i.kind === "model_armor_off") return (effects[i.id] ?? []).some((g) => gws.has(g) || nodes.has(g));
+      if (i.kind === "bind_gateway" || i.kind === "unbind_gateway")
+        return (!!i.engine && nodes.has(i.engine)) || (i.gateway?.direction === "ingress" && (lane.has(i.gateway.name) || lane.has(NOGW.ingress)));
+      if (i.kind === "set_enforcement") return (effects[i.id] ?? []).some((g) => gws.has(g) || nodes.has(g));
+      // Model Armor screens the line as it will be: not one that leaves the gateway (an unbind staged with it)
+      if (i.kind === "model_armor_on" || i.kind === "model_armor_off") return (effects[i.id] ?? []).includes((c.after ? c.after.gateway : c.before?.gateway) ?? "");
       return false;
     })
     .map((i) => i.id);
@@ -121,6 +135,7 @@ export function intentsFor(c: Pick<EdgeChange, "before" | "after">, cart: Intent
 /** Before and after merged into one graph for the map: every line as it will be, removed lines as they are today. */
 export function mergeStaged(before: PolicyGraph, after: PolicyGraph, d: GraphDiff, cart: Intent[], inv: Inventory, effects: Record<string, string[]>): PolicyGraph {
   const engines = new Map(inv.engines.map((e) => [e.name, e]));
+  const bn = new Map(before.nodes.map((n) => [n.id, n]));
   const merge = (afterEdges: PEdge[], changes: EdgeChange[]): PEdge[] => {
     const byId = new Map(changes.map((c) => [c.id, c]));
     // the default-deny line that a pending add replaces isn't drawn twice
@@ -150,7 +165,10 @@ export function mergeStaged(before: PolicyGraph, after: PolicyGraph, d: GraphDif
     if (!t) return n;
     const intents = cart.filter((i) => (i.engine && i.engine === n.id) || (effects[i.id] ?? []).includes(n.id)).filter((i) => !["grant", "revoke", "modify"].includes(i.kind)).map((i) => i.id);
     const chips: Chip[] = [...n.chips, ...t.map((text): Chip => ({ text, tone: "amber", pending: true }))];
-    return { ...n, chips, pending: { text: t, intents } };
+    // Model Armor on or off: a pending shield (turned off, it carries today's template, which the node no longer has)
+    const to = d.shields.get(n.id);
+    const shield = to ? { to, template: (to === "off" ? bn.get(n.id) : n)?.modelArmor?.template } : undefined;
+    return { ...n, chips, pending: { text: t, intents, ...(shield ? { shield } : {}) } };
   });
   for (const n of before.nodes)
     if (!afterIds.has(n.id) && needed.has(n.id)) nodes.push({ ...n, chips: [...n.chips, { text: "Removed (staged)", tone: "amber", pending: true }], pending: { text: ["Its last grant is staged for removal"], removed: true, intents: [] } });

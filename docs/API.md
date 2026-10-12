@@ -7,6 +7,11 @@ Policy Studio is a standalone app: Python package `policy_studio` (FastAPI) in `
 
 Run it locally with `./studio-app` (backend :8090, serving the built UI). For UI development: `cd frontend && npm run dev` (Vite :5174, which proxies `/api` to :8090), or `npm run dev:mock` (no backend).
 
+The policy map (UI step 1, [VISUALIZATION_PLAN.md](VISUALIZATION_PLAN.md)) has no endpoint of its own: it is built in
+the browser from `/inventory`, `/gateways` and `/model-armor` (plus the saved context), and its staged-change preview applies the
+cart in the browser too. The only backend change it needed is the `modify` intent (see Intent below), which its
+"Change access" action stages.
+
 ## Context
 
 Every request carries the context as query params (GET) or a `context` object (POST):

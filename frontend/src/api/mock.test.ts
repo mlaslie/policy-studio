@@ -7,7 +7,8 @@ import { buildWorld } from "./mockData";
 import { mockDiff, modifyBindings } from "./mockRender";
 import { ROLE, conditionFor } from "../lib/policy";
 import { grantToModify } from "../lib/grants";
-import { applyStream, audit, diff, inventory, preflight } from "./mock";
+import { applyStream, audit, context, diff, inventory, preflight } from "./mock";
+import { groupPerms } from "../steps/ContextStep";
 
 const RES = "projects/my-demo-project/locations/us-east4/mcpServers/tickets";
 const binding = (b: { member: string; expression: string | null }): Binding => ({ role: ROLE, member: b.member, member_label: "x", condition: b.expression ? { title: "t", expression: b.expression } : null, english: "" });
@@ -67,4 +68,20 @@ describe("a modify through the mock's preflight, apply and undo", () => {
     const key = (b: Binding) => `${b.member}|${b.condition?.expression ?? ""}`;
     expect(back.map(key).sort()).toEqual(before.map(key).sort());
   }, 20000);
+});
+
+describe("Context step permissions (the duplicate-key fix)", () => {
+  it("the mock lists each permission once (the read-back purpose joins the existing read permission)", () => {
+    Object.defineProperty(globalThis, "window", { value: { location: { search: "" } }, configurable: true });
+    const perms = context({ project: "my-demo-project", region: "us-east4" }).permissions;
+    const names = perms.map((p) => p.permission);
+    expect(new Set(names).size).toBe(names.length);
+    expect(perms.find((p) => p.permission === "iap.webServices.getIamPolicy")).toMatchObject({ granted: true, write: false, role: "roles/iap.admin", needed_for: expect.stringContaining("read grants back after Apply") });
+  });
+
+  it("rows have unique keys even when a permission is listed twice", () => {
+    const p = { permission: "iap.webServices.getIamPolicy", granted: true, needed_for: "a" };
+    const keys = groupPerms([p, { ...p, needed_for: "b" }, { permission: "x.y.z", granted: false, needed_for: "c", fix: "cmd" }]).map((g) => g.key);
+    expect(keys).toEqual(["iap.webServices.getIamPolicy", "iap.webServices.getIamPolicy#2", "x.y.z"]);
+  });
 });

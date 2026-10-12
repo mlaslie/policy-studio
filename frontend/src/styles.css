@@ -4258,6 +4258,21 @@ body.resizing * {
 .pmap-allow {
   margin: 8px 0;
 }
+/* Client-to-Agent line: the agents on it, each with Unbind or Bind. */
+.pmap-agents {
+  list-style: none;
+  margin: 8px 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.pmap-agents li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
 .pmap-reasons {
   list-style: none;
   margin: 6px 0;
@@ -4535,6 +4550,36 @@ body.resizing * {
   background: var(--surface);
   color: #e8710a;
   border-color: #e8710a;
+}
+/* Staged Model Armor change: dashed, with a clock; turned off, struck through. */
+.pmap .ma-shield.pending-on,
+.pmap .ma-shield.pending-off {
+  background: var(--surface);
+  color: #e8710a;
+  border: 2px dashed var(--e-pending);
+}
+.pmap .ma-shield.pending-off svg {
+  opacity: 0.55;
+}
+.pmap .ma-shield.pending-off::after {
+  content: "";
+  position: absolute;
+  width: 26px;
+  height: 2px;
+  background: var(--red);
+  transform: rotate(-45deg);
+}
+.pmap .ma-shield-clock {
+  position: absolute;
+  bottom: -6px;
+  left: -6px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--e-pending);
+  color: #000;
 }
 .pmap .node-sink {
   width: 190px;

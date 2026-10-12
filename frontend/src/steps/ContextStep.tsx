@@ -209,10 +209,17 @@ function ApisCard({ ci }: { ci: ContextInfo }) {
 
 type PermGroup = { key: string; perms: PermissionCheck[]; fix: string | null; granted: boolean | null };
 
-/** One row per permission, except missing permissions fixed by the same command share one row. */
-function groupPerms(perms: PermissionCheck[]): PermGroup[] {
+/** One row per permission, except missing permissions fixed by the same command share one row. Row keys are unique even
+ *  if a permission is listed twice (for two purposes). */
+export function groupPerms(perms: PermissionCheck[]): PermGroup[] {
   const out: PermGroup[] = [];
   const byFix = new Map<string, PermGroup>();
+  const seen = new Map<string, number>();
+  const keyOf = (p: PermissionCheck) => {
+    const n = seen.get(p.permission) ?? 0;
+    seen.set(p.permission, n + 1);
+    return n ? `${p.permission}#${n + 1}` : p.permission;
+  };
   for (const p of perms) {
     if (p.granted === false && p.fix) {
       const g = byFix.get(p.fix);
@@ -220,10 +227,10 @@ function groupPerms(perms: PermissionCheck[]): PermGroup[] {
         g.perms.push(p);
         continue;
       }
-      const ng: PermGroup = { key: p.permission, perms: [p], fix: p.fix, granted: false };
+      const ng: PermGroup = { key: keyOf(p), perms: [p], fix: p.fix, granted: false };
       byFix.set(p.fix, ng);
       out.push(ng);
-    } else out.push({ key: p.permission, perms: [p], fix: null, granted: p.granted });
+    } else out.push({ key: keyOf(p), perms: [p], fix: null, granted: p.granted });
   }
   return out;
 }

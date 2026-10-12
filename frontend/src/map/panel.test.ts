@@ -3,8 +3,8 @@ import { describe, expect, it } from "vitest";
 import { buildWorld } from "../api/mockData";
 import type { Ctx, Engine } from "../api/types";
 import { READ_ONLY_EXPR, intentKey } from "../lib/policy";
-import { PSEUDO, buildPolicyGraph, type PEdge } from "./graph";
-import { allowFor, bindFor, limitToAgent, modifyFor, reachedBy, revokeFor, sameAccess } from "./actions";
+import { CLIENT, NOGW, PSEUDO, buildPolicyGraph, type PEdge } from "./graph";
+import { allowFor, bindFor, ingressInfo, limitToAgent, modifyFor, reachedBy, revokeFor, sameAccess } from "./actions";
 import { simulate } from "./simulate";
 import { loadPins, placeNodes, posKey, savePins, type PinStore } from "./usePositions";
 import { findFocusEdge, focusForGateway, focusForGrant, focusForIntent } from "./focus";
@@ -85,6 +85,64 @@ describe("Allow… and Bind", () => {
     const t = eng("Travel Planner");
     const g = w0.gateways.find((x) => x.type === "egress")!;
     expect(bindFor(t, g)).toMatchObject({ kind: "bind_gateway", engine: t.name, engine_label: "Travel Planner", gateway: { name: g.name, direction: "egress" } });
+  });
+});
+
+describe("Client-to-Agent line actions (§6.3)", () => {
+  const INGRESS = w0.gateways.find((g) => g.type === "ingress")!;
+  // as /model-armor sends it: the region's Model Armor extensions alongside the gateways
+  const maResp = (w = w0) => ({ ...w.modelArmor, extensions: w.maExtensions });
+  const ing = (w = w0) => buildPolicyGraph({ inventory: w.inventory, gateways: w.gateways, modelArmor: w.modelArmor, direction: "ingress" });
+  const lineId = (id: string, w = w0) => ing(w).edges.find((e) => e.id === id)!;
+  const travel = eng("Travel Planner");
+  const psc = eng("simple-agent-with-psc");
+
+  it("an unscreened line: Model Armor on, Unbind for its agent, the IAP policy as configured", () => {
+    const info = ingressInfo(lineId(`i:${INGRESS.name}|${hd.name}`), inv, w0.gateways, maResp());
+    expect(info.gateway?.name).toBe(INGRESS.name);
+    expect(info.ma?.enabled).toBe(false);
+    expect(info.maAction).toMatchObject({ kind: "on", intent: { kind: "model_armor_on", gateway: { name: INGRESS.name, direction: "ingress" } } });
+    expect(info.bound.map((b) => b.unbind)).toEqual([expect.objectContaining({ kind: "unbind_gateway", engine: hd.name, engine_label: "Helpdesk Agent", gateway: { name: INGRESS.name, direction: "ingress" } })]);
+    expect(info.unbound).toEqual([]);
+    expect(info.iap).toMatchObject({ provider: "iap", profile: "REQUEST_AUTHZ", enforcement: "DRY_RUN" });
+  });
+
+  it("a screened line: Model Armor off (a destructive kind)", () => {
+    const w = buildWorld(CTX);
+    const m = w.modelArmor.gateways.find((g) => g.gateway === INGRESS.name)!;
+    m.enabled = true;
+    m.template = w.modelArmor.templates[0];
+    const e = lineId(`i:${INGRESS.name}|${hd.name}`, w);
+    expect(e.verdict).toBe("screened");
+    const info = ingressInfo(e, w.inventory, w.gateways, maResp(w));
+    expect(info.maAction).toMatchObject({ kind: "off", intent: { kind: "model_armor_off", gateway: { name: INGRESS.name, direction: "ingress" } } });
+    expect(info.ma?.template?.summary?.length).toBeGreaterThan(0);
+  });
+
+  it("a client's line into a lane lists every agent in it", () => {
+    const info = ingressInfo(lineId(`i:${CLIENT.any}|${INGRESS.name}`), inv, w0.gateways, maResp());
+    expect(info.bound.map((b) => b.engine.display_name).sort()).toEqual(["HR Assistant", "Helpdesk Agent"]);
+  });
+
+  it("no ingress gateway: Bind for each agent (the unbindable one with its reason), no Model Armor action", () => {
+    const info = ingressInfo(lineId(`i:${CLIENT.any}|${NOGW.ingress}`), inv, w0.gateways, maResp());
+    expect(info.gateway).toBeNull();
+    expect(info.maAction).toBeNull();
+    expect(info.unbound.map((u) => [u.engine.name, u.why === null])).toEqual([
+      [travel.name, true],
+      [psc.name, false],
+    ]);
+    expect(bindFor(travel, INGRESS, "ingress")).toMatchObject({ kind: "bind_gateway", engine: travel.name, gateway: { name: INGRESS.name, direction: "ingress" } });
+    // one agent's own direct line: just that agent
+    expect(ingressInfo(lineId(`i:${NOGW.ingress}|${travel.name}`), inv, w0.gateways, maResp()).unbound.map((u) => u.engine.name)).toEqual([travel.name]);
+  });
+
+  it("no Model Armor extension in the region (us-central1): Set up Model Armor instead of Turn on", () => {
+    const w = buildWorld({ ...CTX, region: "us-central1" });
+    const gw = w.gateways.find((g) => g.type === "ingress")!;
+    const info = ingressInfo(lineId(`i:${CLIENT.any}|${gw.name}`, w), w.inventory, w.gateways, maResp(w));
+    expect(info.maAction).toEqual({ kind: "setup" });
+    expect(info.iap).toBeNull();
   });
 });
 

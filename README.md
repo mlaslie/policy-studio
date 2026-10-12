@@ -108,6 +108,51 @@ Apply is available when the mode is `apply` and no check is an error.
   and returned with its inverse (`undo`). Results are appended to `~/.policy-studio/apply-log.jsonl`
   (`STUDIO_APPLY_LOG` overrides the path).
 
+## Policy map
+
+Step 1, right after Context, is a map you can zoom, pan and drag that shows **who can reach what, and why**. It is
+built in the browser from what the other steps already read (inventory, gateways, Model Armor, and the context you
+picked): no extra backend call, and nothing is written from it. See [docs/VISUALIZATION_PLAN.md](docs/VISUALIZATION_PLAN.md) for the design.
+
+**What it shows.** Agent-to-Anywhere (the default) reads left to right: your Agent Runtime agents grouped by egress
+gateway (and a "No gateway" group), the gateways, then the destinations (Agent Registry entries: A2A agents, Agent
+Runtime agents, MCP servers, API endpoints, and a registry-wide node when there are registry-wide grants). Every line
+comes from a `roles/iap.egressor` binding, matched the same way as the dry-run check in the backend. Lines are
+combined per gateway and destination ("3 agents"); select an agent to see its own lines, including grants it
+inherits from a project-wide, public, group or registry-wide binding. Those bindings are drawn once from pseudo
+callers ("All agents in this project", "Public", "Other principals"). Click a line for the policy behind it: one card
+per binding, with the member, the resource, the condition (plain English and CEL) and, for MCP servers, which tools
+it allows.
+
+**Filters.** Direction (Agent-to-Anywhere or Client-to-Agent); All agents, Behind a gateway or No gateway; one gateway
+(when there's more than one); destination types; "Hide destinations with no grants"; search; Today, With staged
+changes or Changes only. With an agent selected: Inherited grants and Implicit denies. Each legend entry hides or
+shows that kind of line. Table view lists the same lines as a table. Past 400 lines a banner suggests narrowing the
+filters. Nodes you drag keep their place (saved in the browser per project, region and direction; Reset layout
+forgets them).
+
+**Blocked lines.** Default deny isn't drawn for everyone (that would be one line per agent and destination). Each
+agent behind a gateway shows a count ("Denied by default: 18"); select it to draw its default-deny lines (red,
+dashed, with a ✕), at most 60. When the gateway is in dry run they're amber "would be denied: passes today" lines and
+the gateway says "Dry run: nothing is blocked". Grants held by an agent with no egress gateway are drawn as "not
+enforced" (gray, dotted): nothing checks them. Color is never the only cue: dash patterns, badges and labels tell the
+kinds apart.
+
+**Client-to-Agent, honestly.** A Client-to-Agent gateway doesn't check caller identity: it screens content with Model
+Armor. Who may call an agent is decided by the agent's Agent Runtime IAM, which Policy Studio doesn't read, so callers
+are shown as "Any allowed caller" (plus the Gemini Enterprise app from Context, if set) and lines are screened,
+unscreened or direct. An IAP policy configured on an ingress gateway is shown as configured, not as an identity check.
+Clicking an ingress line shows the gateway and its Model Armor template, and says there's no allow policy to show.
+
+**Actions only stage.** Revoke, Change access (one `modify`), Allow…, Limit to this agent, Bind, Unbind, and Model Armor
+on or off (or the guided setup when the region has no Model Armor extension) all add items to the cart. Nothing
+changes until you Review and Apply. With items in the cart the map shows them as pending (a clock: dashed for added,
+a red overlay for removed, agents moving lane for a bind or unbind, a pending shield for Model Armor), and the step
+shows how many staged changes are on the map. The preview is computed in the browser; Review's diff is the authority.
+
+With `npm run dev:mock`, region `us-west1` is a generated scale scenario (about 50 agents, 15 MCP servers, 100 API
+endpoints and 500 grants, two egress gateways, one in dry run); add `?scale=2` to the page URL to double it.
+
 ## Model Armor
 
 Model Armor on a gateway is a `CONTENT_AUTHZ` authz policy that points at a Model Armor authz extension. It needs, in

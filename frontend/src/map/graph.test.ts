@@ -286,8 +286,9 @@ describe("Client-to-Agent (§6.2, §6.3)", () => {
 
   it("an IAP policy on an ingress gateway shows as configured, not as identity checks", () => {
     const g = buildPolicyGraph(input(w0, "ingress"));
-    const chip = g.nodes.find((n) => n.id === INGRESS)!.chips.find((c) => c.text === "IAP policy configured");
-    expect(chip?.title).toMatch(/doesn't check caller identity/);
+    // us-east4: corp-ingress shares the dry-run IAP extension with corp-egress
+    const chip = g.nodes.find((n) => n.id === INGRESS)!.chips.find((c) => c.text.startsWith("IAP REQUEST_AUTHZ"));
+    expect(chip).toMatchObject({ text: "IAP REQUEST_AUTHZ · dry run", tone: "neutral", title: "Configured; Client-to-Agent doesn't check caller identity." });
   });
 });
 

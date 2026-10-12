@@ -1,6 +1,6 @@
 # Policy Studio: Policy Map (visualization plan)
 
-Status: plan only, not implemented. Scope: the frontend (`frontend/src`) plus one optional backend addition. Every change still goes through the cart, then Review, then Apply.
+Status: implemented, phases 0–6 of [§15](#15-phases-rough-sizes): [phase 0 and 0b](#15-phases-rough-sizes) (step keys, the map as step 1, the `modify` intent) in 833d824, phases 1–2 (graph, canvas, filters, table view) in ddf9186, phases 3–4 (policy panel, actions, staged view, saved positions) in 10bd7f5, and phases 5–6 (Client-to-Agent actions, the us-west1 scale scenario, performance, docs) after it. The optional phases 7 and 8 aren't started. Scope: the frontend (`frontend/src`) plus one backend addition (`modify`). Every change still goes through the cart, then Review, then Apply.
 
 ## 1. Goal
 
@@ -166,7 +166,7 @@ The direction is always left to right: callers, then gateway, then destinations,
 ### 5.3 Clicks
 - **Click a node:** selects it. For an engine or pseudo caller, this switches to the selected-agent view; double-click or "Clear" leaves it. The side panel shows node details: identity type, gateways, bindable, counts, and actions (bind or unbind, "Build a policy for this agent", which calls `openBuilder` with the source).
 - **Click a line:** the policy detail panel (section 9).
-- **Drag nodes, pan, wheel or pinch zoom:** with `minZoom 0.2`, `maxZoom 2`, `zoomOnDoubleClick` off (as in the demo).
+- **Drag nodes, pan, wheel or pinch zoom:** with `minZoom 0.2`, `maxZoom 2`, `zoomOnDoubleClick` off (as in the demo). (Implemented with `minZoom 0.08`, so Fit shows the whole us-west1 scale map.)
 
 ## 6. Direction-specific views
 
@@ -196,7 +196,7 @@ A CLIENT_TO_AGENT gateway **doesn't check caller identity**. It screens content 
 **Auto layout:** fixed columns by type, as in the demo's `build.ts` (`GAP_X 110`, column widths from node kind), with no dagre or elk. The graph is at most four columns and nearly two-sided, so a general layered layout adds size without much gain (elk is about 1.4 MB; dagre about 30 kB gzipped). Within each column:
 1. Group by section (gateway affiliation, or destination kind).
 2. Order with **one or two barycenter passes**: destinations sorted by the average y of the callers allowed to reach them, then callers re-sorted by the average y of their destinations. This is deterministic, with ties broken by label.
-3. A destination section with more than 25 items wraps into sub-columns.
+3. A destination section with more than 25 items wraps into sub-columns. (Implemented: callers wrap too, at 10 per sub-column, once there are more than 25 of them; engine nodes are tall, so 50 agents in one column were twice the height of the destinations.)
 4. Without a selected agent, MCP nodes are compact (a "6 tools" chip). They expand to tool rows when selected or when an agent is selected; node height comes from a `nodeHeight()` like the demo's.
 
 **Scale target:** 50 engines, 100 destinations, 500 bindings, below 16 ms per pan frame on a laptop.
@@ -297,7 +297,7 @@ Add:
 2. A **custom-CEL** grant and a **`group:`** member grant, giving `conditional` and "unknown".
 3. An **`access_errors`** entry for one destination (unreadable IAP policy).
 4. A second engine bound for **ingress**, and `Template.summary` lines in the Model Armor mock.
-5. A **scale scenario**: region `us-west1` generates about 50 engines, about 15 MCP servers, about 100 endpoints and about 500 bindings from a seeded PRNG, with names like `agent-017`, all under `my-demo-project`. It's used for performance and layout checks.
+5. A **scale scenario**: region `us-west1` generates about 50 engines, about 15 MCP servers, about 100 endpoints and about 500 bindings from a seeded PRNG, with names like `agent-017`, all under `my-demo-project`. It's used for performance and layout checks. (Implemented in `api/mockScale.ts`, with corp-ingress screened by Model Armor and a second ingress gateway without it. With the default filters it draws about 320 combined lines, under the 400-line banner; `?scale=2` on the page URL doubles it, past the banner.)
 6. A **multi-gateway** scenario (two egress gateways) in the scale region.
 7. Make the mock's revoke match on **condition expression** (today it matches on title) so the staged-change view and mock Apply agree with the backend.
 
