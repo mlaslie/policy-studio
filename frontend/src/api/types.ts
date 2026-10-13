@@ -235,6 +235,12 @@ export type Intent = {
   /** modify: the existing binding's condition, exact (mode "custom" with its expression and title, or mode "all");
    *  `access` is the new one. Applied as one read-modify-write. */
   access_from?: Access;
+  /** modify of several bindings (backwards compatible: when set, these replace access_from / access): every binding of
+   *  the member removed (exact, as access_from), and the bindings added. The builder's "change existing access" sends
+   *  N → one; the remove-all form sends N → [] (destructive); an undo sends the new binding → the removed set. Still
+   *  one getIamPolicy and one setIamPolicy. */
+  access_from_list?: Access[];
+  access_list?: Access[];
   gateway?: { name: string; direction: Direction; extension?: string; policy?: string };
   engine?: string;
   params?: SetupParams;

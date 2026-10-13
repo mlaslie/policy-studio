@@ -129,3 +129,48 @@ def compare_access(old: Optional[Access], new: Optional[Access], read_only: Opti
         # the hint also covers read-only tools added later
         return "broader" if read_only - set(a.tools or []) else "unknown"
     return "unknown"
+
+
+def _tool_set(acc: Access, read_only: Optional[set[str]]) -> Optional[set[str]]:
+    """The tools an access allows, as a set (None = every tool). Raises LookupError when it can't be told here (a
+    custom condition, or the read-only hint without the server's tool list)."""
+    if acc.mode == "all":
+        return None
+    if acc.mode == "tools":
+        return {t for t in acc.tools or [] if t}
+    if acc.mode == "read_only_hint" and read_only is not None:
+        return set(read_only)
+    raise LookupError(acc.mode)
+
+
+def compare_access_many(old: list[Access], new: list[Access], read_only: Optional[set[str]] = None) -> str:
+    """compare_access for a modify with several bindings: IAM ORs a member's bindings, so what is allowed today is the
+    union of `old` and after it the union of `new`. [] after = "narrower" (the remove-all form). One binding each way
+    is compare_access."""
+    if len(old) == 1 and len(new) == 1:
+        return compare_access(old[0], new[0], read_only)
+    if not new:
+        return "narrower"
+    a, b = [_effective(x) for x in old], [_effective(x) for x in new]
+    norm = lambda xs: sorted({_norm((condition_for(x) or Condition()).expression) for x in xs})  # noqa: E731
+    if norm(a) == norm(b):
+        return "same"
+    try:
+        sets_a = [_tool_set(x, read_only) for x in a]
+        sets_b = [_tool_set(x, read_only) for x in b]
+    except LookupError:
+        # can't be told per tool: broader only when every old binding alone is narrower than the new access
+        verdicts = {compare_access(x, y, read_only) for x in old for y in new}
+        return "broader" if verdicts == {"broader"} else "unknown"
+    union_a = None if any(s is None for s in sets_a) else set().union(*sets_a)
+    union_b = None if any(s is None for s in sets_b) else set().union(*sets_b)
+    if union_b is None:
+        return "same" if union_a is None else "broader"
+    if union_a is None:
+        return "narrower"
+    if union_b - union_a:
+        return "broader"
+    # the read-only hint also covers read-only tools added later: only "narrower" when one was there before
+    hint_b = any(x.mode == "read_only_hint" for x in b)
+    hint_a = any(x.mode == "read_only_hint" for x in a)
+    return "unknown" if hint_b and not hint_a else "narrower"

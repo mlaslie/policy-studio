@@ -1,7 +1,7 @@
 // Apply (P3) helpers shared by the store, the Apply step and Review: run state types, which kinds are
 // destructive, typical durations and plain-English labels.
 import type { Access, ApplyState, AuthInfo, DiffStatus, Intent } from "../api/types";
-import { accessFromCondition, accessWords, conditionFor, intentKey, shortName } from "./policy";
+import { accessFromCondition, accessFroms, accessTos, conditionFor, intentKey, modifyChange, removesAll, shortName } from "./policy";
 
 export type RunItemState = ApplyState | "queued";
 export type RunItem = {
@@ -31,9 +31,10 @@ export type ApplyRun = {
 export const DESTRUCTIVE_KINDS = new Set<Intent["kind"]>(["revoke", "unbind_gateway", "model_armor_off"]);
 export const SETUP_KINDS = new Set<Intent["kind"]>(["model_armor_template", "model_armor_extension", "iam_project_grant"]);
 /** Revokes, unbinds, Model Armor off, the delete (undo) form of the Model Armor setup kinds, dry run (stops
- *  blocking) and reverting a dedicated IAP extension (deletes it). */
+ *  blocking), reverting a dedicated IAP extension (deletes it) and the remove-all form of modify. */
 export const isDestructive = (i: Intent) =>
   DESTRUCTIVE_KINDS.has(i.kind) ||
+  removesAll(i) ||
   (SETUP_KINDS.has(i.kind) && !!i.params?.delete) ||
   (i.kind === "set_enforcement" && i.mode === "DRY_RUN") ||
   (i.kind === "dedicate_extension" && !!i.revert);
@@ -55,15 +56,43 @@ export function compareAccess(from: Access | undefined, to: Access | undefined, 
   return "unknown";
 }
 
-/** A modify isn't destructive (it never removes all access), but widening access deserves a warning (as the
- *  backend's preflight gives). */
+/** compareAccess for a modify of several bindings, like the backend's conditions.compare_access_many: IAM ORs a
+ *  member's bindings, so today is the union of `from` and after the union of `to`; [] after = "narrower". */
+export function compareAccessMany(from: Access[], to: Access[], readOnly?: Set<string>): "same" | "narrower" | "broader" | "unknown" {
+  if (from.length === 1 && to.length === 1) return compareAccess(from[0], to[0], readOnly);
+  if (!to.length) return "narrower";
+  const eff = (x: Access): Access => (x.mode === "custom" ? accessFromCondition(x.expression?.trim() ? x.expression : undefined) : x);
+  const a = from.map(eff);
+  const b = to.map(eff);
+  const norm = (xs: Access[]) => [...new Set(xs.map((x) => (conditionFor(x)?.expression ?? "").replace(/\s+/g, " ").trim()))].sort().join("\n");
+  if (norm(a) === norm(b)) return "same";
+  // the tools each allows (null = every tool); undefined = can't be told here
+  const set = (x: Access): Set<string> | null | undefined => (x.mode === "all" ? null : x.mode === "tools" ? new Set((x.tools ?? []).filter(Boolean)) : x.mode === "read_only_hint" && readOnly ? new Set(readOnly) : undefined);
+  const sa = a.map(set);
+  const sb = b.map(set);
+  if (sa.includes(undefined) || sb.includes(undefined)) {
+    const all = from.flatMap((x) => to.map((y) => compareAccess(x, y, readOnly)));
+    return all.every((v) => v === "broader") ? "broader" : "unknown";
+  }
+  const union = (xs: (Set<string> | null | undefined)[]) => (xs.some((x) => x === null) ? null : new Set(xs.flatMap((x) => [...(x as Set<string>)])));
+  const ua = union(sa);
+  const ub = union(sb);
+  if (ub === null) return ua === null ? "same" : "broader";
+  if (ua === null) return "narrower";
+  if ([...ub].some((t) => !ua.has(t))) return "broader";
+  return b.some((x) => x.mode === "read_only_hint") && !a.some((x) => x.mode === "read_only_hint") ? "unknown" : "narrower";
+}
+
+/** A modify isn't destructive (except its remove-all form), but widening access deserves a warning (as the backend's
+ *  preflight gives); so does removing all access. */
 export function modifyWarning(i: Intent, readOnly?: Set<string>): string | null {
   if (i.kind !== "modify") return null;
-  return compareAccess(i.access_from, i.access, readOnly) === "broader" ? `This widens access: ${accessWords(i.access_from)} → ${accessWords(i.access)}.` : null;
+  if (removesAll(i)) return `This removes all access: ${modifyChange(i)}.`;
+  return compareAccessMany(accessFroms(i), accessTos(i), readOnly) === "broader" ? `This widens access: ${modifyChange(i)}.` : null;
 }
 
 /** Diff badge labels that read differently for a modify (the others are shared with grant / revoke). */
-export const MODIFY_STATUS: Partial<Record<DiffStatus, string>> = { replace: "Will change", absent: "Grant not found" };
+export const MODIFY_STATUS: Partial<Record<DiffStatus, string>> = { replace: "Will change", absent: "Grant not found", remove: "Will remove all" };
 
 /** What a destructive kind does, for the acknowledgement checkbox. */
 export const DESTRUCTIVE_PHRASE: Partial<Record<Intent["kind"], string>> = {
@@ -75,6 +104,7 @@ export const DESTRUCTIVE_PHRASE: Partial<Record<Intent["kind"], string>> = {
   model_armor_extension: "deletes a Model Armor extension",
   iam_project_grant: "removes a service agent's Model Armor roles",
   // Destructive only in these forms.
+  modify: "removes all of an agent's access to a destination",
   set_enforcement: "puts a gateway in dry run: nothing is blocked",
   dedicate_extension: "deletes a gateway's own IAP extension",
 };

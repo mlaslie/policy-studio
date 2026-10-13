@@ -75,6 +75,31 @@ def access_words(acc: Optional[Access]) -> str:
     return "a custom condition"
 
 
+def access_short(acc: Optional[Access]) -> str:
+    """Shortest phrase for an access, for a modify of several bindings ("read-only + close_ticket → ...")."""
+    if acc and acc.mode == "custom" and (acc.expression or "").strip():
+        acc = classify({"expression": acc.expression})
+    mode = acc.mode if acc else "all"
+    if mode == "all" or (acc and acc.mode == "custom" and not (acc.expression or "").strip()):
+        return "full access"
+    if mode == "read_only_hint":
+        return "read-only"
+    if mode == "tools":
+        tools = [t for t in (acc.tools or []) if t] if acc else []
+        return ", ".join(tools) if tools else "no tools"
+    return "a custom condition"
+
+
+def modify_change(intent: Intent) -> str:
+    """"before → after" of a modify: access_words for one binding each way, else the short form of every binding
+    ("read-only + close_ticket → list_tickets, get_ticket, update_ticket"; "→ no access" for the remove-all form)."""
+    if not intent.multi:
+        return f"{access_words(intent.access_from)} → {access_words(intent.access)}"
+    before = " + ".join(access_short(a) for a in intent.froms) or "no access"
+    after = " + ".join(access_short(a) for a in intent.tos) or "no access"
+    return f"{before} → {after}"
+
+
 def binding_english(member_lbl: str, role: str, cond: Optional[Condition | dict], resource_label: str,
                     kind: str = "mcp_server") -> str:
     if role == EGRESSOR:
@@ -128,8 +153,11 @@ def intent_english(intent: Intent) -> str:
             return f"{_src_label(intent)} can {what}."
         return f"Revoke: {_src_label(intent)} can no longer {what}."
     if k == "modify":
-        return (f"Change {_src_label(intent)}'s access to {_dest_label(intent)}: "
-                f"{access_words(intent.access_from)} → {access_words(intent.access)}.")
+        if intent.removes_all:
+            n = len(intent.froms)
+            return (f"Remove all of {_src_label(intent)}'s access to {_dest_label(intent)} "
+                    f"({n} grant{'s' if n != 1 else ''}): {modify_change(intent)}.")
+        return f"Change {_src_label(intent)}'s access to {_dest_label(intent)}: {modify_change(intent)}."
     gw = intent.gateway
     eng = _short(intent.engine or "") or "the engine"
     if k == "bind_gateway":

@@ -108,6 +108,16 @@ Apply is available when the mode is `apply` and no check is an error.
   and returned with its inverse (`undo`). Results are appended to `~/.policy-studio/apply-log.jsonl`
   (`STUDIO_APPLY_LOG` overrides the path).
 
+## Build a policy
+
+Step 5 builds one change at a time: **who** is calling (an agent, every agent in the project, or a principal), **what** it calls (a registry entry), and **how much** of it (MCP servers: the read-only hint, specific tools, all tools or a custom condition; other destinations: full access). The preview under it shows the sentence, the IAM anatomy and the prerequisite checks.
+
+**Change existing access.** When the agent already holds one or more direct grants on the destination, the builder says so ("Helpdesk Agent already has access to Tickets MCP. Your change replaces it.") and works on that access instead of adding a grant next to it (IAM would keep both). It starts from today's access: on an MCP server, Specific tools with the tools allowed today checked, each noting the grant that allows it ("allowed today by: read-only grant"). Read-only (hint) is offered only when an existing grant uses it, with a note that switching to Specific tools pins today's read-only tools and drops future ones. Tools allowed by an inherited grant (project-wide, public, group or registry-wide) are checked and locked, with a link to that grant: they can only be changed there and aren't part of the change. The result is ONE change: a `modify` that replaces every existing grant with the new one in a single IAM update (several grants merge into one), or, when every tool is unchecked ("Remove access" on other destinations), a revoke (one grant) or the `modify` "remove all" form (several grants, still one update). The same access as today is no change.
+
+**Preview before the cart.** Add to cart (and Add & build another) opens a preview first: a small read-only map of the change (the agent, its gateway or the no-gateway path, the destination; staged line styles; MCP tools today → after), a table of each tool (or the destination) today and after with the grants behind each, the bindings replaced or removed and the new one with its condition, and warnings (wider access, all access removed, tools that stay allowed by an inherited grant, the read-only hint's change, an agent with no gateway where nothing is enforced). **Approve** stages it and opens Review on it; **Modify** (or Esc) goes back to the builder with every choice kept; **Cancel** discards the change: the agent and destination stay selected and "How much of it?" goes back to where it started (today's access, or the default for a new grant). Audit fixes, map panel actions and Undo stage as before, without the preview.
+
+The mock reproduces a merge case with `?case=merge` (`VITE_MOCK=1`): the Helpdesk Agent holds a read-only grant and a separate close_ticket grant on Tickets MCP, and search_tickets is allowed project-wide.
+
 ## Policy map
 
 Step 1, right after Context, is a map you can zoom, pan and drag that shows **who can reach what, and why**. It is

@@ -3,7 +3,7 @@
 import type { Binding, Ctx, DiffItem, DiffResult, Intent, Outputs, RenderItem, RenderResult } from "./types";
 import type { World } from "./mockData";
 import { MOCK_NUMBER, templateFrom } from "./mockData";
-import { ROLE, accessWords, conditionFor, intentEnglish, shortName } from "../lib/policy";
+import { ROLE, accessFroms, accessTos, conditionFor, intentEnglish, isMultiModify, modifyChange, removesAll, shortName } from "../lib/policy";
 import { modifyWarning } from "../lib/apply";
 
 const IAP = "https://iap.googleapis.com/v1";
@@ -148,6 +148,7 @@ function grantOutputs(ctx: Ctx, i: Intent, revoke: boolean): { outputs: Outputs;
 /** modify: one read-modify-write that swaps the binding with the old condition for one with the new condition, like
  *  the backend's render (gcloud get-/set-iam-policy, REST and Python the same; Terraform is a destroy + create). */
 function modifyOutputs(ctx: Ctx, i: Intent): { outputs: Outputs; warnings: string[]; notes: string[] } {
+  if (isMultiModify(i)) return modifyManyOutputs(ctx, i);
   const d = i.destination!;
   const member = i.source!.principal;
   const from = conditionFor(i.access_from);
@@ -209,18 +210,96 @@ function modifyOutputs(ctx: Ctx, i: Intent): { outputs: Outputs; warnings: strin
   return { outputs: { terraform, gcloud, rest, python }, warnings: warn ? [warn] : [], notes };
 }
 
+/** A modify of several bindings, like the backend's render: one jq filter with $froms / $tos (--argjson), every old
+ *  Terraform block commented out and the new one added (none for the remove-all form). */
+function modifyManyOutputs(ctx: Ctx, i: Intent): { outputs: Outputs; warnings: string[]; notes: string[] } {
+  const d = i.destination!;
+  const member = i.source!.principal;
+  const froms = accessFroms(i).map(conditionFor);
+  const tos = accessTos(i).map(conditionFor);
+  const [tfType, tfKey, gFlag] = TF_TYPE[d.kind];
+  const name = ident(`${i.source!.label}_${d.label}`);
+  const res = iapResource(ctx, i);
+  const head = `# ${intentEnglish(i)}`;
+  const where = [`  --resource-type=agent-registry \\`, ...(gFlag ? [`  --${gFlag}=${d.id} \\`] : []), `  --region=${ctx.region} \\`, `  --project=${ctx.project}`];
+  const fromsJson = JSON.stringify(froms.map((c) => c?.expression ?? ""));
+  const tosJson = JSON.stringify(tos.map((c) => ({ title: c?.title ?? "", expression: c?.expression ?? "" })));
+  const jq = [
+    `jq --arg role ${ROLE} --arg member ${sq(member)} --argjson froms ${sq(fromsJson)} --argjson tos ${sq(tosJson)} '`,
+    `  .version = 3 | .bindings = (reduce $tos[] as $t ([(.bindings // [])[] | if .role == $role and ((.condition.expression // "") as $e | any($froms[]; . == $e)) then .members -= [$member] else . end | select(.members | length > 0)];`,
+    `    . + [{role: $role, members: [$member]} + (if $t.expression == "" then {} else {condition: {title: $t.title, expression: $t.expression}} end)]))' policy.json > new.json`,
+  ];
+  const pad = Math.max(tfKey.length, 8);
+  const block = (c: (typeof froms)[number], n: string, lifecycle: boolean) =>
+    [
+      `resource "${tfType}" "${n}" {`,
+      ...([["project", "var.project_id"], ["location", "var.region"], ...(tfKey ? [[tfKey, hcl(d.id)]] : []), ["role", `"${ROLE}"`], ["member", hcl(member)]] as const).map(([k, v]) => `  ${k.padEnd(pad)} = ${v}`),
+      ...(c ? [`  condition {`, `    title      = ${hcl(c.title)}`, `    expression = ${hcl(c.expression)}`, `  }`] : []),
+      ...(lifecycle ? [`  lifecycle {`, `    create_before_destroy = true`, `  }`] : []),
+      `}`,
+    ].join("\n");
+  const terraform = [
+    head,
+    tos.length
+      ? `# Change access: these ${froms.length} grants become the one below. Delete the blocks that manage them (commented out) and add the new one.`
+      : `# Remove all access: delete the ${froms.length} blocks that manage these grants (commented out below) and run terraform apply.`,
+    `#`,
+    `# Today:`,
+    ...froms.map((c, k) => block(c, k ? `${name}_${k + 1}` : name, false).split("\n").map((l) => `# ${l}`).join("\n")),
+    ...(tos.length ? [``, ...tos.map((c, k) => block(c, k ? `${name}_new_${k + 1}` : name, true))] : []),
+  ].join("\n");
+  const gcloud = [head, `# One read-modify-write: not one remove- or add-iam-policy-binding per grant (that leaves moments with partial access).`, `gcloud iap web get-iam-policy \\`, ...where.slice(0, -1), `${where[where.length - 1]} \\`, `  --format=json > policy.json`, ...jq, `gcloud iap web set-iam-policy new.json \\`, ...where].join("\n");
+  const rest = [
+    head,
+    `RES="${res}"`,
+    `TOKEN="$(gcloud auth print-access-token)"`,
+    `curl -sS -X POST "${IAP}/$RES:getIamPolicy" \\`,
+    `  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \\`,
+    `  -d '{"options":{"requestedPolicyVersion":3}}' > policy.json`,
+    ...jq,
+    `curl -sS -X POST "${IAP}/$RES:setIamPolicy" \\`,
+    `  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \\`,
+    `  -d "{\\"policy\\": $(cat new.json)}"`,
+  ].join("\n");
+  const python = [
+    head,
+    `# pip install google-cloud-iap  (see the bundle for the modify_many() helper)`,
+    `modify_many(`,
+    `    ${JSON.stringify(res)},`,
+    `    ${JSON.stringify(member)},`,
+    `    old_expressions=[${froms.map((c) => (c ? JSON.stringify(c.expression) : "None")).join(", ")}],`,
+    `    new_conditions=[${tos.map((c) => (c ? `(${JSON.stringify(c.title)}, ${JSON.stringify(c.expression)})` : "(None, None)")).join(", ")}],`,
+    `)`,
+  ].join("\n");
+  const was = froms.map((c) => c?.expression ?? "none (unconditional)").join("; ");
+  const notes = [tos.length ? `change: replaces ${froms.length} bindings (${was}) with one in the same setIamPolicy.` : `remove all: removes the member from all ${froms.length} of these bindings (${was}) in one setIamPolicy.`];
+  const warn = modifyWarning(i);
+  return { outputs: { terraform, gcloud, rest, python }, warnings: warn ? [warn] : [], notes };
+}
+
 /** A modify on one resource's bindings, like the backend's apply.modify_binding: the member's binding with exactly
  *  the old condition (by expression) is swapped for one with the new condition; the others are kept in order. */
 export function modifyBindings(cur: Binding[], i: Intent): { bindings: Binding[]; outcome: "changed" | "same" | "already" | "not_found" } {
+  // Several bindings (access_from_list / access_list), like the backend's apply.modify_bindings: every old one goes,
+  // one binding per new access is added ([] = remove all); "not_found" when one of the old ones isn't there.
   const member = i.source?.principal ?? "";
-  const from = conditionFor(i.access_from);
-  const to = conditionFor(i.access);
+  const froms = accessFroms(i).map(conditionFor);
+  const tos = accessTos(i);
   const mine = (b: Binding, c: Binding["condition"]) => b.member === member && b.role === ROLE && sameCond(b.condition, c);
-  if (sameCond(from, to)) return { bindings: cur, outcome: "same" };
-  if (!cur.some((b) => mine(b, from))) return { bindings: cur, outcome: cur.some((b) => mine(b, to)) ? "already" : "not_found" };
-  const kept = cur.filter((b) => !mine(b, from));
-  const next: Binding = { role: ROLE, member, member_label: i.source?.label ?? member, condition: to, english: intentEnglish({ ...i, kind: "grant" }) };
-  return { bindings: kept.some((b) => mine(b, to)) ? kept : [...kept, next], outcome: "changed" };
+  const has = (c: Binding["condition"]) => cur.some((b) => mine(b, c));
+  const key = (cs: Binding["condition"][]) => [...new Set(cs.map(normExpr))].sort().join("\n");
+  if (froms.length && key(froms) === key(tos.map(conditionFor))) return { bindings: cur, outcome: "same" };
+  if (froms.some((c) => !has(c))) {
+    const gone = froms.filter((c) => !tos.some((t) => sameCond(c, conditionFor(t))));
+    return { bindings: cur, outcome: tos.every((t) => has(conditionFor(t))) && !gone.some(has) ? "already" : "not_found" };
+  }
+  if (!froms.length && tos.every((t) => has(conditionFor(t)))) return { bindings: cur, outcome: "already" };
+  const kept = cur.filter((b) => !froms.some((c) => mine(b, c)));
+  for (const t of tos) {
+    const to = conditionFor(t);
+    if (!kept.some((b) => mine(b, to))) kept.push({ role: ROLE, member, member_label: i.source?.label ?? member, condition: to, english: intentEnglish({ ...i, kind: "grant", access: t }) });
+  }
+  return { bindings: kept, outcome: "changed" };
 }
 
 function bindOutputs(ctx: Ctx, w: World, i: Intent, unbind: boolean): { outputs: Outputs; warnings: string[]; notes: string[] } {
@@ -578,7 +657,8 @@ export function mockDiff(w: World, intents: Intent[]): DiffResult {
       if (i.kind === "modify") {
         // Like the backend's diff: replace / present (same, or already changed) / absent (the grant changed).
         const r = modifyBindings(mine, i);
-        const change = `${accessWords(i.access_from)} → ${accessWords(i.access)}`;
+        const change = modifyChange(i);
+        if (r.outcome === "changed" && removesAll(i)) return { intent_id: i.id, status: "remove", current: mine, after: r.bindings, detail: `removes all ${accessFroms(i).length} grants (${change})` };
         if (r.outcome === "changed") return { intent_id: i.id, status: "replace", current: mine, after: r.bindings, detail: change };
         if (r.outcome === "not_found") return { intent_id: i.id, status: "absent", current: mine, after: mine, detail: "The grant to change wasn't found: it changed since you looked; Sync and try again." };
         return { intent_id: i.id, status: "present", current: mine, after: mine, detail: r.outcome === "same" ? "The new access is the same as the current one." : `Already changed (${change}).` };

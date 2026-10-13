@@ -1,18 +1,25 @@
 // Build step: the guided policy builder (Who → What → How much) with a live preview, IAM anatomy,
-// prerequisite checks and a Revoke mode.
+// prerequisite checks and a Revoke mode. When the source already holds grants on the destination it works in "change
+// existing access" mode (lib/existing.ts): one modify replaces them all (or a revoke / the remove-all form removes
+// them). Add to cart opens a preview first (preview/PreviewDialog.tsx, lazy-loaded; preview/flow.ts).
 import { Tip } from "../components/Tooltip";
-import { useEffect, useRef, useState } from "react";
+import { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
 import { useLookup, useStudio } from "../store";
 import { api } from "../api/client";
 import type { AccessMode, Grant, Intent, RenderItem, SourceType } from "../api/types";
-import { Badge, Callout, KindIcon, Load, StepHeader, Tabs, Term } from "../components/ui";
+import { Badge, Callout, KindIcon, Load, Spinner, StepHeader, Tabs, Term } from "../components/ui";
 import { useDestinations } from "./InventoryStep";
 import { WarningCallouts } from "./ModelArmorSetup";
 import { grantToIntent, revokesGrant } from "../lib/grants";
 import { useChecks } from "../lib/checks";
-import { AccessChooser, Choice, blocking, draftLint } from "../components/AccessChooser";
+import { AccessChooser, Choice, blocking, draftLint, type ChooserExtras } from "../components/AccessChooser";
 import { CheckIcon, PlusIcon, RobotIcon, SearchIcon, WarnIcon } from "../components/Icons";
-import { READ_ONLY_EXPR, ROLE, conditionFor, intentEnglish, kindNoun, newId, projectPrincipalSet, validateMember } from "../lib/policy";
+import { READ_ONLY_EXPR, ROLE, accessFromCondition, accessTos, conditionFor, intentEnglish, kindNoun, newId, projectPrincipalSet, removesAll, validateMember } from "../lib/policy";
+import { buildModeOf, changeIntent, existingFor, initialChoice, inheritedLabel, isSame, lockedTools, modeOptions, targetOf, toolNote, toolsToday, usesHint, type BuildChoice, type BuildMode } from "../lib/existing";
+import { focusForGrant } from "../map/focus";
+import { approve as approvePreview, cancel as cancelPreview, openPreview, type PreviewState } from "../preview/flow";
+
+const PreviewDialog = lazy(() => import("../preview/PreviewDialog"));
 
 type DestType = "all" | "a2a" | "runtime" | "mcp" | "api";
 const DEST_TYPES: { id: DestType; label: string; tip: string }[] = [
@@ -158,7 +165,7 @@ function RevokePicker({ onStage, initial }: { onStage: (i: Intent) => void; init
 
 // ------------------------------------------------------------------ main
 export function BuilderStep() {
-  const { inventory, ctx, ctxInfo, draft, addIntents, updateIntent, openReview, cart } = useStudio();
+  const { inventory, ctx, ctxInfo, draft, addIntents, updateIntent, openReview, openMap, cart } = useStudio();
   const { inv, engineByName } = useLookup();
   const dests = useDestinations();
   const [mode, setMode] = useState<Mode>("grant");
@@ -175,7 +182,12 @@ export function BuilderStep() {
   const [render, setRender] = useState<RenderItem | null>(null);
   const [renderErr, setRenderErr] = useState<string | null>(null);
   const [extraFixes, setExtraFixes] = useState<Intent[]>([]);
+  const [remove, setRemove] = useState(false);
+  const [preview, setPreview] = useState<PreviewState>(null);
   const lastSeq = useRef(0);
+  /** The draft's source and destination, and whether it edits a cart item: its access stands (see the pair effect). */
+  const prefill = useRef<{ key: string; editing: boolean } | null>(null);
+  const lastPair = useRef<{ key: string; own: string; mode: BuildMode } | null>(null);
 
   // Prefill from "Build a policy for this", audit "Edit in builder", or cart "Edit".
   useEffect(() => {
@@ -194,9 +206,16 @@ export function BuilderStep() {
       setDestName(i.destination.name);
       setDq("");
     } else if (i.source) setDestName("");
-    setAccess(i.access?.mode ?? (i.destination?.kind === "mcp_server" ? "read_only_hint" : "all"));
-    setTools(i.access?.tools ?? []);
-    setExpr(i.access?.expression ?? READ_ONLY_EXPR);
+    // A staged modify's new access (the remove-all form: no tool / "Remove access"); a custom expression that is one
+    // of the known forms (an exact one from a grant) is shown as that form.
+    const acc = i.kind === "modify" ? accessTos(i)[0] : i.access;
+    const a = acc?.mode === "custom" ? accessFromCondition(acc.expression) : acc;
+    const gone = i.kind === "modify" && removesAll(i as Intent);
+    setAccess(gone ? (i.destination?.kind === "mcp_server" ? "tools" : "all") : (a?.mode ?? (i.destination?.kind === "mcp_server" ? "read_only_hint" : "all")));
+    setTools(gone ? [] : (a?.tools ?? []));
+    setExpr(a?.mode === "custom" ? (a.expression ?? "") : READ_ONLY_EXPR);
+    setRemove(gone && i.destination?.kind !== "mcp_server");
+    prefill.current = i.source && i.destination ? { key: `${i.source.principal}|${i.destination.name}`, editing: !!draft.editId } : null;
   }, [draft]);
 
   const dest = dests.find((d) => d.name === destName);
@@ -204,8 +223,6 @@ export function BuilderStep() {
   const eng = engineByName.get(engine);
   const projectSet = projectPrincipalSet(inv?.engines[0]?.principal, ctxInfo.data?.project_number);
   const customErr = srcType === "custom" ? validateMember(custom) : null;
-  const effMode: AccessMode = dest && dest.kind !== "mcp_server" ? "all" : access;
-  const lint = dest ? draftLint({ mode: access, tools, expr }, dest.kind) : [];
 
   const source: Intent["source"] | undefined =
     srcType === "engine" && eng
@@ -215,19 +232,50 @@ export function BuilderStep() {
         : srcType === "custom" && !customErr
           ? { type: "custom", principal: custom.trim(), label: custom.trim().replace(/^(user|group|serviceAccount|domain):/, "") }
           : undefined;
-  const howDone = effMode === "all" || effMode === "read_only_hint" || (effMode === "tools" && tools.length > 0) || (effMode === "custom" && expr.trim().length > 0);
+  // ---------- change existing access: what the source holds on the destination today ----------
+  const ex = useMemo(() => existingFor(inv, source?.principal, dest?.name), [inv, source?.principal, dest?.name]);
+  const bmode: BuildMode = source && dest ? buildModeOf(ex) : "new";
+  const change = bmode === "change";
+  const today = useMemo(() => toolsToday(mcp, ex), [mcp, ex]);
+  const locked = useMemo(() => lockedTools(today), [today]);
+  const initial = useMemo(() => (dest ? initialChoice(dest.kind, ex, mcp) : null), [dest, ex, mcp]);
+  const choice: BuildChoice = { mode: access, tools, expr, remove };
+  const applyChoice = (c: BuildChoice) => {
+    setAccess(c.mode);
+    setTools(c.tools);
+    setExpr(c.expr);
+    setRemove(!!c.remove);
+  };
+  // A new source / destination pair (or a Sync that changes its grants) starts from its initial choice: today's access
+  // in change mode, the default for a new grant (read-only hint on MCP servers). A draft's access stands, except a
+  // non-edit draft in change mode (Audit's "Edit" of one grant among several: today's access, all of it).
+  const pairKey = source && dest ? `${source.principal}|${dest.name}` : "";
+  const ownKey = ex.own.map((b) => b.condition?.expression ?? "").join("\n");
+  useEffect(() => {
+    if (!pairKey || !initial) {
+      if (!pairKey) lastPair.current = null;
+      return;
+    }
+    const prev = lastPair.current;
+    lastPair.current = { key: pairKey, own: ownKey, mode: bmode };
+    if (prev && prev.key === pairKey && prev.own === ownKey) return;
+    const pf = prefill.current;
+    prefill.current = null;
+    if (pf && pf.key === pairKey && (bmode === "new" || pf.editing)) return;
+    applyChoice(initial);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pairKey, ownKey, bmode]);
+
+  const lint = dest ? draftLint({ mode: access, tools, expr, remove }, dest.kind, change) : [];
+  const target = source && dest ? targetOf(choice, dest.kind, bmode, new Set(locked.keys())) : null;
   const intent: Intent | null =
-    source && dest && howDone
-      ? {
-          id: editId ?? "preview",
-          kind: "grant",
-          source,
-          destination: { kind: dest.kind, id: dest.id, name: dest.name, label: dest.label },
-          access: effMode === "tools" ? { mode: "tools", tools } : effMode === "custom" ? { mode: "custom", expression: expr.trim() } : { mode: effMode },
-        }
-      : null;
+    source && dest ? changeIntent({ id: editId ?? "preview", source, destination: { kind: dest.kind, id: dest.id, name: dest.name, label: dest.label }, own: ex.own, target }) : null;
+  const same = change && isSame(ex.own, target);
   const intentKey = JSON.stringify(intent);
-  const checks = useChecks(intent);
+  // Prerequisite checks read a grant: in change mode, the grant-shaped version of the new access (the "already
+  // exists" / "change the existing grant instead" checks don't apply: this is that change).
+  const checkIntent: Intent | null = intent?.kind === "grant" ? intent : source && dest && target && target !== "remove" ? { id: "check", kind: "grant", source, destination: { kind: dest.kind, id: dest.id, name: dest.name, label: dest.label }, access: target } : null;
+  const checks = useChecks(checkIntent).filter((c) => !change || (c.id !== "dup" && c.id !== "replace"));
 
   // Live preview from POST /render (debounced); the local sentence shows instantly meanwhile.
   useEffect(() => {
@@ -256,8 +304,34 @@ export function BuilderStep() {
     setAccess("all");
     setTools([]);
     setExpr(READ_ONLY_EXPR);
+    setRemove(false);
     setExtraFixes([]);
     setEditId(undefined);
+  };
+  const editing = !!editId && cart.some((c) => c.id === editId);
+
+  // ---------- the Add to cart preview (preview/flow.ts) ----------
+  const onApprove = () => {
+    if (!preview) return;
+    const { effect } = approvePreview(preview, () => newId());
+    setPreview(null);
+    if (effect.kind !== "stage") return;
+    if (effect.replace) {
+      updateIntent(effect.replace.id, effect.replace.intent);
+      if (effect.intents.length) addIntents(effect.intents);
+    } else addIntents(effect.intents);
+    resetWhat();
+    if (effect.another) document.querySelector(".center")?.scrollTo({ top: 0, behavior: "smooth" });
+    else openReview(effect.focus);
+  };
+  const onCancel = () => {
+    if (!initial) return setPreview(null);
+    const { effect } = cancelPreview(initial);
+    setPreview(null);
+    if (effect.kind === "reset") {
+      applyChoice(effect.choice);
+      setExtraFixes([]);
+    }
   };
 
   const commit = (another: boolean, staged: Intent | null = intent) => {
@@ -275,6 +349,36 @@ export function BuilderStep() {
       openReview(finalIntent.id);
     }
   };
+
+  // The chooser in change mode: the choices offered, a note per tool (which own grant allows it today), inherited tools
+  // locked (with a link to their grant), the read-only hint's note, and today's access on other destinations.
+  const chooserExtras: ChooserExtras | undefined =
+    dest && source && (change || locked.size)
+      ? {
+          modes: change ? modeOptions(dest.kind, bmode, ex) : undefined,
+          toolNotes: change ? Object.fromEntries(today.flatMap((t) => (toolNote(t) ? [[t.name, toolNote(t)!]] : []))) : undefined,
+          locked: new Map(
+            [...locked].map(([t, h]) => [
+              t,
+              {
+                text: `allowed by ${inheritedLabel(h)}${h.via === "group" ? ` (${h.binding.member.replace(/^group:/, "")}, if it's a member)` : ""}; change it there`,
+                action: (
+                  <button type="button" className="link-btn" onClick={() => openMap(focusForGrant({ member: h.binding.member, resource: h.resource }, inv))}>
+                    Show on map
+                  </button>
+                ),
+              },
+            ]),
+          ),
+          hintNote:
+            change && dest.kind === "mcp_server" && usesHint(ex) ? (
+              <>
+                <b>Note:</b> today's read-only grant also covers read-only tools added later. Switching to <i>Specific tools</i> pins today's read-only tools and drops “future read-only tools”.
+              </>
+            ) : undefined,
+          change: change && dest.kind !== "mcp_server" ? { who: source.label, current: <>{ex.own.map((b) => (b.condition ? `“${b.condition.title || "conditional"}”: ${b.condition.expression}` : "full access (no condition)")).join("; ")}</> } : undefined,
+        }
+      : undefined;
 
   // Name filter first, then the type filter; counts on the type buttons reflect the name filter.
   const byName = dests.filter((d) => !dq || `${d.label} ${d.id} ${d.name} ${d.sub}`.toLowerCase().includes(dq.toLowerCase()));
@@ -403,11 +507,7 @@ export function BuilderStep() {
                               <button
                                 key={d.name}
                                 className="dest"
-                                onClick={() => {
-                                  setDestName(d.name);
-                                  setAccess(d.kind === "mcp_server" ? "read_only_hint" : "all");
-                                  setTools([]);
-                                }}
+                                onClick={() => setDestName(d.name)}
                               >
                                 <KindIcon kind={d.kind} />
                                 <span className="grow">
@@ -440,21 +540,45 @@ export function BuilderStep() {
                 )}
               </Section>
 
-              <Section n={3} title="How much of it?" sub={dest?.kind === "mcp_server" ? "MCP servers can be limited to some of their tools." : "A2A agents and APIs are all-or-nothing."} done={!!dest && howDone}>
+              <Section
+                n={3}
+                title="How much of it?"
+                sub={change ? "Change the access it has today: the new access replaces every grant below in one change." : dest?.kind === "mcp_server" ? "MCP servers can be limited to some of their tools." : "A2A agents and APIs are all-or-nothing."}
+                done={!!intent}
+              >
                 {!dest ? (
                   <p className="muted">Pick a destination first.</p>
                 ) : (
-                  <AccessChooser
-                    name="how"
-                    dest={dest}
-                    mcp={mcp}
-                    value={{ mode: access, tools, expr }}
-                    onChange={(d) => {
-                      setAccess(d.mode);
-                      setTools(d.tools);
-                      setExpr(d.expr);
-                    }}
-                  />
+                  <>
+                    {change && source && (
+                      <Callout tone="info" title="Change existing access">
+                        <p className="existing-lead">
+                          <b>{source.label}</b> already has access to <b>{dest.label}</b>. Your change replaces it.
+                        </p>
+                        <ul className="existing-list">
+                          {ex.own.map((b, k) => (
+                            <li key={k} className="small">
+                              {b.english || b.member_label} {b.condition ? <Badge tone="blue">{b.condition.title || "conditional"}</Badge> : <Badge tone="neutral">unconditional</Badge>}
+                            </li>
+                          ))}
+                        </ul>
+                        {ex.own.length > 1 && <p className="muted small">{ex.own.length} separate grants: they become one (or are all removed) in a single IAM update.</p>}
+                      </Callout>
+                    )}
+                    <AccessChooser
+                      name="how"
+                      dest={dest}
+                      mcp={mcp}
+                      value={{ mode: access, tools, expr, remove }}
+                      onChange={(d) => {
+                        setAccess(d.mode);
+                        setTools(d.tools);
+                        setExpr(d.expr);
+                        setRemove(!!d.remove);
+                      }}
+                      extras={chooserExtras}
+                    />
+                  </>
                 )}
               </Section>
 
@@ -463,6 +587,12 @@ export function BuilderStep() {
                 {intent ? (
                   <>
                     <p className="preview-sentence">{render?.english ?? intentEnglish(intent)}</p>
+                    {change && (intent.kind === "revoke" || removesAll(intent)) && (
+                      <Callout tone="danger" title={dest?.kind === "mcp_server" ? "No tool left: this removes the access" : "This removes the access"}>
+                        Staged as {intent.kind === "revoke" ? "a revoke of the grant" : `one change that removes all ${ex.own.length} grants`}.
+                        {locked.size > 0 && ` Tools allowed by inherited grants (${[...locked.keys()].join(", ")}) stay allowed.`}
+                      </Callout>
+                    )}
                     {checks.length > 0 && (
                       <div className="checks">
                         {checks.map((c) => {
@@ -499,26 +629,36 @@ export function BuilderStep() {
                   </>
                 ) : (
                   <p className="preview-sentence muted">
-                    {!source ? "Choose who is calling (1)…" : !dest ? `${source.label} can call… (choose a destination)` : "Choose at least one tool…"}
+                    {!source
+                      ? "Choose who is calling (1)…"
+                      : !dest
+                        ? `${source.label} can call… (choose a destination)`
+                        : same
+                          ? `No change yet: that's the access ${source.label} has today. Pick different access, or uncheck every tool to remove it.`
+                          : access === "custom"
+                            ? "Write the condition…"
+                            : "Choose at least one tool…"}
                   </p>
                 )}
                 <div className="preview-actions">
                   <Tip
                     tip={
                       !intent
-                        ? "Answer the questions above first."
+                        ? same
+                          ? "Nothing to change yet."
+                          : "Answer the questions above first."
                         : blocking(lint)
                           ? "Fix the condition expression first."
-                          : `${editId && cart.some((c) => c.id === editId) ? "Replace the staged item with this policy" : "Stage this policy in the cart"}${extraFixes.length ? ` plus ${extraFixes.length} fix` : ""}, then open Review & output. Nothing changes in Google Cloud until you apply.`
+                          : `Preview the change${extraFixes.length ? ` and ${extraFixes.length} fix` : ""} first (a small map and what changes), then approve it to ${editing ? "replace the staged item" : "stage it in the cart"} and open Review & output. Nothing changes in Google Cloud until you apply.`
                     }
                   >
-                    <button className="btn btn-primary" disabled={!intent || blocking(lint)} onClick={() => commit(false)}>
-                      {editId && cart.some((c) => c.id === editId) ? "Save changes" : "Add to cart"}
+                    <button className="btn btn-primary" disabled={!intent || blocking(lint)} onClick={() => intent && setPreview(openPreview(intent, extraFixes, false, editing ? editId : undefined))}>
+                      {editing ? "Save changes" : "Add to cart"}
                       {extraFixes.length > 0 && ` (+${extraFixes.length} fix)`}
                     </button>
                   </Tip>
-                  <Tip tip={intent ? "Stage this policy in the cart and start a new one, keeping who is calling. Nothing changes in Google Cloud until you apply." : "Answer the questions above first."}>
-                    <button className="btn btn-tonal" disabled={!intent} onClick={() => commit(true)}>
+                  <Tip tip={intent ? "Preview the change, then stage it and start a new one, keeping who is calling. Nothing changes in Google Cloud until you apply." : "Answer the questions above first."}>
+                    <button className="btn btn-tonal" disabled={!intent || blocking(lint)} onClick={() => intent && setPreview(openPreview(intent, extraFixes, true, editing ? editId : undefined))}>
                       <PlusIcon size={16} /> Add & build another
                     </button>
                   </Tip>
@@ -528,6 +668,24 @@ export function BuilderStep() {
             </div>
           )}
         </Load>
+      )}
+      {preview && (
+        <Suspense
+          fallback={
+            <div className="glass-backdrop">
+              <Spinner label="Loading the preview…" />
+            </div>
+          }
+        >
+          <PreviewDialog
+            intent={preview.intent}
+            extras={preview.extras.length}
+            approveLabel={preview.editId ? "Approve: save changes" : preview.another ? "Approve & build another" : "Approve: add to cart"}
+            onApprove={onApprove}
+            onModify={() => setPreview(null)}
+            onCancel={onCancel}
+          />
+        </Suspense>
       )}
     </>
   );

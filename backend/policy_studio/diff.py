@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from .conditions import EGRESSOR, condition_for, same_condition
-from .english import access_words, condition_english, make_binding
+from .english import condition_english, make_binding, modify_change
 from .gcp.engines import tail
 from .model import Binding, Condition, DiffItem, Gateway, Intent, Inventory
 from .gcp import model_armor as ma_mod
@@ -75,22 +75,37 @@ def _diff_iam(intent: Intent, inv: Inventory, env: RenderEnv) -> DiffItem:
 
 def _diff_modify(intent: Intent, mine: list[Binding], want: Optional[Condition], label: str, kind: str,
                  inv: Inventory) -> DiffItem:
-    """replace: the binding matching access_from exactly goes, the new one comes, in one change."""
-    old = condition_for(intent.access_from)
-    change = f"{access_words(intent.access_from)} → {access_words(intent.access)}"
-    if same_condition(old, want):
+    """replace: the bindings matching access_from (or each of access_from_list) exactly go, the new one comes (none
+    for the remove-all form: status remove), in one change. `current` is every binding of the member today."""
+    olds = [condition_for(a) for a in intent.froms]
+    news = [condition_for(a) for a in intent.tos]
+    change = modify_change(intent)
+    key = lambda c: " ".join((c.expression if c else "").split())  # noqa: E731
+    if olds and {key(c) for c in olds} == {key(c) for c in news}:
         return DiffItem(intent_id=intent.id, status="present", current=mine, after=mine,
                         detail="the new access is the same as the current one")
-    hit = [b for b in mine if same_condition(b.condition, old)]
-    has_new = any(same_condition(b.condition, want) for b in mine)
-    if not hit:
-        if has_new:
+    has = lambda c: any(same_condition(b.condition, c) for b in mine)  # noqa: E731
+    missing = [c for c in olds if not has(c)]
+    if missing:
+        gone = [c for c in olds if not any(same_condition(c, n) for n in news)]
+        if all(has(n) for n in news) and not any(has(c) for c in gone):
+            what = "the new binding is there and the old one isn't" if not intent.multi else \
+                "the new bindings are there and the old ones aren't"
             return DiffItem(intent_id=intent.id, status="present", current=mine, after=mine,
-                            detail=f"already changed ({change}): the new binding is there and the old one isn't")
+                            detail=f"already changed ({change}): {what}")
         return DiffItem(intent_id=intent.id, status="absent", current=mine, after=mine,
-                        detail="the grant to change wasn't found: it changed since you looked; Sync and try again")
-    rest = [b for b in mine if not same_condition(b.condition, old)]
-    after = rest if has_new else rest + [_new_binding(intent, want, label, kind, inv)]
+                        detail="the grant to change wasn't found: it changed since you looked; Sync and try again"
+                        if not intent.multi else
+                        f"{len(missing)} of the {len(olds)} grants to replace weren't found: they changed since you "
+                        "looked; Sync and try again")
+    rest = [b for b in mine if not any(same_condition(b.condition, c) for c in olds)]
+    after = list(rest)
+    for n in news:
+        if not any(same_condition(b.condition, n) for b in after):
+            after.append(_new_binding(intent, n, label, kind, inv))
+    if not news and olds:
+        return DiffItem(intent_id=intent.id, status="remove", current=mine, after=after,
+                        detail=f"removes all {len(olds)} grants ({change})")
     return DiffItem(intent_id=intent.id, status="replace", current=mine, after=after, detail=change)
 
 

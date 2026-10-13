@@ -1,5 +1,5 @@
 {
-  "_comment": "modify intents against one resource's roles/iap.egressor bindings (one member each). Shared by backend/tests/test_modify.py (apply.modify_binding and /diff) and frontend/src/api/mock.test.ts (the mock's apply and diff), so the mock behaves like the backend. after: the bindings after apply, in order, by expression (null = unconditional); outcome: modify_binding's.",
+  "_comment": "modify intents against one resource's roles/iap.egressor bindings (one member each). Shared by backend/tests/test_modify.py (apply.modify_binding and /diff) and frontend/src/api/mock.test.ts (the mock's apply and diff), so the mock behaves like the backend. after: the bindings after apply, in order, by expression (null = unconditional); outcome: modify_bindings'. Cases with access_from_list / access_list are modifies of several bindings (access_list [] = remove all).",
   "member": "principal://agents.global.org-777.system.id.goog/resources/aiplatform/projects/4242/locations/europe-west4/reasoningEngines/222",
   "cases": [
     {
@@ -284,6 +284,276 @@
         {
           "member": "principal://agents.global.org-777.system.id.goog/resources/aiplatform/projects/4242/locations/europe-west4/reasoningEngines/222",
           "expression": "api.getAttribute('iap.googleapis.com/mcp.tool.isReadOnly', false) == true || api.getAttribute('iap.googleapis.com/mcp.toolName', '') == ''"
+        }
+      ]
+    },
+    {
+      "name": "several: read-only + close_ticket -> three tools; another member kept",
+      "bindings": [
+        {
+          "member": "principal://agents.global.org-777.system.id.goog/resources/aiplatform/projects/4242/locations/europe-west4/reasoningEngines/222",
+          "expression": "api.getAttribute('iap.googleapis.com/mcp.tool.isReadOnly', false) == true || api.getAttribute('iap.googleapis.com/mcp.toolName', '') == ''"
+        },
+        {
+          "member": "principal://agents.global.org-777.system.id.goog/resources/aiplatform/projects/4242/locations/europe-west4/reasoningEngines/222",
+          "expression": "api.getAttribute('iap.googleapis.com/mcp.toolName', '') in ['close_ticket', '']"
+        },
+        {
+          "member": "principal://agents.global.org-777.system.id.goog/resources/aiplatform/projects/4242/locations/europe-west4/reasoningEngines/111",
+          "expression": "api.getAttribute('iap.googleapis.com/mcp.tool.isReadOnly', false) == true || api.getAttribute('iap.googleapis.com/mcp.toolName', '') == ''"
+        }
+      ],
+      "access_from_list": [
+        {
+          "mode": "custom",
+          "expression": "api.getAttribute('iap.googleapis.com/mcp.tool.isReadOnly', false) == true || api.getAttribute('iap.googleapis.com/mcp.toolName', '') == ''",
+          "title": "t"
+        },
+        {
+          "mode": "custom",
+          "expression": "api.getAttribute('iap.googleapis.com/mcp.toolName', '') in ['close_ticket', '']",
+          "title": "t"
+        }
+      ],
+      "access": {
+        "mode": "tools",
+        "tools": [
+          "list_tickets",
+          "get_ticket",
+          "update_ticket"
+        ]
+      },
+      "status": "replace",
+      "outcome": "changed",
+      "after": [
+        {
+          "member": "principal://agents.global.org-777.system.id.goog/resources/aiplatform/projects/4242/locations/europe-west4/reasoningEngines/111",
+          "expression": "api.getAttribute('iap.googleapis.com/mcp.tool.isReadOnly', false) == true || api.getAttribute('iap.googleapis.com/mcp.toolName', '') == ''"
+        },
+        {
+          "member": "principal://agents.global.org-777.system.id.goog/resources/aiplatform/projects/4242/locations/europe-west4/reasoningEngines/222",
+          "expression": "api.getAttribute('iap.googleapis.com/mcp.toolName', '') in ['list_tickets', 'get_ticket', 'update_ticket', '']"
+        }
+      ]
+    },
+    {
+      "name": "several: three bindings -> one (the new one equals one of them)",
+      "bindings": [
+        {
+          "member": "principal://agents.global.org-777.system.id.goog/resources/aiplatform/projects/4242/locations/europe-west4/reasoningEngines/222",
+          "expression": "api.getAttribute('iap.googleapis.com/mcp.tool.isReadOnly', false) == true || api.getAttribute('iap.googleapis.com/mcp.toolName', '') == ''"
+        },
+        {
+          "member": "principal://agents.global.org-777.system.id.goog/resources/aiplatform/projects/4242/locations/europe-west4/reasoningEngines/222",
+          "expression": "api.getAttribute('iap.googleapis.com/mcp.toolName', '') in ['close_ticket', '']"
+        },
+        {
+          "member": "principal://agents.global.org-777.system.id.goog/resources/aiplatform/projects/4242/locations/europe-west4/reasoningEngines/222",
+          "expression": "request.time < timestamp('2030-01-01T00:00:00Z')"
+        },
+        {
+          "member": "principal://agents.global.org-777.system.id.goog/resources/aiplatform/projects/4242/locations/europe-west4/reasoningEngines/111",
+          "expression": null
+        }
+      ],
+      "access_from_list": [
+        {
+          "mode": "custom",
+          "expression": "api.getAttribute('iap.googleapis.com/mcp.tool.isReadOnly', false) == true || api.getAttribute('iap.googleapis.com/mcp.toolName', '') == ''",
+          "title": "t"
+        },
+        {
+          "mode": "custom",
+          "expression": "api.getAttribute('iap.googleapis.com/mcp.toolName', '') in ['close_ticket', '']",
+          "title": "t"
+        },
+        {
+          "mode": "custom",
+          "expression": "request.time < timestamp('2030-01-01T00:00:00Z')",
+          "title": "t"
+        }
+      ],
+      "access": {
+        "mode": "read_only_hint"
+      },
+      "status": "replace",
+      "outcome": "changed",
+      "after": [
+        {
+          "member": "principal://agents.global.org-777.system.id.goog/resources/aiplatform/projects/4242/locations/europe-west4/reasoningEngines/111",
+          "expression": null
+        },
+        {
+          "member": "principal://agents.global.org-777.system.id.goog/resources/aiplatform/projects/4242/locations/europe-west4/reasoningEngines/222",
+          "expression": "api.getAttribute('iap.googleapis.com/mcp.tool.isReadOnly', false) == true || api.getAttribute('iap.googleapis.com/mcp.toolName', '') == ''"
+        }
+      ]
+    },
+    {
+      "name": "several: remove all",
+      "bindings": [
+        {
+          "member": "principal://agents.global.org-777.system.id.goog/resources/aiplatform/projects/4242/locations/europe-west4/reasoningEngines/222",
+          "expression": "api.getAttribute('iap.googleapis.com/mcp.tool.isReadOnly', false) == true || api.getAttribute('iap.googleapis.com/mcp.toolName', '') == ''"
+        },
+        {
+          "member": "principal://agents.global.org-777.system.id.goog/resources/aiplatform/projects/4242/locations/europe-west4/reasoningEngines/222",
+          "expression": "api.getAttribute('iap.googleapis.com/mcp.toolName', '') in ['close_ticket', '']"
+        },
+        {
+          "member": "principal://agents.global.org-777.system.id.goog/resources/aiplatform/projects/4242/locations/europe-west4/reasoningEngines/111",
+          "expression": "api.getAttribute('iap.googleapis.com/mcp.toolName', '') in ['close_ticket', '']"
+        }
+      ],
+      "access_from_list": [
+        {
+          "mode": "custom",
+          "expression": "api.getAttribute('iap.googleapis.com/mcp.tool.isReadOnly', false) == true || api.getAttribute('iap.googleapis.com/mcp.toolName', '') == ''",
+          "title": "t"
+        },
+        {
+          "mode": "custom",
+          "expression": "api.getAttribute('iap.googleapis.com/mcp.toolName', '') in ['close_ticket', '']",
+          "title": "t"
+        }
+      ],
+      "access_list": [],
+      "status": "remove",
+      "outcome": "changed",
+      "after": [
+        {
+          "member": "principal://agents.global.org-777.system.id.goog/resources/aiplatform/projects/4242/locations/europe-west4/reasoningEngines/111",
+          "expression": "api.getAttribute('iap.googleapis.com/mcp.toolName', '') in ['close_ticket', '']"
+        }
+      ]
+    },
+    {
+      "name": "several: one binding missing",
+      "bindings": [
+        {
+          "member": "principal://agents.global.org-777.system.id.goog/resources/aiplatform/projects/4242/locations/europe-west4/reasoningEngines/222",
+          "expression": "api.getAttribute('iap.googleapis.com/mcp.tool.isReadOnly', false) == true || api.getAttribute('iap.googleapis.com/mcp.toolName', '') == ''"
+        },
+        {
+          "member": "principal://agents.global.org-777.system.id.goog/resources/aiplatform/projects/4242/locations/europe-west4/reasoningEngines/111",
+          "expression": null
+        }
+      ],
+      "access_from_list": [
+        {
+          "mode": "custom",
+          "expression": "api.getAttribute('iap.googleapis.com/mcp.tool.isReadOnly', false) == true || api.getAttribute('iap.googleapis.com/mcp.toolName', '') == ''",
+          "title": "t"
+        },
+        {
+          "mode": "custom",
+          "expression": "api.getAttribute('iap.googleapis.com/mcp.toolName', '') in ['close_ticket', '']",
+          "title": "t"
+        }
+      ],
+      "access": {
+        "mode": "tools",
+        "tools": [
+          "list_tickets",
+          "get_ticket",
+          "update_ticket"
+        ]
+      },
+      "status": "absent",
+      "outcome": "not_found",
+      "after": [
+        {
+          "member": "principal://agents.global.org-777.system.id.goog/resources/aiplatform/projects/4242/locations/europe-west4/reasoningEngines/222",
+          "expression": "api.getAttribute('iap.googleapis.com/mcp.tool.isReadOnly', false) == true || api.getAttribute('iap.googleapis.com/mcp.toolName', '') == ''"
+        },
+        {
+          "member": "principal://agents.global.org-777.system.id.goog/resources/aiplatform/projects/4242/locations/europe-west4/reasoningEngines/111",
+          "expression": null
+        }
+      ]
+    },
+    {
+      "name": "several: already merged",
+      "bindings": [
+        {
+          "member": "principal://agents.global.org-777.system.id.goog/resources/aiplatform/projects/4242/locations/europe-west4/reasoningEngines/222",
+          "expression": "api.getAttribute('iap.googleapis.com/mcp.toolName', '') in ['list_tickets', 'get_ticket', 'update_ticket', '']"
+        }
+      ],
+      "access_from_list": [
+        {
+          "mode": "custom",
+          "expression": "api.getAttribute('iap.googleapis.com/mcp.tool.isReadOnly', false) == true || api.getAttribute('iap.googleapis.com/mcp.toolName', '') == ''",
+          "title": "t"
+        },
+        {
+          "mode": "custom",
+          "expression": "api.getAttribute('iap.googleapis.com/mcp.toolName', '') in ['close_ticket', '']",
+          "title": "t"
+        }
+      ],
+      "access": {
+        "mode": "tools",
+        "tools": [
+          "list_tickets",
+          "get_ticket",
+          "update_ticket"
+        ]
+      },
+      "status": "present",
+      "outcome": "already",
+      "after": [
+        {
+          "member": "principal://agents.global.org-777.system.id.goog/resources/aiplatform/projects/4242/locations/europe-west4/reasoningEngines/222",
+          "expression": "api.getAttribute('iap.googleapis.com/mcp.toolName', '') in ['list_tickets', 'get_ticket', 'update_ticket', '']"
+        }
+      ]
+    },
+    {
+      "name": "several: the undo puts the original set back",
+      "bindings": [
+        {
+          "member": "principal://agents.global.org-777.system.id.goog/resources/aiplatform/projects/4242/locations/europe-west4/reasoningEngines/222",
+          "expression": "api.getAttribute('iap.googleapis.com/mcp.toolName', '') in ['list_tickets', 'get_ticket', 'update_ticket', '']"
+        },
+        {
+          "member": "principal://agents.global.org-777.system.id.goog/resources/aiplatform/projects/4242/locations/europe-west4/reasoningEngines/111",
+          "expression": "api.getAttribute('iap.googleapis.com/mcp.tool.isReadOnly', false) == true || api.getAttribute('iap.googleapis.com/mcp.toolName', '') == ''"
+        }
+      ],
+      "access_from_list": [
+        {
+          "mode": "custom",
+          "expression": "api.getAttribute('iap.googleapis.com/mcp.toolName', '') in ['list_tickets', 'get_ticket', 'update_ticket', '']",
+          "title": "t"
+        }
+      ],
+      "access_list": [
+        {
+          "mode": "custom",
+          "expression": "api.getAttribute('iap.googleapis.com/mcp.tool.isReadOnly', false) == true || api.getAttribute('iap.googleapis.com/mcp.toolName', '') == ''",
+          "title": "t"
+        },
+        {
+          "mode": "custom",
+          "expression": "api.getAttribute('iap.googleapis.com/mcp.toolName', '') in ['close_ticket', '']",
+          "title": "t"
+        }
+      ],
+      "status": "replace",
+      "outcome": "changed",
+      "after": [
+        {
+          "member": "principal://agents.global.org-777.system.id.goog/resources/aiplatform/projects/4242/locations/europe-west4/reasoningEngines/111",
+          "expression": "api.getAttribute('iap.googleapis.com/mcp.tool.isReadOnly', false) == true || api.getAttribute('iap.googleapis.com/mcp.toolName', '') == ''"
+        },
+        {
+          "member": "principal://agents.global.org-777.system.id.goog/resources/aiplatform/projects/4242/locations/europe-west4/reasoningEngines/222",
+          "expression": "api.getAttribute('iap.googleapis.com/mcp.tool.isReadOnly', false) == true || api.getAttribute('iap.googleapis.com/mcp.toolName', '') == ''"
+        },
+        {
+          "member": "principal://agents.global.org-777.system.id.goog/resources/aiplatform/projects/4242/locations/europe-west4/reasoningEngines/222",
+          "expression": "api.getAttribute('iap.googleapis.com/mcp.toolName', '') in ['close_ticket', '']"
         }
       ]
     }

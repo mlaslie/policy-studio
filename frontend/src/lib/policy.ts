@@ -50,6 +50,32 @@ export function accessWords(a: Access | undefined): string {
   return "a custom condition";
 }
 
+/** modify: the bindings removed (access_from_list, else [access_from]). */
+export const accessFroms = (i: Pick<Intent, "access_from" | "access_from_list">): Access[] => i.access_from_list ?? (i.access_from ? [i.access_from] : []);
+/** modify: the bindings added (access_list, else [access]); [] = the remove-all form. */
+export const accessTos = (i: Pick<Intent, "access" | "access_list">): Access[] => i.access_list ?? (i.access ? [i.access] : []);
+/** A modify that isn't one binding → one binding (several removed, none or several added). */
+export const isMultiModify = (i: Intent) => i.kind === "modify" && !(accessFroms(i).length === 1 && accessTos(i).length === 1);
+/** The remove-all form of modify: bindings removed, none added (destructive). */
+export const removesAll = (i: Intent) => i.kind === "modify" && accessFroms(i).length > 0 && accessTos(i).length === 0;
+
+/** Shortest phrase for an access, as the backend's english.access_short ("read-only", "close_ticket"). */
+export function accessShort(a: Access | undefined): string {
+  const acc = a?.mode === "custom" ? accessFromCondition(a.expression?.trim() ? a.expression : undefined) : a;
+  if (!acc || acc.mode === "all") return "full access";
+  if (acc.mode === "read_only_hint") return "read-only";
+  if (acc.mode === "tools") return (acc.tools ?? []).filter(Boolean).join(", ") || "no tools";
+  return "a custom condition";
+}
+
+/** "before → after" of a modify, as the backend's english.modify_change: accessWords for one binding each way, else
+ *  the short form of each ("read-only + close_ticket → list_tickets, get_ticket, update_ticket"; "→ no access"). */
+export function modifyChange(i: Intent): string {
+  if (!isMultiModify(i)) return `${accessWords(i.access_from)} → ${accessWords(i.access)}`;
+  const side = (xs: Access[]) => xs.map(accessShort).join(" + ") || "no access";
+  return `${side(accessFroms(i))} → ${side(accessTos(i))}`;
+}
+
 export const ACCESS_LABEL: Record<AccessMode, string> = {
   all: "Full access",
   read_only_hint: "Read-only tools (by MCP hint)",
@@ -84,8 +110,13 @@ export function intentEnglish(i: Intent): string {
       const c = conditionFor(i.access);
       return c ? `Remove ${who}'s “${c.title}” grant on ${dest}.` : `Remove ${who}'s unconditional grant on ${dest}.`;
     }
-    case "modify":
-      return `Change ${who}'s access to ${dest}: ${accessWords(i.access_from)} → ${accessWords(i.access)}.`;
+    case "modify": {
+      if (removesAll(i)) {
+        const n = accessFroms(i).length;
+        return `Remove all of ${who}'s access to ${dest} (${n} ${n === 1 ? "grant" : "grants"}): ${modifyChange(i)}.`;
+      }
+      return `Change ${who}'s access to ${dest}: ${modifyChange(i)}.`;
+    }
     case "bind_gateway":
       return i.gateway?.direction === "ingress"
         ? `Route traffic into ${eng} through ingress gateway ${gw}.`
@@ -168,6 +199,7 @@ export function intentKey(i: Intent): string {
   const g = i.gateway;
   const a = i.access;
   const f = i.access_from;
+  const list = (xs: Access[] | undefined) => (xs ? xs.map((x) => stable([x.mode, [...(x.tools ?? [])].filter(Boolean).sort(), x.expression ?? "", x.title ?? null])).sort() : null);
   return stable({
     kind: i.kind,
     gateway: g ? [shortName(g.name), g.direction] : null,
@@ -176,6 +208,8 @@ export function intentKey(i: Intent): string {
     destination: i.destination ? [i.destination.kind, i.destination.id || shortName(i.destination.name)] : null,
     access: a ? [a.mode, [...(a.tools ?? [])].filter(Boolean).sort(), a.expression ?? "", a.title ?? null] : null,
     access_from: f ? [f.mode, [...(f.tools ?? [])].filter(Boolean).sort(), f.expression ?? "", f.title ?? null] : null,
+    access_from_list: list(i.access_from_list),
+    access_list: list(i.access_list),
     params: i.params ?? null,
     extension: i.extension ? shortName(i.extension) : null,
     mode: i.mode ?? null,

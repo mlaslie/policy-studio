@@ -10,7 +10,7 @@
 import type { ApplyConfirm, ApplyEvent, AuthInfo, Binding, Ctx, GatewayLogEntry, GatewayLogsResp, GatewaysResp, Intent, PreflightItem, PreflightResult } from "./types";
 import { buildWorld, MOCK_NUMBER, refreshEnforcement, templateFrom, type World } from "./mockData";
 import { mockDiff, mockRender, modifyBindings } from "./mockRender";
-import { ROLE, conditionFor, intentEnglish, intentKey, newId, projectPrincipalSet } from "../lib/policy";
+import { ROLE, accessFroms, accessTos, conditionFor, intentEnglish, intentKey, isMultiModify, newId, projectPrincipalSet, removesAll } from "../lib/policy";
 import { NO_IDENTITY_REASON } from "../components/Redeploy";
 import { accessFromCondition } from "../lib/grants";
 import { modifyWarning } from "../lib/apply";
@@ -335,7 +335,19 @@ export function preflight(ctx: Ctx, intents: Intent[]): PreflightResult {
       // Like the backend: the same access, or a grant that isn't there any more, would certainly fail.
       const { outcome } = modifyBindings(w.inventory.access[i.destination?.name ?? ""] ?? [], i);
       if (outcome === "same") return { intent_id: i.id, status: "blocked", fix: "already", reason: "The new access is the same as the current one, so there is nothing to change." };
-      if (outcome === "not_found") return { intent_id: i.id, status: "blocked", fix: "", reason: "The grant changed since you looked: there is no binding with this member and the old condition any more. Sync and try again." };
+      if (outcome === "not_found") {
+        const mine = (w.inventory.access[i.destination?.name ?? ""] ?? []).filter((b) => b.member === i.source?.principal && b.role === ROLE);
+        const froms = accessFroms(i).map(conditionFor);
+        const missing = froms.filter((c) => !mine.some((b) => sameCond(b.condition, c))).length;
+        return {
+          intent_id: i.id,
+          status: "blocked",
+          fix: "",
+          reason: isMultiModify(i)
+            ? `The grant changed since you looked: ${missing} of the ${froms.length} bindings to replace ${missing === 1 ? "is" : "are"}n't there any more. Sync and try again.`
+            : "The grant changed since you looked: there is no binding with this member and the old condition any more. Sync and try again.",
+        };
+      }
       const ro = new Set(w.inventory.mcp_servers.find((m) => m.name === i.destination?.name)?.tools.filter((t) => t.read_only).map((t) => t.name));
       const warning = modifyWarning(i, i.destination?.kind === "mcp_server" ? ro : undefined);
       return { intent_id: i.id, status: "ok", ...(warning ? { warning } : {}) };
@@ -466,7 +478,8 @@ const sleep = (ms: number, signal?: AbortSignal) =>
 const DESTRUCTIVE = new Set<Intent["kind"]>(["revoke", "unbind_gateway", "model_armor_off"]);
 const SETUP = new Set<Intent["kind"]>(["model_armor_template", "model_armor_extension", "iam_project_grant"]);
 const destructive = (i: Intent) =>
-  DESTRUCTIVE.has(i.kind) || (SETUP.has(i.kind) && !!i.params?.delete) || (i.kind === "set_enforcement" && i.mode === "DRY_RUN") || (i.kind === "dedicate_extension" && !!i.revert);
+  DESTRUCTIVE.has(i.kind) ||
+  removesAll(i) || (SETUP.has(i.kind) && !!i.params?.delete) || (i.kind === "set_enforcement" && i.mode === "DRY_RUN") || (i.kind === "dedicate_extension" && !!i.revert);
 // Like the backend: setup creates first, then dedicated IAP extensions, then the cart order, then reverts, then setup deletes in reverse.
 const runOrder = (i: Intent) =>
   i.params?.delete
@@ -485,9 +498,16 @@ function inverse(w: World, i: Intent): Intent | Intent[] | null {
       const cond = conditionFor(i.access);
       return { id: id(), kind: "revoke", source: i.source, destination: i.destination, access: cond ? { mode: "custom", expression: cond.expression, title: cond.title } : { mode: "all" } };
     }
-    case "modify":
-      // The reverse modify: from the new binding (verbatim) back to the one it replaced.
-      return { ...i, id: id(), access_from: exactOf(conditionFor(i.access)), access: exactOf(conditionFor(i.access_from)) };
+    case "modify": {
+      if (!isMultiModify(i))
+        // The reverse modify: from the new binding (verbatim) back to the one it replaced.
+        return { ...i, id: id(), access_from: exactOf(conditionFor(i.access)), access: exactOf(conditionFor(i.access_from)) };
+      // Several bindings: remove what was added, put back every removed binding verbatim (its condition and title).
+      const cur = w.inventory.access[i.destination?.name ?? ""] ?? [];
+      const removed = accessFroms(i).map((a) => cur.find((b) => b.member === i.source?.principal && b.role === ROLE && sameCond(b.condition, conditionFor(a)))?.condition ?? conditionFor(a));
+      const { access_from: _f, access: _a, ...rest } = i;
+      return { ...rest, id: id(), access_from_list: accessTos(i).map((a) => exactOf(conditionFor(a))), access_list: removed.map(exactOf) };
+    }
     case "revoke": {
       const cur = w.inventory.access[i.destination?.name ?? ""] ?? [];
       const want = conditionFor(i.access);
@@ -569,7 +589,7 @@ export async function* applyStream(ctx: Ctx, intents: Intent[], confirm: ApplyCo
     if (i.kind === "modify" && d.status === "absent") {
       await sleep(400, signal);
       counts.failed++;
-      yield { intent_id: i.id, state: "failed", detail: "The grant changed since you looked (no binding with this member, role and the old condition); Sync and try again." };
+      yield { intent_id: i.id, state: "failed", detail: isMultiModify(i) ? "The grant changed since you looked (one of the bindings to replace isn't there any more); Sync and try again." : "The grant changed since you looked (no binding with this member, role and the old condition); Sync and try again." };
       continue;
     }
     if (d.status === "present" || d.status === "absent") {
@@ -633,7 +653,11 @@ export async function* applyStream(ctx: Ctx, intents: Intent[], confirm: ApplyCo
           : i.kind === "revoke"
             ? "Read back: the binding is gone."
             : i.kind === "modify"
-              ? "Read back: the new binding is there and the old one is gone."
+              ? removesAll(i)
+                ? `Read back: all ${accessFroms(i).length} bindings are gone.`
+                : isMultiModify(i)
+                  ? "Read back: the new binding is there and the old ones are gone."
+                  : "Read back: the new binding is there and the old one is gone."
             : i.kind.endsWith("gateway")
               ? "Read back: agentGatewayConfig matches."
               : i.kind === "set_enforcement"

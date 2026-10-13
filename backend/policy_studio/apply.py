@@ -63,12 +63,14 @@ def run_order(it: Intent) -> int:
 
 
 def is_destructive(raw: Any) -> bool:
-    """Revokes, unbinds, Model Armor off, setup deletes, dry run (stops blocking) and reverting a dedicated IAP
-    extension (deletes it)."""
+    """Revokes, unbinds, Model Armor off, setup deletes, dry run (stops blocking), reverting a dedicated IAP
+    extension (deletes it) and the remove-all form of modify (bindings removed, none added)."""
     if not isinstance(raw, dict):
         return False
     if raw.get("kind") in DESTRUCTIVE:
         return True
+    if raw.get("kind") == "modify":
+        return raw.get("access_list") == [] and bool(raw.get("access_from_list") or raw.get("access_from"))
     if raw.get("kind") == "set_enforcement":
         return raw.get("mode") == "DRY_RUN"
     if raw.get("kind") == "dedicate_extension":
@@ -86,7 +88,8 @@ def check_confirm(ctx: Context, raw_intents: list[Any], confirm: dict[str, Any] 
         return f"confirm.project must equal the context project ({ctx.project})"
     destructive = [str(i.get("id", "?")) for i in raw_intents if is_destructive(i)]
     if destructive and confirm.get("acknowledge_destructive") is not True:
-        return ("revokes, unbinds, Model Armor off, setup deletes, dry run and reverting a dedicated extension need "
+        return ("revokes, unbinds, Model Armor off, setup deletes, dry run, reverting a dedicated extension and "
+                "removing all of a member's access need "
                 "confirm.acknowledge_destructive = true: "
                 + ", ".join(destructive))
     return None
@@ -138,12 +141,33 @@ def modify_binding(pol: dict, member: str, role: str, old: Any, new: Any) -> tup
     policy edit; other bindings untouched. Returns (policy, outcome, removed conditions): outcome "changed", "same"
     (old and new are the same condition), "already" (the new binding is there and the old one isn't) or
     "not_found"."""
-    if same_condition(old, new):
+    return modify_bindings(pol, member, role, [old], [new])
+
+
+def modify_bindings(pol: dict, member: str, role: str, olds: list[Any], news: list[Any]) -> tuple[dict, str, list[dict]]:
+    """modify_binding for several bindings: remove member's bindings of role matching each of `olds` exactly, then add
+    one binding per `news` ([] = the remove-all form), in one policy edit; other members' and roles' bindings are
+    untouched. Outcome "same" (the same set of conditions), "not_found" (one of `olds` isn't there), "already" (none
+    of `olds` is there except ones also in `news`, and every one of `news` is) or "changed"."""
+    def key(c: Any) -> str:
+        return " ".join(((c.get("expression") if isinstance(c, dict) else c.expression) if c else "").split())
+    if olds and {key(c) for c in olds} == {key(c) for c in news}:
         return pol, "same", []
-    out, changed, removed = remove_binding(pol, member, role, old)
-    if not changed:
-        return pol, "already" if _has(pol, member, role, new) else "not_found", []
-    out, _ = add_binding(out, member, role, new)
+    if any(not _has(pol, member, role, c) for c in olds):
+        gone = [c for c in olds if not any(same_condition(c, n) for n in news)]
+        done = all(_has(pol, member, role, n) for n in news) and not any(_has(pol, member, role, c) for c in gone)
+        return pol, "already" if done else "not_found", []
+    if not olds and all(_has(pol, member, role, n) for n in news):
+        return pol, "already", []
+    out, removed = pol, []
+    for c in olds:
+        out, changed, rem = remove_binding(out, member, role, c)
+        removed += [r for r in rem if not any(key(r) == key(x) for x in removed)]
+    for n in news:
+        out, _ = add_binding(out, member, role, n)
+    if out is pol:                               # nothing to remove (an undo of the remove-all form): still a copy
+        out = copy.deepcopy(pol)
+        out["version"] = 3
     return out, "changed", removed
 
 
@@ -336,15 +360,20 @@ class Applier:
         for attempt in range(MAX_ETAG_RETRIES + 1):
             pol = self.rest.post(f"{url}:getIamPolicy", json={"options": {"requestedPolicyVersion": 3}}) or {}
             if sp.op == "modify":
-                new, outcome, removed = modify_binding(pol, sp.member, sp.role, sp.old_condition, sp.condition)
+                new, outcome, removed = modify_bindings(pol, sp.member, sp.role, sp.old_conditions,
+                                                        sp.new_conditions)
                 if outcome == "same":
                     return self.emit(it.id, "skipped", "The new access is the same as the current one")
                 if outcome == "already":
                     return self.emit(it.id, "skipped", "Already changed (the new binding is there, the old one "
-                                                       "isn't)")
+                                                       "isn't)" if not it.multi else
+                                     "Already changed (the new bindings are there, the old ones aren't)")
                 if outcome == "not_found":
                     return self.emit(it.id, "failed", "The grant changed since you looked (no binding with this "
-                                                      "member, role and the old condition); Sync and try again")
+                                                      "member, role and the old condition); Sync and try again"
+                                     if not it.multi else
+                                     "The grant changed since you looked (one of the bindings to replace isn't "
+                                     "there any more); Sync and try again")
                 changed = True
             elif sp.op == "add":
                 new, changed = add_binding(pol, sp.member, sp.role, sp.condition)
@@ -367,10 +396,17 @@ class Applier:
         back = self.rest.post(f"{url}:getIamPolicy", json={"options": {"requestedPolicyVersion": 3}}) or {}
         present = _has(back, sp.member, sp.role, sp.condition)
         if sp.op == "modify":
-            old = _has(back, sp.member, sp.role, sp.old_condition)
+            present = all(_has(back, sp.member, sp.role, c) for c in sp.new_conditions)
+            gone = [c for c in sp.old_conditions if not any(same_condition(c, n) for n in sp.new_conditions)]
+            old = any(_has(back, sp.member, sp.role, c) for c in gone)
             if present and not old:
-                return self.emit(it.id, "verified", "Read back: the new binding is there and the old one is gone",
-                                 undo=undo)
+                if not it.multi:
+                    return self.emit(it.id, "verified", "Read back: the new binding is there and the old one is "
+                                                        "gone", undo=undo)
+                return self.emit(it.id, "verified", "Read back: " + (
+                    f"all {len(gone)} bindings are gone" if not sp.new_conditions else
+                    "the new binding is there and the old ones are gone" if len(sp.new_conditions) == 1 else
+                    f"the {len(sp.new_conditions)} bindings are back and the replaced one is gone"), undo=undo)
             return self.emit(it.id, "failed", "Read back: " + ("the old binding is still there" if old else
                                                                "the new binding is missing"), undo=undo)
         if present == (sp.op == "add"):
@@ -380,9 +416,16 @@ class Applier:
                       undo=undo)
 
     def _iap_undo(self, it: Intent, sp: Any, removed: list[dict]) -> Intent:
-        if sp.op == "modify":                     # the reverse modify: from the new binding back to the removed one
+        if sp.op == "modify" and not it.multi and len(removed) <= 1:
+            # the reverse modify: from the new binding back to the removed one
             return it.model_copy(update={"id": f"undo-{it.id}", "access_from": exact_access(sp.condition),
                                          "access": exact_access(removed[0] if removed else None)})
+        if sp.op == "modify":
+            # several bindings: the reverse modify removes what was added and puts back every removed binding verbatim
+            # (conditions and titles), so the original set comes back exactly
+            return it.model_copy(update={"id": f"undo-{it.id}", "access_from": None, "access": None,
+                                         "access_from_list": [exact_access(c) for c in sp.new_conditions],
+                                         "access_list": [exact_access(c or None) for c in removed]})
         if sp.op == "add":
             acc = (it.access or Access()).model_copy()
             if sp.condition is not None:

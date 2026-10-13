@@ -250,6 +250,13 @@ class Intent(_In):
     # modify: the existing binding's condition, exact (mode "custom" with its expression and title, or mode "all" when
     # it has none), as revokes carry it. `access` is the new one. Applied as one read-modify-write.
     access_from: Optional[Access] = None
+    # modify with several bindings (backwards compatible: when set, these replace access_from / access):
+    # access_from_list = every binding of the member removed (exact, as access_from), access_list = the bindings added.
+    # The builder's "change existing access" sends N -> [one]; the "remove all" form sends N -> [] (destructive); an
+    # undo sends the new binding(s) -> the removed set, so the original bindings come back exactly. Still one
+    # getIamPolicy and one setIamPolicy.
+    access_from_list: Optional[list[Access]] = None
+    access_list: Optional[list[Access]] = None
     gateway: Optional[GatewayRef] = None
     engine: Optional[str] = None
     params: Optional[SetupParams] = None   # model_armor_template / model_armor_extension / iam_project_grant
@@ -267,10 +274,40 @@ class Intent(_In):
     @model_validator(mode="after")
     def _modify_fields(self) -> "Intent":
         if self.kind == "modify":
-            missing = [f for f in ("source", "destination", "access_from", "access") if getattr(self, f) is None]
+            missing = [f for f in ("source", "destination") if getattr(self, f) is None]
+            if self.access_from is None and self.access_from_list is None:
+                missing.append("access_from")
+            if self.access is None and self.access_list is None:
+                missing.append("access")
             if missing:
                 raise ValueError(f"modify needs {', '.join(missing)}")
+            if not self.froms and not self.tos:
+                raise ValueError("modify needs at least one binding to remove (access_from_list) or add (access_list)")
         return self
+
+    @property
+    def froms(self) -> list[Access]:
+        """modify: the bindings removed (access_from_list, else [access_from])."""
+        if self.access_from_list is not None:
+            return list(self.access_from_list)
+        return [self.access_from] if self.access_from is not None else []
+
+    @property
+    def tos(self) -> list[Access]:
+        """modify: the bindings added (access_list, else [access]); [] = the "remove all" form."""
+        if self.access_list is not None:
+            return list(self.access_list)
+        return [self.access] if self.access is not None else []
+
+    @property
+    def multi(self) -> bool:
+        """A modify that isn't one binding -> one binding (several removed, none or several added)."""
+        return self.kind == "modify" and not (len(self.froms) == 1 and len(self.tos) == 1)
+
+    @property
+    def removes_all(self) -> bool:
+        """The "remove all" form of modify: bindings removed, none added."""
+        return self.kind == "modify" and bool(self.froms) and not self.tos
 
     @property
     def is_delete(self) -> bool:
@@ -279,10 +316,12 @@ class Intent(_In):
     @property
     def is_destructive(self) -> bool:
         """Revokes, unbinds, Model Armor off, setup deletes, dry run (stops blocking) and reverting a dedicated
-        extension (deletes it). A modify isn't: it never removes all access (render and preflight warn when it widens
-        it)."""
+        extension (deletes it). A modify isn't (render and preflight warn when it widens access), except its "remove
+        all" form, which removes every binding it names and adds none."""
         if self.kind in ("revoke", "unbind_gateway", "model_armor_off"):
             return True
+        if self.kind == "modify":
+            return self.removes_all
         if self.kind == "set_enforcement":
             return self.mode == "DRY_RUN"
         if self.kind == "dedicate_extension":

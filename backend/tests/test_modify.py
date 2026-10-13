@@ -12,11 +12,12 @@ import pytest
 
 import fakegcp as F
 from policy_studio import service
-from policy_studio.apply import modify_binding
+from policy_studio.apply import modify_binding, modify_bindings
 from policy_studio.conditions import READ_ONLY_EXPRESSION, condition_for, tools_expression
 from policy_studio.diff import diff
 from policy_studio.model import Access, Binding, Condition, Context, Destination, Intent, Inventory, Source
-from policy_studio.render import JQ_MODIFY, PY_IAP_HELPERS, PY_MODIFY_HELPER, RenderEnv, render
+from policy_studio.render import (JQ_MODIFY, JQ_MODIFY_MANY, PY_IAP_HELPERS, PY_MODIFY_HELPER, PY_MODIFY_MANY_HELPER,
+                                  RenderEnv, render)
 from test_apply import CTX, MCP_RES, Q, adc, client, final, gcp, run  # noqa: F401  (fixtures)
 from test_render import ENV, JQ, TERRAFORM, check_syntax
 
@@ -273,18 +274,270 @@ def flat(policy_bindings):
             for b in policy_bindings for m in b["members"]]
 
 
+def case_intent(case, member):
+    """The fixture case as an intent: one binding each way (access_from / access) or several (access_from_list /
+    access_list)."""
+    acc = {k: case[k] for k in ("access_from", "access", "access_from_list", "access_list") if k in case}
+    return Intent.model_validate({"id": "m", "kind": "modify", "source": {"type": "custom", "principal": member,
+                                                                          "label": "x"},
+                                  "destination": DEST, **acc})
+
+
 @pytest.mark.parametrize("case", MODIFY["cases"], ids=lambda c: c["name"])
 def test_modify_cases(case):
     member = MODIFY["member"]
     pol = {"etag": "e", "bindings": [binding(b["expression"], b["member"]) for b in case["bindings"]]}
-    old, new = condition_for(Access(**case["access_from"])), condition_for(Access(**case["access"]))
-    out, outcome, _ = modify_binding(pol, member, "roles/iap.egressor", old, new)
+    it = case_intent(case, member)
+    if not it.multi:                                    # the one-binding helper agrees with the general one
+        old, new = condition_for(it.access_from), condition_for(it.access)
+        assert modify_binding(pol, member, "roles/iap.egressor", old, new)[1] == case["outcome"]
+    out, outcome, _ = modify_bindings(pol, member, "roles/iap.egressor", [condition_for(a) for a in it.froms],
+                                      [condition_for(a) for a in it.tos])
     assert outcome == case["outcome"]
     assert flat(out["bindings"]) == case["after"]
     inv = Inventory(access={F.MCP: [Binding(role="roles/iap.egressor", member=b["member"],
                                             condition=Condition(title="t", expression=b["expression"])
                                             if b["expression"] else None) for b in case["bindings"]]})
-    it = Intent(id="m", kind="modify", source=Source(type="custom", principal=member, label="x"),
-                destination=Destination(**DEST), access_from=Access(**case["access_from"]),
-                access=Access(**case["access"]))
     assert diff([it], inv, [], RenderEnv(ctx=Context(project=F.P, region=F.R)))[0].status == case["status"]
+
+
+# ------------------------------------------------------------------ several bindings (the builder's "change existing")
+NOTE = tools_expression(["add_note"])
+CLOSE3 = ["list_tickets", "delete_ticket"]
+
+
+def many_intent(iid, froms, to=None, to_list=None, src=SRC):
+    it = {"id": iid, "kind": "modify", "source": src, "destination": DEST, "access_from_list": froms}
+    if to is not None:
+        it["access"] = to
+    if to_list is not None:
+        it["access_list"] = to_list
+    return it
+
+
+def seed_many(gcp, *exprs):
+    """The member's bindings (titles kept so the undo can be checked verbatim), another member's grant on the same
+    role and condition, and the member's binding of another role: neither may change."""
+    gcp.iap[MCP_RES]["bindings"] += [binding(e, title=f"t{i}") for i, e in enumerate(exprs)]
+    gcp.iap[MCP_RES]["bindings"] += [binding(exprs[0], member="user:other@example.com", title="other"),
+                                     {"role": "roles/viewer", "members": [P]}]
+    return json.loads(json.dumps(gcp.iap[MCP_RES]["bindings"]))
+
+
+def untouched(before, after):
+    keep = [b for b in before if P not in b["members"] or b["role"] != "roles/iap.egressor"]
+    return all(b in after for b in keep)
+
+
+def test_merge_two_bindings_round_trip(client, gcp, adc):
+    """Read-only hint + a tools grant become one tools grant: diff replace (both current, one after), preflight ok
+    with the widening warning, one setIamPolicy, verified, and the undo restores the two bindings exactly."""
+    before = seed_many(gcp, READ_ONLY_EXPRESSION, NOTE)
+    it = many_intent("m", [exact(READ_ONLY_EXPRESSION, "t0"), exact(NOTE, "t1")], {"mode": "tools", "tools": CLOSE3})
+
+    d, = post(client, "diff", [it])
+    assert d["status"] == "replace" and len(d["current"]) == 2
+    assert [(b.get("condition") or {}).get("expression") for b in d["after"]] == [tools_expression(CLOSE3)]
+    assert d["detail"] == "read-only + add_note → list_tickets, delete_ticket"
+    pf, = post(client, "preflight", [it])
+    assert pf["status"] == "ok" and pf["warning"] == \
+        "This widens access: read-only + add_note → list_tickets, delete_ticket."
+    r, = post(client, "render", [it])
+    assert r["english"] == ("Change Pricing Analyst's access to Tickets MCP: read-only + add_note → list_tickets, "
+                            "delete_ticket.")
+
+    f = final(run(client, [it]))["m"]                                   # not destructive: no acknowledgement
+    assert f["state"] == "verified" and "old ones are gone" in f["detail"], f
+    (method, url, body), = gcp.writes                                   # one setIamPolicy, with the etag
+    assert url.endswith(f"{MCP_RES}:setIamPolicy") and body["policy"]["etag"] == "e0"
+    after = gcp.iap[MCP_RES]["bindings"]
+    mine = [b for b in after if P in b["members"] and b["role"] == "roles/iap.egressor"]
+    assert [b["condition"]["expression"] for b in mine] == [tools_expression(CLOSE3)]
+    assert untouched(before, after)
+
+    undo = f["undo"]
+    assert undo["kind"] == "modify" and "access" not in undo and "access_from" not in undo
+    assert [a["expression"] for a in undo["access_from_list"]] == [tools_expression(CLOSE3)]
+    assert undo["access_list"] == [exact(READ_ONLY_EXPRESSION, "t0"), exact(NOTE, "t1")]
+    assert final(run(client, [undo]))["undo-m"]["state"] == "verified"
+    assert canon(gcp.iap[MCP_RES]["bindings"]) == canon(before)
+
+
+def test_merge_three_bindings(client, gcp, adc):
+    """Three bindings (full access, the hint, a custom condition) become the read-only hint: narrower, no warning."""
+    before = seed_many(gcp, None, READ_ONLY_EXPRESSION, CUSTOM)
+    it = many_intent("m", [exact(None), exact(READ_ONLY_EXPRESSION, "t1"), exact(CUSTOM, "t2")],
+                     {"mode": "read_only_hint"})
+    assert post(client, "diff", [it])[0]["status"] == "replace"
+    pf, = post(client, "preflight", [it])
+    assert pf["status"] == "ok" and "warning" not in pf
+    f = final(run(client, [it]))["m"]
+    assert f["state"] == "verified" and len(gcp.writes) == 1
+    mine = [b for b in gcp.iap[MCP_RES]["bindings"] if P in b["members"] and b["role"] == "roles/iap.egressor"]
+    assert [b["condition"]["expression"] for b in mine] == [READ_ONLY_EXPRESSION]
+    assert untouched(before, gcp.iap[MCP_RES]["bindings"])
+    assert final(run(client, [f["undo"]]))["undo-m"]["state"] == "verified"
+    assert canon(gcp.iap[MCP_RES]["bindings"]) == canon(before)
+
+
+def test_remove_all(client, gcp, adc):
+    """The remove-all form: destructive (needs the acknowledgement), diff remove, one setIamPolicy, undo restores."""
+    before = seed_many(gcp, READ_ONLY_EXPRESSION, NOTE)
+    it = many_intent("m", [exact(READ_ONLY_EXPRESSION, "t0"), exact(NOTE, "t1")], to_list=[])
+    assert Intent.model_validate(it).is_destructive
+    d, = post(client, "diff", [it])
+    assert d["status"] == "remove" and d["after"] == []
+    pf, = post(client, "preflight", [it])
+    assert pf["status"] == "ok" and pf["warning"] == "This removes all access: read-only + add_note → no access."
+    r, = post(client, "render", [it])
+    assert r["english"] == ("Remove all of Pricing Analyst's access to Tickets MCP (2 grants): read-only + add_note "
+                            "→ no access.")
+    assert r["anatomy"]["condition"] is None and any(n.startswith("remove all") for n in r["anatomy"]["notes"])
+
+    resp = client.post("/api/studio/apply", json={"context": CTX, "intents": [it],
+                                                  "confirm": {"project": F.P, "acknowledge_destructive": False}})
+    assert resp.status_code == 400 and not gcp.writes
+    f = final(run(client, [it], ack=True))["m"]
+    assert f["state"] == "verified" and "all 2 bindings are gone" in f["detail"] and len(gcp.writes) == 1
+    assert not [b for b in gcp.iap[MCP_RES]["bindings"] if P in b["members"] and b["role"] == "roles/iap.egressor"]
+    assert untouched(before, gcp.iap[MCP_RES]["bindings"])
+    undo = f["undo"]
+    assert undo["access_from_list"] == [] and len(undo["access_list"]) == 2
+    assert final(run(client, [undo]))["undo-m"]["state"] == "verified"
+    assert canon(gcp.iap[MCP_RES]["bindings"]) == canon(before)
+
+
+def test_many_one_missing_is_blocked(client, gcp, adc):
+    gcp.iap[MCP_RES]["bindings"].append(binding(READ_ONLY_EXPRESSION))
+    it = many_intent("m", [exact(READ_ONLY_EXPRESSION), exact(NOTE)], {"mode": "tools", "tools": CLOSE3})
+    pf, = post(client, "preflight", [it])
+    assert pf["status"] == "blocked" and "changed since you looked" in pf["reason"] and "1 of the 2" in pf["reason"]
+    assert post(client, "diff", [it])[0]["status"] == "absent"
+    f = final(run(client, [it]))["m"]
+    assert f["state"] == "failed" and "changed since you looked" in f["detail"] and not gcp.writes
+
+
+def test_many_same_set_is_blocked(client, gcp, adc):
+    gcp.iap[MCP_RES]["bindings"] += [binding(READ_ONLY_EXPRESSION), binding(NOTE)]
+    it = many_intent("m", [exact(READ_ONLY_EXPRESSION), exact(NOTE)],
+                     to_list=[{"mode": "read_only_hint"}, {"mode": "tools", "tools": ["add_note"]}])
+    pf, = post(client, "preflight", [it])
+    assert pf["status"] == "blocked" and pf["fix"] == "already"
+
+
+def test_many_validation(client):
+    r = post(client, "render", [many_intent("bad", [], to_list=[]), many_intent("ok", [exact(None)], to_list=[])])
+    assert r[0]["error"].startswith("invalid intent") and not r[1].get("error")
+
+
+def test_many_render_outputs():
+    it = Intent.model_validate(many_intent("m", [exact(READ_ONLY_EXPRESSION, "t0"), exact(NOTE, "t1")],
+                                           {"mode": "tools", "tools": CLOSE3}))
+    item = render([it], ENV).items[0]
+    o = item.outputs
+    assert o.gcloud.count("gcloud iap web get-iam-policy") == 1 and o.gcloud.count("gcloud iap web set-iam-policy") == 1
+    assert '--argjson froms "$FROMS"' in o.gcloud and "web add-iam-policy-binding" not in o.gcloud
+    assert json.dumps([READ_ONLY_EXPRESSION, NOTE]) in o.gcloud
+    assert o.rest.count(":setIamPolicy") == 1 and '--argjson tos "$TOS"' in o.rest
+    assert "modify_many(" in o.python and "def modify_many(" in o.python and "def modify(" not in o.python
+    assert f"old_expressions=[{json.dumps(READ_ONLY_EXPRESSION)}, {json.dumps(NOTE)}]" in o.python
+    tf = o.terraform
+    assert tf.count("# Today:") == 1 and tf.count('# resource "google_iap_agent_registry_mcp_server_iam_member"') == 2
+    assert tf.count('\nresource "google_iap_agent_registry_mcp_server_iam_member"') == 1
+    assert "create_before_destroy = true" in tf
+    assert item.anatomy.condition == tools_expression(CLOSE3)
+    assert any("replaces 2 bindings" in n for n in item.anatomy.notes)
+    check_syntax(item)
+
+    gone = render([Intent.model_validate(many_intent("r", [exact(READ_ONLY_EXPRESSION), exact(None)], to_list=[]))],
+                  ENV).items[0]
+    assert "new_conditions=[]" in gone.outputs.python and "TOS='[]'" in gone.outputs.gcloud
+    assert '\nresource "' not in gone.outputs.terraform and "Remove all access" in gone.outputs.terraform
+    assert any("removes all" in w for w in gone.warnings)
+    check_syntax(gone)
+    undo = render([Intent.model_validate(many_intent("u", [exact(NOTE)], to_list=[exact(READ_ONLY_EXPRESSION),
+                                                                                exact(None)]))], ENV).items[0]
+    assert "(None, None)" in undo.outputs.python
+    check_syntax(undo)
+
+
+def test_many_bundle(tmp_path):
+    """A bundle with a one-binding modify and a several-binding modify: both helpers once each, valid shell, Terraform
+    fmt, and init + validate when Terraform is installed."""
+    res = render([Intent.model_validate(modify_intent("m", exact(READ_ONLY_EXPRESSION), FORMS["tools"][1])),
+                  Intent.model_validate(many_intent("n", [exact(READ_ONLY_EXPRESSION), exact(NOTE)],
+                                                    {"mode": "tools", "tools": CLOSE3},
+                                                    src={**SRC, "principal": F.principal("333"), "label": "Other"}))],
+                 ENV)
+    py = res.bundle.python
+    assert py.count("def modify(") == 1 and py.count("def modify_many(") == 1
+    compile(py, "<bundle>", "exec")
+    for text in (res.bundle.gcloud, res.bundle.rest):
+        assert subprocess.run(["bash", "-n"], input=text, text=True).returncode == 0
+    if TERRAFORM:
+        for k, v in res.bundle.terraform.items():
+            (tmp_path / k).write_text(v)
+        r = subprocess.run([TERRAFORM, "fmt", "-check", "-diff", str(tmp_path)], capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout
+        if os.environ.get("STUDIO_TF_VALIDATE"):
+            assert subprocess.run([TERRAFORM, "init", "-backend=false", "-input=false"], cwd=tmp_path,
+                                  capture_output=True).returncode == 0
+            r = subprocess.run([TERRAFORM, "validate"], cwd=tmp_path, capture_output=True, text=True)
+            assert r.returncode == 0, r.stdout + r.stderr
+
+
+def jq_many(policy, member, froms, tos):
+    return subprocess.run([JQ, "--arg", "role", "roles/iap.egressor", "--arg", "member", member, "--argjson", "froms",
+                           json.dumps(froms), "--argjson", "tos", json.dumps(tos), JQ_MODIFY_MANY],
+                          input=json.dumps(policy), capture_output=True, text=True)
+
+
+@pytest.mark.skipif(not JQ, reason="jq not installed")
+def test_jq_modify_many():
+    out = json.loads(jq_many(POLICY, "user:a@x.com", ["", "E"], [{"title": "t", "expression": "F"}]).stdout)
+    assert out["version"] == 3 and out["etag"] == "BwX"
+    assert out["bindings"] == [{"role": "roles/iap.egressor", "members": ["user:b@x.com"]},
+                               {"role": "roles/iap.egressor", "members": ["user:a@x.com"],
+                                "condition": {"title": "t", "expression": "F"}}]
+    out = json.loads(jq_many(POLICY, "user:a@x.com", ["", "E"], []).stdout)          # remove all
+    assert out["bindings"] == [{"role": "roles/iap.egressor", "members": ["user:b@x.com"]}]
+    out = json.loads(jq_many(out, "user:a@x.com", [], [{"title": "", "expression": ""},          # the undo
+                                                       {"title": "ro", "expression": "E"}]).stdout)
+    assert out["bindings"] == [{"role": "roles/iap.egressor", "members": ["user:b@x.com"]},
+                               {"role": "roles/iap.egressor", "members": ["user:a@x.com"]},
+                               POLICY["bindings"][1]]
+    r = jq_many(POLICY, "user:a@x.com", ["", "G"], [])                               # one missing: fails
+    assert r.returncode != 0 and "was not found" in r.stderr and not r.stdout.strip()
+
+
+def test_python_modify_many_helper_against_stub(monkeypatch):
+    policy_pb2 = pytest.importorskip("google.iam.v1.policy_pb2")
+    from google.type import expr_pb2
+    store = {"p": policy_pb2.Policy(etag=b"e", bindings=[
+        policy_pb2.Binding(role="roles/iap.egressor", members=["user:a@x.com", "user:b@x.com"]),
+        policy_pb2.Binding(role="roles/iap.egressor", members=["user:a@x.com"],
+                           condition=expr_pb2.Expr(title="ro", expression="E"))])}
+
+    class Client:
+        def get_iam_policy(self, request):
+            out = policy_pb2.Policy()
+            out.CopyFrom(store[request.resource])
+            return out
+
+        def set_iam_policy(self, request):
+            store[request.resource] = request.policy
+
+    iap_v1 = types.ModuleType("google.cloud.iap_v1")
+    iap_v1.IdentityAwareProxyAdminServiceClient = Client
+    monkeypatch.setitem(sys.modules, "google.cloud.iap_v1", iap_v1)
+    import google.cloud
+    monkeypatch.setattr(google.cloud, "iap_v1", iap_v1, raising=False)
+    ns: dict = {}
+    exec(PY_IAP_HELPERS + "\n\n" + PY_MODIFY_MANY_HELPER, ns)
+    ns["modify_many"]("p", "user:a@x.com", [None, "E"], [("t", "F")])
+    assert [(list(x.members), x.condition.expression) for x in store["p"].bindings] == \
+        [(["user:b@x.com"], ""), (["user:a@x.com"], "F")]
+    ns["modify_many"]("p", "user:a@x.com", ["F"], [])                                   # remove all
+    assert [(list(x.members), x.condition.expression) for x in store["p"].bindings] == [(["user:b@x.com"], "")]
+    with pytest.raises(SystemExit):
+        ns["modify_many"]("p", "user:a@x.com", ["F"], [])

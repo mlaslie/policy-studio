@@ -4,7 +4,10 @@ import { beforeAll, describe, expect, it } from "vitest";
 import cases from "../../../backend/tests/fixtures/modify_cases.json";
 import type { Binding, Intent } from "./types";
 import { buildWorld } from "./mockData";
-import { mockDiff, modifyBindings } from "./mockRender";
+const world = buildWorld;
+import { mockDiff, mockRender, modifyBindings } from "./mockRender";
+import { changeIntent } from "../lib/existing";
+import { isDestructive } from "../lib/apply";
 import { ROLE, conditionFor } from "../lib/policy";
 import { grantToModify } from "../lib/grants";
 import { applyStream, audit, context, diff, inventory, preflight } from "./mock";
@@ -12,13 +15,17 @@ import { groupPerms } from "../steps/ContextStep";
 
 const RES = "projects/my-demo-project/locations/us-east4/mcpServers/tickets";
 const binding = (b: { member: string; expression: string | null }): Binding => ({ role: ROLE, member: b.member, member_label: "x", condition: b.expression ? { title: "t", expression: b.expression } : null, english: "" });
-const intentOf = (c: (typeof cases.cases)[number]): Intent => ({
+type Case = { access_from?: unknown; access?: unknown; access_from_list?: unknown; access_list?: unknown };
+// One binding each way (access_from / access) or several (access_from_list / access_list; [] = remove all).
+const intentOf = (c: Case): Intent => ({
   id: "m",
   kind: "modify",
   source: { type: "custom", principal: cases.member, label: "x" },
   destination: { kind: "mcp_server", id: "tickets", name: RES, label: "Tickets MCP" },
-  access_from: c.access_from as Intent["access_from"],
-  access: c.access as Intent["access"],
+  ...(c.access_from ? { access_from: c.access_from as Intent["access_from"] } : {}),
+  ...(c.access ? { access: c.access as Intent["access"] } : {}),
+  ...(c.access_from_list ? { access_from_list: c.access_from_list as Intent["access_from_list"] } : {}),
+  ...(c.access_list ? { access_list: c.access_list as Intent["access_list"] } : {}),
 });
 
 describe("modify cases shared with the backend", () => {
@@ -68,6 +75,60 @@ describe("a modify through the mock's preflight, apply and undo", () => {
     const key = (b: Binding) => `${b.member}|${b.condition?.expression ?? ""}`;
     expect(back.map(key).sort()).toEqual(before.map(key).sort());
   }, 20000);
+});
+
+describe("a modify of several bindings through the mock (?case=merge)", () => {
+  const ctx = { project: "my-demo-project", region: "us-east4" };
+  const run = async (intents: Intent[], ack = false) => {
+    const out = [];
+    for await (const e of applyStream(ctx, intents, { project: ctx.project, acknowledge_destructive: ack })) out.push(e);
+    return out;
+  };
+  it("merges the read-only and close_ticket grants into one, verified; the undo restores both exactly", async () => {
+    Object.defineProperty(globalThis, "window", { value: { location: { search: "?fast=1&case=merge" } }, configurable: true });
+    const inv = inventory(ctx);
+    const hd = inv.engines.find((e) => e.display_name === "Helpdesk Agent")!;
+    const t = inv.mcp_servers.find((m) => m.display_name === "Tickets MCP")!;
+    const before = inv.access[t.name];
+    const own = before.filter((b) => b.member === hd.principal);
+    expect(own).toHaveLength(2);
+    const m = changeIntent({
+      id: "mm",
+      source: { type: "engine", principal: hd.principal, label: "Helpdesk Agent", engine: hd.name },
+      destination: { kind: "mcp_server", id: t.id, name: t.name, label: "Tickets MCP" },
+      own,
+      target: { mode: "tools", tools: ["list_tickets", "get_ticket", "update_ticket"] },
+    })!;
+    expect(preflight(ctx, [m]).items[0]).toMatchObject({ status: "ok", warning: "This widens access: read-only + close_ticket → list_tickets, get_ticket, update_ticket." });
+    const d = diff(ctx, [m]).items[0];
+    expect(d.status).toBe("replace");
+    expect(d.after?.map((b) => b.condition?.expression)).toEqual([conditionFor({ mode: "tools", tools: ["list_tickets", "get_ticket", "update_ticket"] })!.expression]);
+    const r = mockRender(ctx, world(ctx), [m]).items[0];
+    expect(r.english).toBe("Change Helpdesk Agent's access to Tickets MCP: read-only + close_ticket → list_tickets, get_ticket, update_ticket.");
+    expect(r.outputs.gcloud).toContain("--argjson froms");
+    expect(r.outputs.python).toContain("modify_many(");
+
+    const ev = await run([m]);
+    const done = ev.find((e) => "state" in e && e.state === "verified") as { undo: Intent; detail: string };
+    expect(done.detail).toBe("Read back: the new binding is there and the old ones are gone.");
+    expect(inventory(ctx).access[t.name].filter((b) => b.member === hd.principal)).toHaveLength(1);
+    expect(done.undo).toMatchObject({ kind: "modify", access_list: [{ mode: "custom", expression: own[0].condition!.expression }, { mode: "custom", expression: own[1].condition!.expression }] });
+    await run([done.undo]);
+    const key = (b: Binding) => `${b.member}|${b.condition?.expression ?? ""}|${b.condition?.title ?? ""}`;
+    expect(inventory(ctx).access[t.name].map(key).sort()).toEqual(before.map(key).sort());
+  }, 20000);
+
+  it("the remove-all form is destructive: it needs the acknowledgement", async () => {
+    const inv = inventory(ctx);
+    const hd = inv.engines.find((e) => e.display_name === "Helpdesk Agent")!;
+    const t = inv.mcp_servers.find((m) => m.display_name === "Tickets MCP")!;
+    const own = inv.access[t.name].filter((b) => b.member === hd.principal);
+    const m = changeIntent({ id: "ra", source: { type: "engine", principal: hd.principal, label: "Helpdesk Agent", engine: hd.name }, destination: { kind: "mcp_server", id: t.id, name: t.name, label: "Tickets MCP" }, own, target: "remove" })!;
+    expect(isDestructive(m)).toBe(true);
+    await expect(run([m])).rejects.toThrow(/acknowledge_destructive/);
+    expect(diff(ctx, [m]).items[0].status).toBe("remove");
+    Object.defineProperty(globalThis, "window", { value: { location: { search: "?fast=1" } }, configurable: true });
+  });
 });
 
 describe("Context step permissions (the duplicate-key fix)", () => {

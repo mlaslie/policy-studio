@@ -5466,3 +5466,191 @@ button.legend-item:hover {
     max-width: none;
   }
 }
+
+/* ---------- Build: change existing access (lib/existing.ts) ---------- */
+.existing-lead {
+  margin: 0 0 6px;
+}
+.existing-list {
+  margin: 0 0 4px;
+  padding-left: 18px;
+}
+.existing-list li {
+  margin: 2px 0;
+}
+.existing-now {
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  overflow-wrap: anywhere;
+}
+.hint-note {
+  margin: -2px 0 2px 34px;
+  padding: 6px 10px;
+  border-left: 3px solid var(--amber);
+  background: var(--amber-weak);
+  border-radius: 6px;
+  color: var(--text);
+}
+.tool-row-wrap {
+  border-bottom: 1px dashed var(--border);
+}
+.tool-row-wrap:last-child {
+  border-bottom: 0;
+}
+.tool-row-wrap .tool-row {
+  border-bottom: 0;
+}
+.tool-row-wrap.locked .tool-row {
+  cursor: default;
+}
+.tool-note {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin: -4px 0 6px 26px;
+}
+.tool-note .link-btn {
+  font-size: inherit;
+}
+
+/* ---------- Build: the Add to cart preview (preview/PreviewDialog.tsx) ---------- */
+.pv-sheet {
+  width: min(980px, 100%);
+}
+.pv-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.pv-map {
+  gap: 0;
+}
+.pv-canvas {
+  position: relative;
+  height: clamp(220px, 34vh, 340px);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+.pv-canvas .react-flow__pane {
+  cursor: default;
+}
+.pmap .pv-mcp .tool-row {
+  padding-right: 10px;
+}
+.pmap .pv-mcp .tool-row.pv-changed {
+  box-shadow: inset 0 0 0 1.5px var(--e-staged);
+}
+.pv-states {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.pv-arrow {
+  font-size: 11px;
+  color: var(--text-3);
+}
+.pv-warnings {
+  margin: 0;
+}
+.pv-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.pv-h {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-2);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.pv-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.pv-table th,
+.pv-table td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.pv-table thead th {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+.pv-row.pv-added {
+  background: color-mix(in srgb, var(--green-weak) 70%, transparent);
+}
+.pv-row.pv-removed {
+  background: color-mix(in srgb, var(--red-weak) 70%, transparent);
+}
+.pv-row.pv-unknown {
+  background: var(--surface-2);
+}
+.pv-state {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+.pv-delta {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  margin-left: 4px;
+}
+.pv-delta.add {
+  color: var(--green);
+}
+.pv-delta.remove {
+  color: var(--red);
+}
+.pv-bindings {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.pv-binding {
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+.pv-binding.remove {
+  border-style: dashed;
+}
+.pv-cond {
+  display: block;
+  margin-top: 4px;
+}
+.pv-expr {
+  overflow-wrap: anywhere;
+  color: var(--text-2);
+}
+.pv-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 12px 20px 16px;
+  border-top: 1px solid var(--glass-edge);
+}
+@media (max-width: 640px) {
+  .pv-foot .grow {
+    flex-basis: 100%;
+    order: -1;
+  }
+}

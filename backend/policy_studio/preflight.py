@@ -8,9 +8,9 @@ import json
 import re
 from typing import Any, Optional
 
-from .conditions import EGRESSOR, compare_access, condition_for, same_condition
+from .conditions import EGRESSOR, compare_access_many, condition_for, same_condition
 from .diff import resource_key
-from .english import access_words
+from .english import modify_change
 from .gcp.engines import REASON_IDENTITY, tail
 from .model import Intent, Inventory
 from .render import (PLACEHOLDER_EXT, Blocked, RenderEnv, dedicate_names, enf_spec, engine_full, engine_info_for,
@@ -46,6 +46,11 @@ def intent_key(it: Intent) -> str:
     f = it.access_from
     if f:
         key["access_from"] = [f.mode, sorted(t for t in (f.tools or []) if t), f.expression or "", f.title]
+    for name in ("access_from_list", "access_list"):
+        xs = getattr(it, name)
+        if xs is not None:
+            key[name] = sorted(json.dumps([x.mode, sorted(t for t in (x.tools or []) if t), x.expression or "",
+                                           x.title]) for x in xs)
     if it.params:
         key["params"] = it.params.model_dump(exclude_none=True)
     for f in ("extension", "mode", "scope", "source_extension", "new_name"):
@@ -111,9 +116,11 @@ def blockers(intents: list[Intent], env: RenderEnv, writable: Optional[dict[str,
 
 def _modify_blocker(it: Intent, env: RenderEnv, inv: Optional[Inventory]) -> Optional[dict[str, str]]:
     """The same access as today ("already"), or (with the inventory) no binding matching access_from exactly and none
-    with the new access either (when the new one is there, it was already changed: apply skips it)."""
-    old, new = condition_for(it.access_from), condition_for(it.access)
-    if same_condition(old, new):
+    with the new access either (when the new one is there, it was already changed: apply skips it). Several bindings:
+    blocked when any one of access_from_list is missing (unless the whole change is already there)."""
+    olds, news = [condition_for(a) for a in it.froms], [condition_for(a) for a in it.tos]
+    norm = lambda cs: {" ".join((c.expression if c else "").split()) for c in cs}  # noqa: E731
+    if olds and norm(olds) == norm(news):
         return {"reason": "The new access is the same as the current one, so there is nothing to change.",
                 "fix": "already"}
     if inv is None:
@@ -123,9 +130,18 @@ def _modify_blocker(it: Intent, env: RenderEnv, inv: Optional[Inventory]) -> Opt
         return None                          # unknown here (unreadable or not listed): apply checks it live
     member = it.source.principal if it.source else ""
     mine = [b for b in inv.access[key] if b.member == member and b.role == EGRESSOR]
-    if not any(same_condition(b.condition, c) for b in mine for c in (old, new)):
-        return {"reason": "The grant changed since you looked: there is no binding with this member and the old "
-                          "condition any more. Sync and try again.", "fix": ""}
+    has = lambda c: any(same_condition(b.condition, c) for b in mine)  # noqa: E731
+    if not it.multi:
+        if not any(has(c) for c in (olds[0], news[0])):
+            return {"reason": "The grant changed since you looked: there is no binding with this member and the old "
+                              "condition any more. Sync and try again.", "fix": ""}
+        return None
+    missing = [c for c in olds if not has(c)]
+    gone = [c for c in olds if not any(same_condition(c, n) for n in news)]
+    if missing and not (all(has(n) for n in news) and not any(has(c) for c in gone)):
+        n = len(missing)
+        return {"reason": f"The grant changed since you looked: {n} of the {len(olds)} bindings to replace "
+                          f"{'is' if n == 1 else 'are'}n't there any more. Sync and try again.", "fix": ""}
     return None
 
 
@@ -182,8 +198,10 @@ def advisories(intents: list[Intent], env: RenderEnv) -> dict[str, str]:
             d = it.destination
             rid = (d.id or short(d.name)) if d else ""
             ro = {t["name"] for t in env.mcp_tools[rid] if t.get("read_only")} if env.mcp_tools.get(rid) else None
-            if compare_access(it.access_from, it.access, ro) == "broader":
-                out[it.id] = f"This widens access: {access_words(it.access_from)} → {access_words(it.access)}."
+            if it.removes_all:
+                out[it.id] = f"This removes all access: {modify_change(it)}."
+            elif compare_access_many(it.froms, it.tos, ro) == "broader":
+                out[it.id] = f"This widens access: {modify_change(it)}."
             continue
         if it.kind != "set_enforcement" or env.iap is None:
             continue

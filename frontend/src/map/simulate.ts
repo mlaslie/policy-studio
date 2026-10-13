@@ -3,7 +3,7 @@
 // condition **expression** (whitespace-insensitive), as the backend's remove_binding / same_condition does, so the
 // preview and Apply agree on which binding a revoke removes. Review's /diff and /preflight stay the authority.
 import type { Binding, Gateway, Intent, Inventory, ModelArmorResp } from "../api/types";
-import { ROLE, conditionFor, intentEnglish, shortName } from "../lib/policy";
+import { ROLE, accessFroms, accessTos, conditionFor, intentEnglish, shortName } from "../lib/policy";
 
 export interface MapState {
   inventory: Inventory;
@@ -54,11 +54,17 @@ function apply(s: MapState, i: Intent): string[] | null {
       // no access = the unconditional binding; otherwise only the binding with exactly this expression
       else if (i.kind === "revoke") inv.access[res] = without(cur, member, conditionFor(i.access));
       else {
-        // one read-modify-write: the binding with exactly access_from is replaced (nothing happens if it's gone)
-        const from = conditionFor(i.access_from);
-        const to = conditionFor(i.access);
-        if (sameCondition(from, to) || !cur.some((b) => b.member === member && b.role === ROLE && sameCondition(b.condition, from))) return [res];
-        inv.access[res] = withBinding(without(cur, member, from), i, member, to);
+        // one read-modify-write: the bindings with exactly access_from (or each of access_from_list) are replaced by
+        // the new one (none: the remove-all form); nothing happens if one of them is gone, as Apply fails then
+        const froms = accessFroms(i).map(conditionFor);
+        const tos = accessTos(i).map(conditionFor);
+        const has = (c: Binding["condition"]) => cur.some((b) => b.member === member && b.role === ROLE && sameCondition(b.condition, c));
+        const key = (cs: Binding["condition"][]) => [...new Set(cs.map(normExpr))].sort().join("\n");
+        if ((froms.length && key(froms) === key(tos)) || froms.some((c) => !has(c))) return [res];
+        let next = cur;
+        for (const c of froms) next = without(next, member, c);
+        for (const c of tos) next = withBinding(next, { ...i, access: accessTos(i)[tos.indexOf(c)] }, member, c);
+        inv.access[res] = next;
       }
       return [res, ...(i.source?.engine ? [i.source.engine] : [])];
     }

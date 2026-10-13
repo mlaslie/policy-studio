@@ -127,6 +127,11 @@ export function refreshEnforcement(gateways: Gateway[], exts: IapExt[]) {
   }
 }
 
+/** The page's ?case=merge (mock mode only; never in tests, which have no page). */
+export function mergeCase(search = typeof window === "undefined" ? "" : (window.location?.search ?? "")): boolean {
+  return new URLSearchParams(search).get("case") === "merge";
+}
+
 export function buildWorld(ctx: Ctx) {
   const P = ctx.project || "my-demo-project";
   const R = ctx.region || "us-east4";
@@ -467,6 +472,17 @@ export function buildWorld(ctx: Ctx) {
   const unreadable = endpoints.find((e) => e.id === "sqladmin-googleapis")!;
   delete access[unreadable.name];
   const access_errors: Record<string, string> = { [unreadable.name]: "Permission denied on iap.webServices.getIamPolicy for this endpoint (403)." };
+
+  // ?case=merge (mock mode only): the Helpdesk Agent holds a second, separate grant on Tickets MCP (close_ticket) next to
+  // its read-only one, and every agent inherits search_tickets from a project-wide grant: the Build step's "change
+  // existing access" merges the two own grants into one, and shows search_tickets locked.
+  if (mergeCase()) {
+    const t = mcp_servers[0].name;
+    access[t].push(
+      b(helpdesk.principal, "Helpdesk Agent (Agent Identity)", "Helpdesk Agent can call only close_ticket on Tickets MCP.", { title: "MCP tools: close_ticket", expression: toolsExpr(["close_ticket"]) }),
+      b(projectSet, "All agents in project (Agent Identity)", "All agents in this project can call only search_tickets on Tickets MCP.", { title: "MCP tools: search_tickets", expression: toolsExpr(["search_tickets"]) }),
+    );
+  }
 
   // us-west1: the scale scenario (§11.5–11.6) on top of the base world.
   if (R === SCALE_REGION) {
