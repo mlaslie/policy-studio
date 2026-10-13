@@ -61,6 +61,18 @@ const skillTagW = (measure: Measure) => measure("SKILL", fontOf(SKILL_FONT)) + 8
 export const skillRoom = (k: PNodeKind, measure: Measure = measureText) => innerW(k) - skillTagW(measure) - 5 - 12;
 const skillW = (s: string, k: PNodeKind, measure: Measure) => skillTagW(measure) + 5 + 12 + measure(fitText(s, skillRoom(k, measure), FIT.skill, "end", measure).text, fontOf(FIT.skill));
 
+/** An MCP card's tool row (styles.css .pmap .tool-row): 31px high, a 4px left edge and 14px padding a side, the kind
+ *  tile (22px), then the name, the READ / WRITE pill (10px bold caps, 0.4px letter spacing, 5px padding a side) and,
+ *  with an agent selected, the state label (11px, weight 500), 8px apart. The name gets what's left. */
+export const TOOL_ROW_H = 31;
+const TOOL_PILL: FitStyle = { size: 10, min: 10, weight: 700 };
+export const TOOL_LABEL: FitStyle = { size: 11, min: 11, weight: 500 };
+export const toolPillW = (text: string, measure: Measure = measureText) => measure(text.toUpperCase(), fontOf(TOOL_PILL)) + 0.4 * text.length + 10;
+export const toolLabelW = (text: string, measure: Measure = measureText) => measure(text, fontOf(TOOL_LABEL));
+/** Room for a tool's name: the row less its edge, padding, the kind tile and its gap, and the widths after the name
+ *  (each with its 8px gap). */
+export const toolRoom = (after: number[]) => W.mcp - 2 - 4 - 28 - 22 - 8 - after.reduce((a, w) => a + w + 8, 0);
+
 /** Rows that pills of these widths wrap into inside `width` px (flex-wrap, `gap` between them; a pill wider than the
  *  row is cut to it). */
 export function wrapRows(widths: number[], width: number, gap = CHIP_GAP): number {
@@ -90,7 +102,7 @@ export function nodeHeight(n: PNode, expanded = false, measure: Measure = measur
   const note = n.hiddenLines ? NOTE_H : 0;
   switch (k) {
     case "mcp":
-      return expanded ? 70 + (n.shownTools?.length ?? n.tools?.length ?? 0) * 31 + 6 + chips(n.chips) : 94 + chips(n.chips);
+      return expanded ? 70 + (n.shownTools?.length ?? n.tools?.length ?? 0) * TOOL_ROW_H + 6 + chips(n.chips) : 94 + chips(n.chips);
     case "a2a":
     case "runtime_dest": {
       const sk = n.skills ?? [];

@@ -24,6 +24,19 @@ export function Choice({ name, checked, onChange, title, desc, badge, disabled, 
   );
 }
 
+/** A tool note ("allowed today by: …", "allowed by … ; change it there"): its leading allowed / denied in the tool
+ *  rows' state colours (styles.css .tool-state). */
+function StateNote({ text }: { text: string }) {
+  const m = /^(allowed|denied)\b/.exec(text);
+  if (!m) return <>{text}</>;
+  return (
+    <>
+      <span className={`tool-state ts-${m[1]}`}>{m[1]}</span>
+      {text.slice(m[1].length)}
+    </>
+  );
+}
+
 /** The chooser's state: the mode plus the tool checklist and the custom expression (kept while switching modes);
  *  `remove`: "Remove access" on a destination that isn't an MCP server (the builder's change mode). */
 export type AccessDraft = { mode: AccessMode; tools: string[]; expr: string; remove?: boolean };
@@ -139,10 +152,10 @@ export function AccessChooser({ name, dest, mcp, value, onChange, compact, extra
                     <div className="tool-note muted tiny" id={noteId}>
                       {lock ? (
                         <>
-                          <LockIcon size={11} /> {lock.text} {lock.action}
+                          <LockIcon size={11} /> <StateNote text={lock.text} /> {lock.action}
                         </>
                       ) : (
-                        note
+                        <StateNote text={note ?? ""} />
                       )}
                     </div>
                   )}

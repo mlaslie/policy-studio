@@ -44,6 +44,17 @@
   --e-screened: #c45500;
   /* Staged (pending) lines on the map: dashed, with a clock badge. */
   --e-staged: #8f6a00;
+  /* MCP tool rows (lib/toolMarks.ts): the kind (read: blue book and READ pill; write, destructive too: amber pencil and
+     WRITE pill) and the state label (allowed, denied, "?"). Red is only "denied". */
+  --tool-read-bg: var(--blue-weak);
+  --tool-read-fg: var(--blue);
+  --tool-read-text: #185abc;
+  --tool-write-bg: #faeeda;
+  --tool-write-fg: #854f0b;
+  --tool-write-text: #633806;
+  --tool-allowed: #137333;
+  --tool-denied: #e24b4a;
+  --tool-unknown: var(--text-2);
   /* Per-orchestrator accents (CONTRACTS §12): 0 = primary, 1.. = additional agents. */
   --agent-0: #4285f4;
   --agent-1: #a142f4;
@@ -90,6 +101,15 @@
     --e-dormant: #8a9096;
     --e-screened: #fcad70;
     --e-staged: #fdd663;
+    --tool-read-bg: var(--blue-weak);
+    --tool-read-fg: var(--blue);
+    --tool-read-text: #a8c7fa;
+    --tool-write-bg: #46300c;
+    --tool-write-fg: #f5c26b;
+    --tool-write-text: #fad9a0;
+    --tool-allowed: #81c995;
+    --tool-denied: #ff6b6b;
+    --tool-unknown: var(--text-2);
     --agent-0: #8ab4f8;
     --agent-1: #d7aefb;
     --agent-2: #78d9ec;
@@ -952,6 +972,44 @@ p {
 .badge-purple {
   background: var(--purple-weak);
   color: var(--purple);
+}
+/* an MCP tool's kind (Inventory, the builder's checklist, the policy panel): READ blue, WRITE amber */
+.tool-pill.ro {
+  background: var(--tool-read-bg);
+  color: var(--tool-read-text);
+}
+.tool-pill.rw {
+  background: var(--tool-write-bg);
+  color: var(--tool-write-text);
+}
+/* an MCP tool's state: a small text label (map and preview rows, builder notes, the policy panel) */
+.tool-state {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+}
+.tool-state.ts-allowed {
+  color: var(--tool-allowed);
+}
+.tool-state.ts-denied {
+  color: var(--tool-denied);
+}
+.tool-state.ts-unknown {
+  color: var(--tool-unknown);
+}
+.tool-state-badge.ts-allowed {
+  background: var(--green-weak);
+  color: var(--tool-allowed);
+}
+.tool-state-badge.ts-denied {
+  background: var(--red-weak);
+  color: var(--tool-denied);
+}
+.tool-state-badge.ts-unknown {
+  background: var(--surface-3);
+  color: var(--tool-unknown);
 }
 .mono-chip {
   font-family: var(--mono);
@@ -1899,6 +1957,13 @@ tr:last-child td {
 }
 .tool-row:last-child {
   border-bottom: 0;
+}
+.tool-row > .mono {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.tool-row > .badge {
+  flex-shrink: 0;
 }
 .expr {
   font-size: 12.5px;
@@ -4394,22 +4459,23 @@ body.resizing * {
   padding: 3px 6px;
   border-top: 1px solid var(--border);
 }
+/* the name takes what's left and ends in an ellipsis (the row's title has it all) */
+.pmap-tool-name {
+  width: 100%;
+  max-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pmap-tool-kind,
 .pmap-tool-mark {
-  width: 22px;
-  text-align: center;
-  font-weight: 700;
+  white-space: nowrap;
 }
-.pmap-tools tr.st-allowed .pmap-tool-mark {
-  color: var(--green);
-}
-.pmap-tools tr.st-denied .pmap-tool-mark {
-  color: var(--red);
+.pmap-tool-mark {
+  text-align: right;
 }
 .pmap-tools tr.st-denied .mono {
   text-decoration: line-through;
-}
-.pmap-tools tr.st-unknown .pmap-tool-mark {
-  color: var(--text-2);
 }
 .pmap-actions {
   display: flex;
@@ -4784,6 +4850,10 @@ body.resizing * {
   background: var(--amber-weak);
   color: var(--amber);
 }
+.pmap .chip-write {
+  background: var(--tool-write-bg);
+  color: var(--tool-write-text);
+}
 .pmap .chip-orange {
   background: var(--orange-weak);
   color: var(--orange);
@@ -5003,29 +5073,39 @@ body.resizing * {
   border-radius: 6px;
 }
 .pmap .tool-kind.ro {
-  background: var(--blue-weak);
-  color: var(--blue);
+  background: var(--tool-read-bg);
+  color: var(--tool-read-fg);
 }
 .pmap .tool-kind.rw {
-  background: var(--red-weak);
-  color: var(--red);
+  background: var(--tool-write-bg);
+  color: var(--tool-write-fg);
 }
+/* nodes.tsx ToolName fits it to the room the pill and label leave (layout.ts toolRoom); the ellipsis is a backstop */
 .pmap .tool-name {
   flex: 1;
+  min-width: 0;
   font-size: 13px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .pmap .tool-access {
+  flex-shrink: 0;
   font-size: 10px;
   font-weight: 700;
+  line-height: 14px;
   text-transform: uppercase;
   letter-spacing: 0.4px;
-  color: var(--text-3);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+.pmap .tool-access.ro {
+  background: var(--tool-read-bg);
+  color: var(--tool-read-text);
 }
 .pmap .tool-access.rw {
-  color: var(--red);
+  background: var(--tool-write-bg);
+  color: var(--tool-write-text);
 }
 .pmap .tool-row.st-allowed {
   border-left-color: var(--e-allowed);
@@ -5042,19 +5122,6 @@ body.resizing * {
 .pmap .tool-row.st-unknown {
   border-left-color: var(--e-unknown);
   border-left-style: dotted;
-}
-/* a tool a condition can't decide here: "?" instead of a state dot */
-.pmap .tool-q {
-  flex-shrink: 0;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  border: 1.5px solid var(--e-allowed);
-  color: var(--e-allowed);
-  font-size: 10px;
-  font-weight: 700;
-  line-height: 11px;
-  text-align: center;
 }
 .pmap .state-dot {
   flex-shrink: 0;
@@ -5547,6 +5614,7 @@ button.legend-item:hover {
 }
 .pv-states {
   display: inline-flex;
+  flex-shrink: 0;
   align-items: center;
   gap: 4px;
 }

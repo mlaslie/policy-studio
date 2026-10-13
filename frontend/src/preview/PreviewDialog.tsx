@@ -10,18 +10,20 @@ import { memo, useEffect, useId, useMemo, useRef, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import type { Intent } from "../api/types";
 import { useStudio } from "../store";
-import { BookIcon, CheckIcon, CloseIcon, CloudIcon, PencilIcon, ServerIcon, WarnIcon } from "../components/Icons";
+import { CheckIcon, CloseIcon, CloudIcon, PencilIcon, ServerIcon, WarnIcon } from "../components/Icons";
+import { ToolKindIcon, ToolStateLabel } from "../components/ToolMarks";
 import { Badge } from "../components/ui";
 import { accessFromCondition, accessWords, conditionFor } from "../lib/policy";
 import { buildPolicyGraph } from "../map/graph";
 import { simulate } from "../map/simulate";
 import { diffGraphs, mergeStaged } from "../map/diff";
-import { layoutView } from "../map/layout";
+import { layoutView, toolLabelW, toolRoom } from "../map/layout";
 import { toFlow, type MNode } from "../map/toFlow";
-import { nodeTypes } from "../map/nodes";
+import { ToolName, nodeTypes } from "../map/nodes";
 import { EdgeMarkers, edgeTypes } from "../map/edges";
 import { previewGraph } from "./graph";
 import { previewModel, type ChangeRow, type PreviewModel, type ToolState } from "./changes";
+import { TOOL_STATE_TEXT, TOOL_STATE_WORDS, toolRowLabel } from "../lib/toolMarks";
 
 const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
@@ -51,20 +53,22 @@ const PreviewMcpNode = memo(({ data }: NodeProps<MNode>) => {
           </div>
         </div>
       </div>
-      <div className="tools">
-        {rows.map((r) => (
-          <div key={r.name} className={`tool-row st-${r.after} ${r.change !== "same" ? "pv-changed" : ""}`} title={`${r.name}: today ${STATE_LABEL[r.today].toLowerCase()}, after ${STATE_LABEL[r.after].toLowerCase()}`}>
-            <span className={`tool-kind ${r.readOnly ? "ro" : "rw"}`}>{r.readOnly ? <BookIcon size={13} /> : <PencilIcon size={13} />}</span>
-            <span className="tool-name mono">{r.name}</span>
-            <span className="pv-states" aria-label={`today ${STATE_LABEL[r.today]}, after ${STATE_LABEL[r.after]}`}>
-              <span className={`state-dot st-${r.today === "allowed" ? "allowed" : r.today === "denied" ? "blocked" : "unknown"}`} />
-              <span className="pv-arrow" aria-hidden="true">
-                →
+      <div className="tools" role="list">
+        {rows.map((r) => {
+          const label = `${toolRowLabel(r.name, { readOnly: !!r.readOnly })}, today ${TOOL_STATE_WORDS[r.today]}, after ${TOOL_STATE_WORDS[r.after]}`;
+          const end = [toolLabelW(TOOL_STATE_TEXT[r.today]), toolLabelW("→"), toolLabelW(TOOL_STATE_TEXT[r.after])];
+          return (
+            <div key={r.name} role="listitem" className={`tool-row st-${r.after} ${r.change !== "same" ? "pv-changed" : ""}`} aria-label={label} title={label}>
+              <ToolKindIcon readOnly={!!r.readOnly} />
+              <ToolName name={r.name} room={toolRoom(end) + 4} title={label} />
+              <span className="pv-states" aria-hidden="true">
+                <ToolStateLabel st={r.today} />
+                <span className="pv-arrow">→</span>
+                <ToolStateLabel st={r.after} />
               </span>
-              <span className={`state-dot st-${r.after === "allowed" ? "allowed" : r.after === "denied" ? "blocked" : "unknown"}`} />
-            </span>
-          </div>
-        ))}
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -123,7 +127,7 @@ function PreviewMap({ intent, model }: { intent: Intent; model: PreviewModel }) 
 function State({ s, by }: { s: ToolState; by: string[] }) {
   return (
     <span className="pv-state">
-      <Badge tone={s === "allowed" ? "green" : s === "denied" ? "red" : "neutral"}>{STATE_LABEL[s]}</Badge>
+      <span className={`badge tool-state-badge ts-${s}`}>{STATE_LABEL[s]}</span>
       {by.length > 0 && <span className="muted tiny"> by {by.join(" + ")}</span>}
     </span>
   );

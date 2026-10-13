@@ -13,20 +13,21 @@ import { ShowOnMap } from "../components/ShowOnMap";
 
 type Tab = "agents" | "mcp" | "apis" | "engines";
 
+/** A tool's READ / WRITE pill (styles.css .tool-pill: blue for read, amber for write, destructive ones included). */
 export function ToolBadge({ t }: { t: McpTool }) {
   const raw = JSON.stringify(t.annotations, null, 1);
   if (t.destructive)
     return (
-      <span className="badge badge-red" title={`destructiveHint=true\n${raw}`}>
+      <span className="badge tool-pill rw" title={`destructiveHint=true\n${raw}`}>
         WRITE · destructive
       </span>
     );
   return t.read_only ? (
-    <span className="badge badge-green" title={`readOnlyHint=true\n${raw}`}>
+    <span className="badge tool-pill ro" title={`readOnlyHint=true\n${raw}`}>
       READ
     </span>
   ) : (
-    <span className="badge badge-amber" title={`readOnlyHint is not true\n${raw}`}>
+    <span className="badge tool-pill rw" title={`readOnlyHint is not true\n${raw}`}>
       WRITE
     </span>
   );

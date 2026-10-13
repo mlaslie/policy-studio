@@ -19,8 +19,8 @@ export interface FitStyle {
   mono?: boolean;
 }
 
-/** Titles shrink to 80% (12px); the 12px lines (subtitles, mono titles and ids) to 11px; chips and skills don't
- *  shrink (they're already small), they only shorten. Keep in step with styles.css (.node-title, .node-sub, .chip). */
+/** Titles shrink to 80% (12px); the 12px lines (subtitles, mono titles and ids) to 11px; tool names to 11.5px; chips
+ *  and skills don't shrink (they're already small), they only shorten. Keep in step with styles.css (.node-title, .node-sub, .chip). */
 export const FIT = {
   title: { size: 15, min: 12, weight: 500 },
   monoTitle: { size: 12, min: 11, weight: 600, mono: true },
@@ -28,6 +28,8 @@ export const FIT = {
   monoSub: { size: 12, min: 11, weight: 400, mono: true },
   chip: { size: 11.5, min: 11.5, weight: 500 },
   skill: { size: 12, min: 12, weight: 400 },
+  /** MCP tool names in a card's rows (.pmap .tool-name). */
+  tool: { size: 13, min: 11.5, weight: 400, mono: true },
 } satisfies Record<string, FitStyle>;
 
 export const fontOf = (s: FitStyle, size = s.size) => `${s.weight} ${size}px ${s.mono ? MONO : SANS}`;

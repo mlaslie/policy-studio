@@ -4,11 +4,13 @@
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 import { createContext, memo, useContext, useSyncExternalStore } from "react";
 import type { CSSProperties, ReactNode } from "react";
-import { ApiIcon, ArrowIcon, BookIcon, ClockIcon, CloudIcon, GatewayIcon, PencilIcon, PersonIcon, PinIcon, RegistryIcon, RobotIcon, ServerIcon, ShieldIcon, WarnIcon } from "../components/Icons";
+import { ApiIcon, ArrowIcon, ClockIcon, CloudIcon, GatewayIcon, PersonIcon, PinIcon, RegistryIcon, RobotIcon, ServerIcon, ShieldIcon, WarnIcon } from "../components/Icons";
 import { FIT, fitText, fontEpoch, onFontEpoch, type Cut, type FitStyle } from "./fit";
 import type { Chip, PNodeKind } from "./graph";
-import { W, chipShown, skillRoom, titleRoom } from "./layout";
-import type { MNode, ToolState } from "./toFlow";
+import { W, chipShown, skillRoom, titleRoom, toolLabelW, toolPillW, toolRoom } from "./layout";
+import type { MNode } from "./toFlow";
+import { toolRowLabel, toolStateText } from "../lib/toolMarks";
+import { ToolKindIcon, ToolStateLabel } from "../components/ToolMarks";
 
 /** Actions a node can trigger (kept out of node data so it stays plain). */
 export const MapActions = createContext<{ jump: (id: string) => void; unpin: (id: string) => void; openPicker: () => void }>({ jump: () => undefined, unpin: () => undefined, openPicker: () => undefined });
@@ -327,7 +329,9 @@ const DestNode = memo(({ id, data }: NodeProps<MNode>) => {
   );
 });
 
-const TOOL_TITLE: Record<ToolState, string> = { allowed: "allowed", denied: "denied", unknown: "can't be told here" };
+/** A tool row's name, fitted to the room the pill and the state label leave (layout.ts toolRoom): it shrinks to 11.5px,
+ *  then ends in an ellipsis; the full name is in the row's tooltip and aria-label. */
+export const ToolName = ({ name, room, title }: { name: string; room: number; title: string }) => <Fit className="tool-name mono" text={name} room={room} style={FIT.tool} title={title} />;
 
 const McpNode = memo(({ id, data }: NodeProps<MNode>) => {
   const n = data.node;
@@ -352,22 +356,21 @@ const McpNode = memo(({ id, data }: NodeProps<MNode>) => {
         {data.ring && <span className={`state-dot st-${data.ring}`} />}
       </div>
       {data.expanded ? (
-        <div className="tools">
+        <div className="tools" role="list">
           {rows.map((t) => {
             const st = data.toolStates?.[t.name];
             const per = data.toolAgents?.[t.name];
+            const label = toolRowLabel(t.name, t, st);
+            const title = `${label}${per ? `\n${per}` : ""}`;
+            const pill = t.readOnly ? "read" : "write";
             return (
-              <div key={t.name} className={`tool-row ${st ? `st-${st}` : ""}`} title={`${t.name}: ${t.readOnly ? "read-only" : t.destructive ? "destructive" : "write"}${st ? `, ${TOOL_TITLE[st]}` : ""}${per ? `\n${per}` : ""}`}>
-                <span className={`tool-kind ${t.readOnly ? "ro" : "rw"}`}>{t.readOnly ? <BookIcon size={13} /> : <PencilIcon size={13} />}</span>
-                <span className="tool-name mono">{t.name}</span>
-                <span className={`tool-access ${t.readOnly ? "ro" : "rw"}`}>{t.readOnly ? "read" : "write"}</span>
-                {st === "unknown" ? (
-                  <span className="tool-q" aria-label={TOOL_TITLE[st]}>
-                    ?
-                  </span>
-                ) : (
-                  st && <span className={`state-dot st-${st === "allowed" ? "allowed" : "blocked"}`} aria-label={TOOL_TITLE[st]} />
-                )}
+              <div key={t.name} role="listitem" className={`tool-row ${st ? `st-${st}` : ""}`} aria-label={label} title={title}>
+                <ToolKindIcon readOnly={t.readOnly} />
+                <ToolName name={t.name} room={toolRoom([toolPillW(pill), ...(st ? [toolLabelW(toolStateText(st)!)] : [])])} title={title} />
+                <span className={`tool-access ${t.readOnly ? "ro" : "rw"}`} aria-hidden="true">
+                  {pill}
+                </span>
+                <ToolStateLabel st={st} />
               </div>
             );
           })}
@@ -375,7 +378,7 @@ const McpNode = memo(({ id, data }: NodeProps<MNode>) => {
       ) : (
         <div className="node-chips">
           <span className="chip">{tools.length} tools</span>
-          {destructive > 0 && <span className="chip chip-red">{destructive} destructive</span>}
+          {destructive > 0 && <span className="chip chip-write">{destructive} destructive</span>}
         </div>
       )}
       {n.unreadable ? (

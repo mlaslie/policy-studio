@@ -15,6 +15,8 @@ import { Tip } from "../components/Tooltip";
 import { RedeployHelp } from "../components/Redeploy";
 import { AccessChooser, accessOf, blocking, draftLint, draftOf, type AccessDraft } from "../components/AccessChooser";
 import { ArrowIcon, BookIcon, CheckIcon, ClockIcon, CloseIcon, PencilIcon, TrashIcon, WarnIcon } from "../components/Icons";
+import { ToolStateLabel } from "../components/ToolMarks";
+import { TOOL_STATE_WORDS, toolRowLabel, type ToolState } from "../lib/toolMarks";
 import { checksFor, type Check } from "../lib/checks";
 import { grantToIntent, revokesGrant } from "../lib/grants";
 import { KIND_LABEL, ROLE, accessFromCondition, accessWords, intentEnglish, intentKey, shortName } from "../lib/policy";
@@ -456,8 +458,6 @@ function StagedList({ ids }: { ids: string[] }) {
 }
 
 const VIA_TEXT: Record<Reason["via"], string> = { member: "a grant to this principal", project_agents: "all agents in this project", public: "public (anyone)", registry_wide: "registry-wide (every entry)", other: "a group or other principal" };
-const TOOL_MARK = { allowed: "✓", denied: "✕", unknown: "?" } as const;
-
 /** One binding behind a line: the sentence, the binding, the condition, and the actions on it. */
 function ReasonCard({ r, part, multi, head, inv, label }: { r: Reason; part: PEdge; multi: boolean; head?: string; inv: Inventory; label: (id: string) => string }) {
   const { cart, addIntents, openBuilder } = useStudio();
@@ -519,14 +519,14 @@ function ReasonCard({ r, part, multi, head, inv, label }: { r: Reason; part: PEd
           <tbody>
             {/* only the tools the line shows under Show: Allows / Denies */}
             {mcp.tools.filter((t) => !part.shownTools || part.shownTools.includes(t.name)).map((t) => {
-              const st = tools.allowed.includes(t.name) ? "allowed" : tools.denied.includes(t.name) ? "denied" : "unknown";
+              const st: ToolState = tools.allowed.includes(t.name) ? "allowed" : tools.denied.includes(t.name) ? "denied" : "unknown";
               return (
-                <tr key={t.name} className={`st-${st}`}>
-                  <td className="pmap-tool-mark" aria-label={st === "allowed" ? "allowed" : st === "denied" ? "denied" : "can't be told here"}>
-                    {TOOL_MARK[st]}
+                <tr key={t.name} className={`st-${st}`} title={toolRowLabel(t.name, { readOnly: t.read_only, destructive: t.destructive }, st)}>
+                  <td className="mono small pmap-tool-name">{t.name}</td>
+                  <td className="pmap-tool-kind">{t.read_only ? <span className="badge tool-pill ro"><BookIcon size={11} /> read-only</span> : <span className="badge tool-pill rw">{t.destructive ? "destructive" : "write"}</span>}</td>
+                  <td className="pmap-tool-mark" aria-label={TOOL_STATE_WORDS[st]}>
+                    <ToolStateLabel st={st} />
                   </td>
-                  <td className="mono small">{t.name}</td>
-                  <td>{t.read_only ? <Badge tone="green"><BookIcon size={11} /> read-only</Badge> : t.destructive ? <Badge tone="red">destructive</Badge> : <Badge tone="amber">write</Badge>}</td>
                 </tr>
               );
             })}
