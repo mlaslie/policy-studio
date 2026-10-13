@@ -5,6 +5,8 @@
 // sooner, once there are more than 25 of them).
 // Deterministic: the same view gives the same positions.
 import { DEST_SECTIONS, NOGW, SECTION_LABEL, type Chip, type PEdge, type PNode, type PNodeKind } from "./graph";
+import { FIT, fitText, fontOf, measureText, type FitStyle, type Measure } from "./fit";
+import { chipLabel } from "./labels";
 import type { XY } from "./usePositions";
 import type { MapView } from "./view";
 
@@ -36,34 +38,77 @@ export const W: Record<PNodeKind, number> = {
   registry: 260,
 };
 
-/** Rows a list of chips (or skills) wraps into inside `width` px (an estimate; measured heights replace it). */
-function chipRows(texts: string[], width: number, px = 6.4, pad = 24): number {
+// ---------- card geometry: the room text gets inside a card (nodes.tsx fits titles and chips into it) ----------
+const BORDER: Partial<Record<PNodeKind, number>> = { engine: 2, gateway: 2, no_gateway: 2, registry: 1.5 };
+/** Width inside a card's padding (14px a side) and border: what its title row and chips fit into. */
+export const innerW = (k: PNodeKind) => W[k] - 28 - 2 * (BORDER[k] ?? 1);
+/** Room for the title and subtitle: the inner width less the icon tile (36px and a 10px gap) and, when the card shows
+ *  the selected agent's verdict, its dot (10px and a 10px gap). */
+export const titleRoom = (k: PNodeKind, dot = false) => innerW(k) - 46 - (dot ? 20 : 0);
+/** A chip's padding (9px a side), the clock on a staged one (11px and a 4px gap), the gap between chips, and a row of
+ *  chips (11.5px text at line-height 1.4, 2px padding a side) — styles.css .chip. */
+const CHIP_PAD = 18;
+const CLOCK = 15;
+export const CHIP_GAP = 6;
+export const CHIP_H = 20;
+/** A chip as the card draws it: the short label (labels.ts chipLabel), shortened further if it still doesn't fit. */
+export const chipShown = (c: Pick<Chip, "text" | "pending">, k: PNodeKind, measure: Measure = measureText) => fitText(chipLabel(c.text), innerW(k) - CHIP_PAD - (c.pending ? CLOCK : 0), FIT.chip, "end", measure);
+const chipW = (c: Chip, k: PNodeKind, measure: Measure) => measure(chipShown(c, k, measure).text, fontOf(FIT.chip)) + CHIP_PAD + (c.pending ? CLOCK : 0);
+/** A skill pill: the "SKILL" tag (9.5px bold caps, 4px padding a side, 0.4px letter spacing), a 5px gap, the name, and
+ *  the pill's padding (3px and 7px) and border. */
+const SKILL_FONT: FitStyle = { size: 9.5, min: 9.5, weight: 700 };
+const skillTagW = (measure: Measure) => measure("SKILL", fontOf(SKILL_FONT)) + 8 + 2;
+export const skillRoom = (k: PNodeKind, measure: Measure = measureText) => innerW(k) - skillTagW(measure) - 5 - 12;
+const skillW = (s: string, k: PNodeKind, measure: Measure) => skillTagW(measure) + 5 + 12 + measure(fitText(s, skillRoom(k, measure), FIT.skill, "end", measure).text, fontOf(FIT.skill));
+
+/** Rows that pills of these widths wrap into inside `width` px (flex-wrap, `gap` between them; a pill wider than the
+ *  row is cut to it). */
+export function wrapRows(widths: number[], width: number, gap = CHIP_GAP): number {
   let rows = 0;
   let used = width;
-  for (const t of texts) {
-    const w = Math.min(width, t.length * px + pad);
-    if (used + w > width) {
+  for (const raw of widths) {
+    const w = Math.min(width, raw);
+    if (used + gap + w > width) {
       rows++;
       used = w;
-    } else used += w + 6;
+    } else used += gap + w;
   }
   return rows;
 }
 
-/** Estimated node height (the canvas measures the real one and lays out again). `expanded`: MCP tool rows shown. */
-export function nodeHeight(n: PNode, expanded = false): number {
-  const w = W[n.kind] - 28;
-  const chips = (c: Chip[]) => (c.length ? 10 + chipRows(c.map((x) => x.text), w) * 24 : 0);
-  switch (n.kind) {
+/** Estimated node height (the canvas measures the real one and lays out again). `expanded`: MCP tool rows shown.
+ *  Chip rows come from the chips' measured widths, so the estimate is close before React Flow has measured the card
+ *  (cards off screen aren't rendered, so aren't measured). */
+export function nodeHeight(n: PNode, expanded = false, measure: Measure = measureText): number {
+  const k = n.kind;
+  const rows = (c: Chip[]) => wrapRows(c.map((x) => chipW(x, k, measure)), innerW(k));
+  const chips = (c: Chip[]) => (c.length ? 10 + rows(c) * (CHIP_H + CHIP_GAP) - CHIP_GAP : 0);
+  switch (k) {
     case "mcp":
-      return expanded ? 70 + (n.tools?.length ?? 0) * 31 + 6 + chips(n.chips) : 70 + 34 + chips(n.chips);
+      return expanded ? 70 + (n.tools?.length ?? 0) * 31 + 6 + chips(n.chips) : 94 + chips(n.chips);
     case "a2a":
-    case "runtime_dest":
-      return 70 + (n.skills?.length ? 8 + chipRows(n.skills.slice(0, 3), w, 6.2, 52) * 26 : 0) + chips(n.chips);
+    case "runtime_dest": {
+      const sk = n.skills ?? [];
+      const pills = [...sk.slice(0, 3).map((s) => skillW(s, k, measure)), ...(sk.length > 3 ? [measure(`+${sk.length - 3}`, fontOf(FIT.skill)) + 12] : [])];
+      return 66 + (sk.length ? 8 + wrapRows(pills, innerW(k), 4) * 26 - 4 : 0) + chips(n.chips);
+    }
     case "engine":
-      return 72 + chips(n.chips);
+      return 68 + chips(n.chips);
+    case "endpoint":
+    case "google_apis":
+      return 66 + chips(n.chips);
     case "endpoint_group":
+      return 58;
+    case "registry":
+      return 67 + chips(n.chips);
+    case "anywhere":
       return 62;
+    case "client":
+    case "principal_group": {
+      // the description wraps (17px lines) instead of being shortened
+      const lines = Math.max(1, Math.ceil(measure(n.sub ?? "", fontOf(FIT.sub)) / titleRoom(k)));
+      return 64 + (lines - 1) * 17 + chips(n.chips);
+    }
     default:
       return 64 + chips(n.chips);
   }
@@ -95,11 +140,18 @@ function sectionTitle(section: string, byId: Map<string, PNode>): string {
 
 /** `layoutEdges` (every shown caller's own grants, MapView) when given, so the selection doesn't move nodes; else
  *  `edges`. */
-export function layoutView(view: Pick<MapView, "nodes" | "edges"> & { layoutEdges?: PEdge[] }, opts: { expanded?: Set<string>; heights?: Record<string, number> } = {}): Layout {
+export function layoutView(view: Pick<MapView, "nodes" | "edges"> & { layoutEdges?: PEdge[] }, opts: { expanded?: Set<string>; heights?: Record<string, number>; measure?: Measure } = {}): Layout {
   const { nodes } = view;
   const edges = view.layoutEdges ?? view.edges;
   const byId = new Map(nodes.map((n) => [n.id, n]));
-  const h = (n: PNode) => opts.heights?.[n.id] ?? nodeHeight(n, opts.expanded?.has(n.id));
+  const est = new Map<string, number>();
+  const h = (n: PNode) => {
+    const m = opts.heights?.[n.id];
+    if (m !== undefined) return m;
+    let e = est.get(n.id);
+    if (e === undefined) est.set(n.id, (e = nodeHeight(n, opts.expanded?.has(n.id), opts.measure)));
+    return e;
+  };
   const gws = nodes.filter((n) => n.column === "gateways").sort((a, b) => Number(a.kind === "no_gateway") - Number(b.kind === "no_gateway") || a.label.localeCompare(b.label) || a.id.localeCompare(b.id));
   const gwOrder = new Map(gws.map((g, i) => [g.id, i]));
 

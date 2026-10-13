@@ -4535,7 +4535,7 @@ body.resizing * {
   outline: none;
   box-shadow: none;
 }
-.pmap .react-flow__node > .node.picked {
+.pmap .react-flow__node > .node.node-picked {
   box-shadow: 0 0 0 2px var(--blue), var(--shadow-1);
 }
 .pmap .react-flow__node:focus-visible > .node,
@@ -4602,16 +4602,19 @@ body.resizing * {
   min-width: 0;
   flex: 1;
 }
+/* Titles and subtitles are fitted to the card (map/fit.ts: a smaller font, then an ellipsis); the line height is fixed
+   so a shrunk line doesn't change the card's height. The clipping here is only a safety net. */
 .pmap .node-title {
   font-size: 15px;
   font-weight: 500;
-  line-height: 1.2;
+  line-height: 18px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .pmap .node-sub {
   font-size: 12px;
+  line-height: 17px;
   color: var(--text-2);
   white-space: nowrap;
   overflow: hidden;
@@ -4692,10 +4695,21 @@ body.resizing * {
 .pmap .badge-cloudrun {
   color: var(--blue);
 }
-.pmap .node-open-btn {
+/* The pin and the "same agent" arrow sit together on the top-right corner, clear of the type badge on the left (and,
+   on a gateway, of the Model Armor shield on its corner). */
+.pmap .node-corner {
   position: absolute;
   top: -11px;
   right: 10px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.pmap .node-gateway > .node-corner {
+  right: 30px;
+}
+.pmap .node-open-btn {
   display: grid;
   place-items: center;
   width: 22px;
@@ -4710,23 +4724,39 @@ body.resizing * {
   color: var(--blue);
   border-color: var(--blue);
 }
+/* Chips wrap onto rows inside the card; one too long for a row is shortened (map/layout.ts chipShown) and, as a safety
+   net, clipped with an ellipsis. Line height and padding are fixed: the layout estimates the rows from them. */
 .pmap .node-chips {
   display: flex;
   gap: 6px;
   flex-wrap: wrap;
   margin-top: 10px;
+  max-width: 100%;
 }
 .pmap .chip {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  max-width: 100%;
+  min-width: 0;
   font-size: 11.5px;
   font-weight: 500;
+  line-height: 16px;
   padding: 2px 9px;
   border-radius: 999px;
   white-space: nowrap;
   background: var(--surface-3);
   color: var(--text-2);
+}
+.pmap .chip > svg {
+  flex-shrink: 0;
+}
+.pmap .chip-text,
+.pmap .skill-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 /* table view: "Google API" next to an endpoint */
 .pmap .pmap-tag {
@@ -5249,10 +5279,6 @@ body.resizing * {
   border-style: dashed;
 }
 .pmap .node-pin {
-  position: absolute;
-  top: -10px;
-  left: 10px;
-  z-index: 2;
   display: inline-flex;
   align-items: center;
   gap: 3px;

@@ -17,7 +17,7 @@ import {
   type NodeChange,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type RefObject } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent as ReactKeyboardEvent, type RefObject } from "react";
 import type { GatewaysResp, Inventory } from "../api/types";
 import { Callout, Disclosure, Load, StepHeader } from "../components/ui";
 import { Tip } from "../components/Tooltip";
@@ -26,6 +26,7 @@ import { useStudio } from "../store";
 import { plural } from "../lib/util";
 import { buildPolicyGraph, type Direction, type PEdge, type PolicyGraph, type Verdict } from "./graph";
 import { DEFAULT_DIRECTION, TOO_MANY_LINES, expandGroup, isSource, revealPatch, type Affiliation, type DestType, type MapFilters, viewOf } from "./view";
+import { fontEpoch, onFontEpoch } from "./fit";
 import { GAP_Y, HEADER_H, freeSpot, layoutView } from "./layout";
 import { VERDICT_LABEL, edgeAria, expandedMcp, toFlow, type MNode } from "./toFlow";
 import { nodeTypes, MapActions } from "./nodes";
@@ -262,7 +263,10 @@ function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
   const expanded = useMemo(() => expandedMcp(view, active), [view, active]);
   const hkey = useCallback((id: string) => `${id}|${expanded.has(id) ? 1 : 0}`, [expanded]);
   const heights = useMemo(() => Object.fromEntries(view.nodes.map((n) => [n.id, measured[hkey(n.id)]]).filter(([, h]) => h !== undefined)), [view, measured, hkey]);
-  const layout = useMemo(() => layoutView(view, { expanded, heights }), [view, expanded, heights]);
+  // estimates measure chip text (fit.ts); they're measured again once web fonts load
+  const fonts = useSyncExternalStore(onFontEpoch, fontEpoch, fontEpoch);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const layout = useMemo(() => layoutView(view, { expanded, heights }), [view, expanded, heights, fonts]);
 
   // Auto-select: with nothing selected and exactly one agent in view, select it (so the map doesn't open empty). Once
   // per set of agents in view, so deselecting it sticks.

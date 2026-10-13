@@ -114,7 +114,8 @@ export function addScale(w: ScaleParts, factor = 1) {
     const e: Engine = {
       name: w.engineName(id),
       id,
-      display_name: `agent-${pad(k, 3)}`,
+      // one long name, to check that card titles fit (shrink, then ellipsis) at scale
+      display_name: k === 3 ? "acme-prod-helpdesk-orchestrator-eu" : `agent-${pad(k, 3)}`,
       principal: sa ? `serviceAccount:agent-${pad(k, 3)}@${P}.iam.gserviceaccount.com` : w.principalOf(R, id),
       identity_type: sa ? "SERVICE_ACCOUNT" : "AGENT_IDENTITY",
       gateways: { ...(egress ? { egress: egress.name } : {}), ...(ingress ? { ingress: ingress.name } : {}) },

@@ -53,5 +53,9 @@ export function shortLabel(s: string, max: number): string {
   return `${middleEllipsis(svc, room - minDom)}…${dom.slice(dom.length - minDom)}${port}`;
 }
 
-/** Characters of an endpoint's card title before it's shortened (the card is sized for about this many). */
-export const TITLE_MAX = 32;
+/** A chip's short form for the card (the full text goes in its tooltip): the long count chips say only what they
+ *  count (`+25 via group or registry-wide grants` → `+25 inherited`). Other chips are kept as they are. */
+export function chipLabel(text: string): string {
+  const inh = /^\+(\d+) via .+ grants?$/.exec(text);
+  return inh ? `+${inh[1]} inherited` : text;
+}

@@ -2,12 +2,13 @@
 // shield, MCP tool rows). Every node has one target handle on the left ("in") and one source handle on the right
 // ("out"); the lines always read left to right.
 import { Handle, Position, type NodeProps } from "@xyflow/react";
-import { createContext, memo, useContext } from "react";
-import type { CSSProperties } from "react";
+import { createContext, memo, useContext, useSyncExternalStore } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import { ApiIcon, ArrowIcon, BookIcon, ClockIcon, CloudIcon, GatewayIcon, PencilIcon, PersonIcon, PinIcon, RegistryIcon, RobotIcon, ServerIcon, ShieldIcon, WarnIcon } from "../components/Icons";
-import type { Chip } from "./graph";
+import { FIT, fitText, fontEpoch, onFontEpoch, type Cut, type FitStyle } from "./fit";
+import type { Chip, PNodeKind } from "./graph";
+import { W, chipShown, skillRoom, titleRoom } from "./layout";
 import type { MNode, ToolState } from "./toFlow";
-import { TITLE_MAX, shortLabel } from "./labels";
 
 /** Actions a node can trigger (kept out of node data so it stays plain). */
 export const MapActions = createContext<{ jump: (id: string) => void; unpin: (id: string) => void }>({ jump: () => undefined, unpin: () => undefined });
@@ -22,18 +23,86 @@ const Handles = () => (
   </>
 );
 
-function Chips({ chips }: { chips?: Chip[] }) {
-  if (!chips?.length) return null;
+/** Re-fit when web fonts finish loading (fit.ts measures with the real glyphs then). */
+const useFontEpoch = () => useSyncExternalStore(onFontEpoch, fontEpoch, fontEpoch);
+
+/** Shown text and, when it was shortened, the full text for screen readers (the tooltip has it too). */
+const Shown = ({ text, full }: { text: string; full: string }) =>
+  text === full ? (
+    <>{text}</>
+  ) : (
+    <>
+      <span aria-hidden="true">{text}</span>
+      <span className="sr-only">{full}</span>
+    </>
+  );
+
+/** One line of card text fitted to its room (fit.ts): the font shrinks to its style's minimum, then the text is
+ *  shortened (end ellipsis for names, middle for hosts and ids). The full text stays in the tooltip. */
+function Fit({ text, room, style, cut = "end", className, title }: { text?: string | null; room: number; style: FitStyle; cut?: Cut; className: string; title?: string }) {
+  useFontEpoch();
+  const full = text ?? "";
+  const f = fitText(full, room, style, cut);
   return (
-    <div className="node-chips">
-      {chips.map((c) => (
-        <span key={c.text} className={`chip chip-${c.tone} ${c.pending ? "chip-pending" : ""}`} title={c.title}>
-          {c.pending && <ClockIcon size={11} />} {c.text}
-        </span>
-      ))}
+    <div className={className} title={title ?? (full || undefined)} style={f.size !== style.size ? { fontSize: f.size } : undefined}>
+      <Shown text={f.text} full={full} />
     </div>
   );
 }
+
+/** A card's title and subtitle, fitted to the room beside the icon (less the verdict dot when there is one). */
+function Titles({ kind, title, sub, dot, titleStyle = FIT.title, subStyle = FIT.sub, titleCut = "end", subCut = "end", titleTip, subTip, wrapSub }: {
+  kind: PNodeKind;
+  title: string;
+  sub?: string | null;
+  dot?: boolean;
+  titleStyle?: FitStyle;
+  subStyle?: FitStyle;
+  titleCut?: Cut;
+  subCut?: Cut;
+  titleTip?: string;
+  subTip?: string;
+  /** Long descriptions (pseudo callers) wrap instead; the card grows. */
+  wrapSub?: boolean;
+}) {
+  const room = titleRoom(kind, dot);
+  return (
+    <div className="node-titles">
+      <Fit className={`node-title ${titleStyle.mono ? "mono-title" : ""}`} text={title} room={room} style={titleStyle} cut={titleCut} title={titleTip} />
+      {wrapSub ? <div className="node-sub wrap-sub">{sub}</div> : <Fit className={`node-sub ${subStyle.mono ? "mono" : ""}`} text={sub} room={room} style={subStyle} cut={subCut} title={subTip} />}
+    </div>
+  );
+}
+
+/** Summary chips: they wrap onto rows inside the card; long ones show their short form (labels.ts chipLabel) or are
+ *  shortened to the card's width, with the full text in the tooltip. */
+function Chips({ chips, kind }: { chips?: Chip[]; kind: PNodeKind }) {
+  useFontEpoch();
+  if (!chips?.length) return null;
+  return (
+    <div className="node-chips">
+      {chips.map((c) => {
+        const shown = chipShown(c, kind).text;
+        const tip = [shown !== c.text && c.text, c.title].filter(Boolean).join("\n") || undefined;
+        return (
+          <span key={c.text} className={`chip chip-${c.tone} ${c.pending ? "chip-pending" : ""}`} title={tip}>
+            {c.pending && <ClockIcon size={11} />}
+            <span className="chip-text">
+              <Shown text={shown} full={c.text} />
+            </span>
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
+/** The card's width (layout.ts W): the room text is fitted into is worked out from it. */
+const box = (k: PNodeKind): CSSProperties => ({ width: W[k] });
+
+/** The top-right corner of a card: the pin (Unpin) and the "same agent" arrow, side by side, clear of the type badge
+ *  on the left. */
+const Corner = ({ children }: { children: ReactNode }) => <div className="node-corner">{children}</div>;
 
 /** A node you dragged keeps its place (saved per project, region and direction): a pin, and Unpin to send it back to
  *  the automatic layout. */
@@ -57,8 +126,10 @@ function Pin({ id, data }: { id: string; data: MNode["data"] }) {
   );
 }
 
+// "node-picked", not "picked": a global .picked (the Builder's chosen-agent box: display flex, padding, a border) would
+// lay a selected agent's card out as a row, its chips spilling out past the border.
 const cls = (d: MNode["data"], ...more: (string | false | undefined)[]) =>
-  ["node", d.dim && "dim", d.hit && "hit", d.picked && "picked", d.filtered && "filtered", d.ring && `ring-${d.ring}`, d.node.pending && (d.node.pending.removed ? "pending-removed" : "pending"), ...more].filter(Boolean).join(" ");
+  ["node", d.dim && "dim", d.hit && "hit", d.picked && "node-picked", d.filtered && "filtered", d.ring && `ring-${d.ring}`, d.node.pending && (d.node.pending.removed ? "pending-removed" : "pending"), ...more].filter(Boolean).join(" ");
 
 /** A node the picker hides, drawn because a selected agent has a line to it. */
 const Filtered = ({ data }: { data: MNode["data"] }) => (data.filtered ? <span className="node-filtered">(hidden by filter)</span> : null);
@@ -86,26 +157,23 @@ function SameAs({ id, label }: { id?: string; label: string }) {
 const EngineNode = memo(({ id, data }: NodeProps<MNode>) => {
   const n = data.node;
   return (
-    <div className={cls(data, "node-orch", !n.gateway && "unbound")}>
+    <div className={cls(data, "node-orch", !n.gateway && "unbound")} style={box(n.kind)}>
       <Handles />
-      <Pin id={id} data={data} />
+      <Corner>
+        <Pin id={id} data={data} />
+        <SameAs id={n.sameAs} label="registry entry" />
+      </Corner>
       <Filtered data={data} />
       <div className="node-badge badge-runtime">
         <span className="dot" /> Agent Runtime
       </div>
-      <SameAs id={n.sameAs} label="registry entry" />
       <div className="node-head">
         <span className="node-icon icon-orch">
           <RobotIcon size={22} />
         </span>
-        <div className="node-titles">
-          <div className="node-title" title={n.label}>
-            {n.label}
-          </div>
-          <div className="node-sub mono">{n.sub}</div>
-        </div>
+        <Titles kind={n.kind} title={n.label} sub={n.sub} subStyle={FIT.monoSub} subCut="middle" />
       </div>
-      <Chips chips={n.chips} />
+      <Chips chips={n.chips} kind={n.kind} />
     </div>
   );
 });
@@ -119,22 +187,19 @@ const GatewayNode = memo(({ id, data }: NodeProps<MNode>) => {
   const shield = n.pending?.shield;
   const shieldTitle = shield ? `Model Armor ${shield.to === "on" ? "on" : "off"} (staged)${shield.template ? `: template ${shield.template}` : ""}` : undefined;
   return (
-    <div className={cls(data, "node-gateway", none ? "faded" : "attached", n.mode === "DRY_RUN" && n.sub?.startsWith("Egress") && "dry")}>
+    <div className={cls(data, "node-gateway", none ? "faded" : "attached", n.mode === "DRY_RUN" && n.sub?.startsWith("Egress") && "dry")} style={box(n.kind)}>
       <Handles />
-      <Pin id={id} data={data} />
+      <Corner>
+        <Pin id={id} data={data} />
+      </Corner>
       <Filtered data={data} />
       <div className="node-head">
         <span className="node-icon icon-gateway">
           <GatewayIcon size={22} />
         </span>
-        <div className="node-titles">
-          <div className="node-title" title={n.label}>
-            {n.label}
-          </div>
-          <div className="node-sub">{n.sub}</div>
-        </div>
+        <Titles kind={n.kind} title={n.label} sub={n.sub} />
       </div>
-      <Chips chips={n.chips} />
+      <Chips chips={n.chips} kind={n.kind} />
       {shield ? (
         <div className={`ma-shield pending-${shield.to}`} title={shieldTitle} aria-label={shieldTitle}>
           <ShieldIcon size={20} />
@@ -157,23 +222,33 @@ const PseudoNode = memo(({ id, data }: NodeProps<MNode>) => {
   const n = data.node;
   const pub = n.id === "pseudo:public";
   return (
-    <div className={cls(data, "node-user", pub && "public")} title={n.members?.map((m) => m.label).join("\n")}>
+    <div className={cls(data, "node-user", pub && "public")} style={box(n.kind)} title={n.members?.map((m) => m.label).join("\n")}>
       <Handles />
-      <Pin id={id} data={data} />
+      <Corner>
+        <Pin id={id} data={data} />
+      </Corner>
       <Filtered data={data} />
       <div className="node-head">
         <span className={`node-icon ${n.kind === "client" ? "icon-client" : "icon-person"}`}>
           <PersonIcon size={20} />
         </span>
-        <div className="node-titles">
-          <div className="node-title">{n.label}</div>
-          <div className="node-sub wrap-sub">{n.sub}</div>
-        </div>
+        <Titles kind={n.kind} title={n.label} sub={n.sub} wrapSub />
       </div>
-      <Chips chips={n.chips} />
+      <Chips chips={n.chips} kind={n.kind} />
     </div>
   );
 });
+
+/** A skill's name, shortened to fit its pill (the full name in the pill's tooltip). */
+function SkillName({ kind, name }: { kind: PNodeKind; name: string }) {
+  useFontEpoch();
+  const f = fitText(name, skillRoom(kind), FIT.skill, "end");
+  return (
+    <span className="skill-name">
+      <Shown text={f.text} full={name} />
+    </span>
+  );
+}
 
 const DEST_BADGE: Record<string, string> = { a2a: "A2A", runtime_dest: "Agent Runtime", endpoint: "API endpoint", registry: "Registry-wide" };
 
@@ -186,31 +261,38 @@ const DestNode = memo(({ id, data }: NodeProps<MNode>) => {
   const ep = n.kind === "endpoint";
   const full = ep ? [n.displayName, n.url].filter(Boolean).join("\n") : n.label;
   return (
-    <div className={cls(data, `node-dest node-${n.kind}`, n.unreadable && "unreadable")}>
+    <div className={cls(data, `node-dest node-${n.kind}`, n.unreadable && "unreadable")} style={box(n.kind)}>
       <Handles />
-      <Pin id={id} data={data} />
+      <Corner>
+        <Pin id={id} data={data} />
+        {n.kind === "runtime_dest" && <SameAs id={n.sameAs} label="caller" />}
+      </Corner>
       <Filtered data={data} />
       <div className={`node-badge ${n.kind === "registry" ? "" : "badge-cloudrun"}`}>
         {n.kind === "a2a" && <CloudIcon size={12} />} {DEST_BADGE[n.kind]}
       </div>
-      {n.kind === "runtime_dest" && <SameAs id={n.sameAs} label="caller" />}
       <div className="node-head">
         <span className={`node-icon icon-${n.kind === "endpoint" ? "api" : n.kind === "registry" ? "registry" : "a2a"}`}>{icon}</span>
-        <div className="node-titles">
-          <div className={`node-title ${ep ? "mono-title" : ""}`} title={full}>
-            {ep ? shortLabel(n.label, TITLE_MAX) : n.label}
-          </div>
-          <div className="node-sub mono" title={ep ? full : n.sub}>
-            {ep && n.sub ? shortLabel(n.sub, TITLE_MAX + 1) : n.sub}
-          </div>
-        </div>
+        <Titles
+          kind={n.kind}
+          title={n.label}
+          sub={n.sub}
+          dot={!!data.ring}
+          titleStyle={ep ? FIT.monoTitle : FIT.title}
+          titleCut={ep ? "host" : "end"}
+          subStyle={FIT.monoSub}
+          subCut={ep ? "host" : "middle"}
+          titleTip={full}
+          subTip={ep ? full : undefined}
+        />
         {data.ring && <span className={`state-dot st-${data.ring}`} />}
       </div>
       {skills.length > 0 && (
         <div className="skills">
           {skills.slice(0, 3).map((s) => (
-            <div key={s} className="skill">
-              <span className="skill-tag">skill</span> {s}
+            <div key={s} className="skill" title={s}>
+              <span className="skill-tag">skill</span>
+              <SkillName kind={n.kind} name={s} />
             </div>
           ))}
           {skills.length > 3 && <div className="skill">+{skills.length - 3}</div>}
@@ -223,7 +305,7 @@ const DestNode = memo(({ id, data }: NodeProps<MNode>) => {
           </span>
         </div>
       )}
-      {!n.unreadable && <Chips chips={n.chips} />}
+      {!n.unreadable && <Chips chips={n.chips} kind={n.kind} />}
     </div>
   );
 });
@@ -235,9 +317,11 @@ const McpNode = memo(({ id, data }: NodeProps<MNode>) => {
   const tools = n.tools ?? [];
   const destructive = tools.filter((t) => t.destructive).length;
   return (
-    <div className={cls(data, "node-mcp", n.unreadable && "unreadable")}>
+    <div className={cls(data, "node-mcp", n.unreadable && "unreadable")} style={box(n.kind)}>
       <Handles />
-      <Pin id={id} data={data} />
+      <Corner>
+        <Pin id={id} data={data} />
+      </Corner>
       <Filtered data={data} />
       <div className="node-badge badge-cloudrun">
         <CloudIcon size={12} /> MCP
@@ -246,14 +330,7 @@ const McpNode = memo(({ id, data }: NodeProps<MNode>) => {
         <span className="node-icon icon-mcp">
           <ServerIcon size={20} />
         </span>
-        <div className="node-titles">
-          <div className="node-title" title={n.label}>
-            {n.label}
-          </div>
-          <div className="node-sub mono" title={n.sub}>
-            {n.sub}
-          </div>
-        </div>
+        <Titles kind={n.kind} title={n.label} sub={n.sub} dot={!!data.ring} subStyle={FIT.monoSub} subCut="middle" />
         {data.ring && <span className={`state-dot st-${data.ring}`} />}
       </div>
       {data.expanded ? (
@@ -283,25 +360,24 @@ const McpNode = memo(({ id, data }: NodeProps<MNode>) => {
           </span>
         </div>
       ) : (
-        <Chips chips={n.chips} />
+        <Chips chips={n.chips} kind={n.kind} />
       )}
     </div>
   );
 });
 
 const GroupNode = memo(({ id, data }: NodeProps<MNode>) => (
-  <div className={cls(data, "node-group")} title="Show these destinations">
+  <div className={cls(data, "node-group")} style={box(data.node.kind)} title="Show these destinations">
     <Handles />
-    <Pin id={id} data={data} />
+    <Corner>
+      <Pin id={id} data={data} />
+    </Corner>
     <Filtered data={data} />
     <div className="node-head">
       <span className="node-icon icon-registry">
         <ApiIcon size={18} />
       </span>
-      <div className="node-titles">
-        <div className="node-title">{data.node.label}</div>
-        <div className="node-sub">{data.node.sub}</div>
-      </div>
+      <Titles kind={data.node.kind} title={data.node.label} sub={data.node.sub} />
     </div>
   </div>
 ));
@@ -310,39 +386,37 @@ const GroupNode = memo(({ id, data }: NodeProps<MNode>) => (
 const GoogleGroupNode = memo(({ id, data }: NodeProps<MNode>) => {
   const n = data.node;
   return (
-    <div className={cls(data, "node-dest node-endpoint node-google")} title={`Show the ${n.grouped?.length ?? 0} Google API endpoints one by one`}>
+    <div className={cls(data, "node-dest node-endpoint node-google")} style={box(n.kind)} title={`Show the ${n.grouped?.length ?? 0} Google API endpoints one by one`}>
       <Handles />
-      <Pin id={id} data={data} />
+      <Corner>
+        <Pin id={id} data={data} />
+      </Corner>
       <Filtered data={data} />
       <div className="node-badge badge-cloudrun">API endpoints · collapsed</div>
       <div className="node-head">
         <span className="node-icon icon-api">
           <ApiIcon size={20} />
         </span>
-        <div className="node-titles">
-          <div className="node-title">{n.label}</div>
-          <div className="node-sub">{n.sub}</div>
-        </div>
+        <Titles kind={n.kind} title={n.label} sub={n.sub} dot={!!data.ring} />
         {data.ring && <span className={`state-dot st-${data.ring}`} />}
       </div>
-      <Chips chips={n.chips} />
+      <Chips chips={n.chips} kind={n.kind} />
     </div>
   );
 });
 
 const SinkNode = memo(({ id, data }: NodeProps<MNode>) => (
-  <div className={cls(data, "node-sink")}>
+  <div className={cls(data, "node-sink")} style={box(data.node.kind)}>
     <Handles />
-    <Pin id={id} data={data} />
+    <Corner>
+      <Pin id={id} data={data} />
+    </Corner>
     <Filtered data={data} />
     <div className="node-head">
       <span className="node-icon icon-sink">
         <CloudIcon size={20} />
       </span>
-      <div className="node-titles">
-        <div className="node-title">{data.node.label}</div>
-        <div className="node-sub">{data.node.sub}</div>
-      </div>
+      <Titles kind={data.node.kind} title={data.node.label} sub={data.node.sub} />
     </div>
   </div>
 ));
