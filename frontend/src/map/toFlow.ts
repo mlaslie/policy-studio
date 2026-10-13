@@ -15,12 +15,12 @@ export interface MapNodeData extends Record<string, unknown> {
   /** MCP: tool rows shown, colored by the selected agent's access when there is one. */
   expanded: boolean;
   toolStates?: Record<string, ToolState>;
+  /** MCP with several agents selected: each tool's state per agent, for its row's tooltip. */
+  toolAgents?: Record<string, string>;
   /** One agent selected: the verdict of its line into this destination. */
   ring?: Verdict;
   /** A selected caller (its lines are drawn). */
   picked?: boolean;
-  /** Hidden by the picker, drawn faded because a selected agent has a line to it. */
-  filtered?: boolean;
   /** Dragged into place by the user (saved): shows a pin with Unpin. */
   pinned?: boolean;
   /** Section title nodes only. */
@@ -89,16 +89,21 @@ export function expandedMcp(view: MapView, active: string | null): Set<string> {
 /** The offset step between parallel lines of several selected agents (px), smaller as there are more of them. */
 export const offsetStep = (n: number) => (n > 1 ? Math.min(6, 36 / (n - 1)) : 0);
 
-function toolStatesOf(e: PEdge | undefined, n: PNode): Record<string, ToolState> | undefined {
+/** Each tool's state on one line into an MCP server: its tool breakdown when it has one (a line Show narrows keeps it),
+ *  else the line's verdict for every tool. */
+export function toolStatesOf(e: PEdge | undefined, n: PNode): Record<string, ToolState> | undefined {
   if (!e || !n.tools) return undefined;
   const all = (s: ToolState) => Object.fromEntries(n.tools!.map((t) => [t.name, s]));
-  if (e.implicit || e.verdict === "blocked" || e.verdict === "would_deny") return all("denied");
-  if (!e.tools) return all(e.verdict === "conditional" ? "unknown" : "allowed");
-  return { ...Object.fromEntries(e.tools.allowed.map((t) => [t, "allowed" as const])), ...Object.fromEntries(e.tools.denied.map((t) => [t, "denied" as const])), ...Object.fromEntries(e.tools.unknown.map((t) => [t, "unknown" as const])) };
+  if (e.tools)
+    return { ...Object.fromEntries(e.tools.allowed.map((t) => [t, "allowed" as const])), ...Object.fromEntries(e.tools.denied.map((t) => [t, "denied" as const])), ...Object.fromEntries(e.tools.unknown.map((t) => [t, "unknown" as const])) };
+  if (e.implicit || e.verdict === "blocked" || e.verdict === "would_deny" || e.verdict === "unchecked") return all("denied");
+  return all(e.verdict === "conditional" ? "unknown" : "allowed");
 }
 
+const TOOL_WORD: Record<ToolState, string> = { allowed: "allowed", denied: "denied", unknown: "can't be told here" };
+
 /** The node's accessible name: label, kind, where it sits, how many lines, and what's pinned or staged on it. */
-export function nodeAria(n: PNode, lines?: number, pinned?: boolean, picked?: boolean, filtered?: boolean): string {
+export function nodeAria(n: PNode, lines?: number, pinned?: boolean, picked?: boolean): string {
   const kind: Record<PNodeKind, string> = {
     engine: "Agent Runtime agent",
     principal_group: "Callers",
@@ -117,7 +122,7 @@ export function nodeAria(n: PNode, lines?: number, pinned?: boolean, picked?: bo
   const where = n.kind === "engine" ? (n.gateway ? `, behind ${n.gateway.split("/").pop()}` : ", no gateway") : "";
   const count = lines === undefined || n.kind === "endpoint_group" ? "" : `, ${lines} ${lines === 1 ? "line" : "lines"}`;
   const staged = n.pending?.text.length ? `, staged: ${n.pending.text.join("; ")}` : "";
-  return `${n.label}, ${kind[n.kind]}${where}${picked ? ", selected: its lines are drawn" : ""}${count}${n.unreadable ? ", IAP policy couldn't be read" : ""}${filtered ? ", hidden by filter" : ""}${staged}${pinned ? ", pinned" : ""}`;
+  return `${n.label}, ${kind[n.kind]}${where}${picked ? ", selected: its lines are drawn" : ""}${count}${n.hiddenLines ? `, ${n.hiddenLines} ${n.hiddenLines === 1 ? "line" : "lines"} to hidden objects` : ""}${n.unreadable ? ", IAP policy couldn't be read" : ""}${staged}${pinned ? ", pinned" : ""}`;
 }
 
 export const VIA_LABEL: Record<string, string> = { project_agents: "project-wide", public: "public", registry_wide: "registry-wide", other: "group or other" };
@@ -170,7 +175,18 @@ export function toFlow(
   const intoBy = new Map<string, PEdge>();
   if (view.agents.length === 1) for (const e of view.edges) if (e.verdict !== "path") intoBy.set(e.target, e);
   const one = view.agents.length === 1;
-  const faded = new Set(view.faded);
+  // several agents: each MCP tool's state per agent (the rows' tooltips; the marks would disagree)
+  const toolAgents = new Map<string, Record<string, string>>();
+  const byId = new Map(view.nodes.map((n) => [n.id, n]));
+  if (!one)
+    for (const e of view.edges) {
+      const n = byId.get(e.target);
+      const st = n?.kind === "mcp" ? toolStatesOf(e, n) : undefined;
+      if (!st) continue;
+      const tips = toolAgents.get(n!.id) ?? {};
+      for (const [t, s] of Object.entries(st)) tips[t] = [tips[t], `${label.get(e.caller ?? "") ?? e.caller}: ${TOOL_WORD[s]}`].filter(Boolean).join("\n");
+      toolAgents.set(n!.id, tips);
+    }
 
   const nodes: MNode[] = view.nodes.map((n) => ({
     id: n.id,
@@ -182,13 +198,13 @@ export function toFlow(
       hit: sel.hit === n.id,
       expanded: expanded.has(n.id),
       toolStates: one ? toolStatesOf(intoBy.get(n.id), n) : undefined,
+      toolAgents: toolAgents.get(n.id),
       ring: one ? intoBy.get(n.id)?.verdict : undefined,
       pinned: pinned.has(n.id),
       picked: agents.has(n.id),
-      filtered: faded.has(n.id),
     },
     selected: sel.node === n.id,
-    ariaLabel: nodeAria(n, lines.get(n.id) ?? 0, pinned.has(n.id), agents.has(n.id), faded.has(n.id)),
+    ariaLabel: nodeAria(n, lines.get(n.id) ?? 0, pinned.has(n.id), agents.has(n.id)),
     draggable: true,
   }));
   for (const h of layout.headers)

@@ -148,18 +148,16 @@ export const HIDDEN_LABEL: Record<Hidden, string> = {
   filtered: "hidden by a filter",
 };
 export interface RowStatus {
-  /** On the map as itself (not in a group, not faded): the row is checked. */
+  /** On the map as itself (not in a group): the row is checked. */
   on: boolean;
-  /** Why it isn't (also set on a faded row). */
+  /** Why it isn't. */
   hidden?: Hidden;
-  /** Unchecked, but drawn faded because a selected agent has a line to it. */
-  faded?: boolean;
   /** Checked against this filter: a manual override. */
   manual?: Hidden;
 }
 export type Statuses = Map<string, RowStatus>;
 
-/** Why node `n` isn't on the map as itself in state `d` (or is drawn only faded). `groupedIn`: the group node kind
+/** Why node `n` isn't on the map as itself in state `d`. `groupedIn`: the group node kind
  *  each grouped object is in. */
 function reasonIn(env: PickerEnv, d: PickerState, n: PNode, aff: Affiliation | null, groupedIn: Map<string, string>): Hidden {
   const f = env.tools;
@@ -182,7 +180,6 @@ function reasonIn(env: PickerEnv, d: PickerState, n: PNode, aff: Affiliation | n
 function statusesIn(env: PickerEnv, d: PickerState, v: MapView, items: PickItem[]): Statuses {
   const byId = new Map(env.graph.nodes.map((n) => [n.id, n]));
   const shown = new Set(v.nodes.map((n) => n.id));
-  const faded = new Set(v.faded);
   const groupedIn = new Map<string, string>();
   for (const n of v.nodes) for (const id of n.grouped ?? []) groupedIn.set(id, n.kind);
   const aff = affiliationOf(d, env.graph);
@@ -190,8 +187,8 @@ function statusesIn(env: PickerEnv, d: PickerState, v: MapView, items: PickItem[
   for (const i of items) {
     const n = byId.get(i.id);
     if (!n) continue;
-    if (shown.has(i.id) && !faded.has(i.id)) out.set(i.id, { on: true });
-    else out.set(i.id, { on: false, hidden: reasonIn(env, d, n, aff, groupedIn), ...(faded.has(i.id) ? { faded: true } : {}) });
+    if (shown.has(i.id)) out.set(i.id, { on: true });
+    else out.set(i.id, { on: false, hidden: reasonIn(env, d, n, aff, groupedIn) });
   }
   return out;
 }
@@ -304,10 +301,16 @@ export function setQuick(env: PickerEnv, d: PickerState, k: "hideEmpty" | "googl
 }
 
 /** "Only this": uncheck every other row (it's forced on if a filter hides it); a caller is then the only one
- *  selected. */
+ *  selected, and stays with what its lines reach (its gateway, the destinations Show and the type filters leave it):
+ *  a hidden object takes its lines off the map, so a caller alone would have none. */
 export function onlyThis(env: PickerEnv, d: PickerState, items: PickItem[], id: string): PickerState {
   const item = items.find((i) => i.id === id);
-  const next: PickerState = { ...d, off: items.filter((i) => i.id !== id).map((i) => i.id), forced: [], selected: item?.source ? [id] : [] };
+  const keep = new Set([id]);
+  if (item?.source) {
+    const v = viewOf(env.graph, filtersOf(env.tools, { ...d, off: [], forced: [id] }), [id], { changesOnly: env.changesOnly, active: env.active ?? null });
+    for (const e of v.edges) for (const x of [e.source, e.target, ...(e.members ?? []).map((m) => m.target)]) keep.add(x);
+  }
+  const next: PickerState = { ...d, off: items.filter((i) => !keep.has(i.id)).map((i) => i.id), forced: [], selected: item?.source ? [id] : [] };
   return item && !pickerStatus(env, next).get(id)?.on ? { ...next, forced: [id] } : next;
 }
 

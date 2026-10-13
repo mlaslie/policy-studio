@@ -107,6 +107,11 @@ export interface PNode {
   googleApi?: boolean;
   /** Lowercase label + id + sub, for search. */
   search: string;
+  /** Set by the view (view.ts), not the graph. MCP: the tool rows drawn when Show: Allows / Denies leaves out some (the
+   *  union over the selected agents' lines into it); unset = every tool. */
+  shownTools?: string[];
+  /** A selected caller: its lines left out because their other end is hidden (a type filter, unchecked by hand). */
+  hiddenLines?: number;
   /** Staged-change view (diff.ts): what the cart changes on this node, and the cart intents that do it. */
   /** shield: Model Armor turned on or off by the cart (drawn as a pending shield on the gateway). */
   pending?: { text: string[]; removed?: boolean; intents: string[]; shield?: { to: "on" | "off"; template?: string } };
@@ -131,6 +136,11 @@ export interface PEdge {
   caller?: string;
   /** A line into the "Google APIs" group: the per-endpoint lines it stands for (view.ts). */
   members?: PEdge[];
+  /** Set by the view (view.ts) on an MCP line Show: Allows / Denies narrows to some tools: the tools it still shows,
+   *  how many allowed and denied ones it leaves out, and the verdict over every tool. `shownTools` unset = every tool. */
+  shownTools?: string[];
+  hiddenTools?: { allowed: number; denied: number };
+  whole?: Verdict;
   /** Short text on the line ("read-only", "3/6 tools", "?"). */
   label?: string;
   /** Non-MCP destination with a tool condition: calls carry toolName '', which the condition allows. */

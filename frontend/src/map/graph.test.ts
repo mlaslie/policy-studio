@@ -5,9 +5,10 @@ import { buildWorld } from "../api/mockData";
 import type { Binding, Ctx, Gateway } from "../api/types";
 import { ROLE } from "../lib/policy";
 import { CLIENT, NOGW, PSEUDO, buildPolicyGraph, type Direction, type GraphInput, type PEdge } from "./graph";
-import { DEFAULT_DIRECTION, DEFAULT_FILTERS, DENY_CAP, GOOGLE_GROUP, tableRows, viewOf, type MapFilters } from "./view";
+import { DEFAULT_DIRECTION, DEFAULT_FILTERS, DENY_CAP, GOOGLE_GROUP, lineUnder, tableRows, viewOf, type MapFilters } from "./view";
 import { presetAffiliation, DEFAULT_PICKER } from "./picker";
-import { WRAP, layoutView } from "./layout";
+import { GAP_Y, HEADER_H, WRAP, layoutView, nodeHeight } from "./layout";
+import { expandedMcp, toFlow } from "./toFlow";
 
 const CTX: Ctx = { project: "my-demo-project", region: "us-east4" };
 const world = (ctx: Ctx = CTX) => buildWorld(ctx); // a fresh world each call
@@ -220,7 +221,8 @@ describe("lines only for the selected agents", () => {
     expect(allows.edges.some((e) => e.implicit)).toBe(false);
     expect(allows.edges.filter((e) => e.verdict !== "path").every((e) => ["allowed", "partial", "conditional"].includes(e.verdict))).toBe(true);
     const denies = viewOf(g, filters({ allows: false }), [hd]);
-    expect(denies.edges.filter((e) => e.verdict !== "path").every((e) => e.implicit && (e.verdict === "would_deny" || e.verdict === "blocked"))).toBe(true);
+    // default-deny lines, and the MCP line whose grant leaves some tools denied (drawn as a deny line, per tool)
+    expect(denies.edges.filter((e) => e.verdict !== "path").every((e) => (e.implicit || !!e.hiddenTools) && (e.verdict === "would_deny" || e.verdict === "blocked"))).toBe(true);
     // the trunk stays either way
     expect(viewOf(g, filters({ allows: false, denies: false }), [hd]).edges.map((e) => e.id)).toEqual([`trunk:${hd}`]);
     // Client-to-Agent: no denies, the choice doesn't apply
@@ -234,13 +236,49 @@ describe("lines only for the selected agents", () => {
     expect(viewOf(g, filters({ allows: false }), [t]).edges.map((e) => e.id).sort()).toEqual([`direct:${t}`, `out:${t}`].sort());
   });
 
-  it("a destination the picker hides is drawn faded while a selected agent has a line to it", () => {
+  it("a destination unchecked by hand is off the map with every line to it, counted on the selected agent", () => {
+    const all = viewOf(g, filters(), [hr]);
     const v = viewOf(g, filters({ off: [hrd] }), [hr]);
-    expect(v.nodes.some((n) => n.id === hrd)).toBe(true);
-    expect(v.faded).toEqual([hrd]);
-    // nothing selected (or Allows off for an allowed line): hidden for real
-    expect(viewOf(g, filters({ off: [hrd] }), []).nodes.some((n) => n.id === hrd)).toBe(false);
-    expect(viewOf(g, filters({ off: [hrd], allows: false }), [hr]).nodes.some((n) => n.id === hrd)).toBe(false);
+    expect(v.nodes.some((n) => n.id === hrd)).toBe(false);
+    expect(v.edges.some((e) => e.target === hrd || e.source === hrd)).toBe(false);
+    expect(v.hiddenLines).toEqual({ [hr]: 1 });
+    expect(v.nodes.find((n) => n.id === hr)!.hiddenLines).toBe(1);
+    expect(all.hiddenLines).toEqual({});
+    expect(all.nodes.find((n) => n.id === hr)!.hiddenLines).toBeUndefined();
+    // the chips describe the policy, not the view: unchanged
+    expect(v.nodes.find((n) => n.id === hr)!.chips).toEqual(all.nodes.find((n) => n.id === hr)!.chips);
+    // a line Show leaves out isn't counted (Allows off: HR Assistant's line to it is an allowed one)
+    expect(viewOf(g, filters({ off: [hrd], allows: false }), [hr]).hiddenLines).toEqual({});
+    // nothing selected: nothing to count
+    expect(viewOf(g, filters({ off: [hrd] }), []).hiddenLines).toEqual({});
+  });
+
+  it("a type filter takes the type's nodes and every line to them off the map; the selected agent counts the lines", () => {
+    const mcps = g.nodes.filter((n) => n.kind === "mcp").map((n) => n.id);
+    const v = viewOf(g, filters({ typesOff: ["mcp"] }), [hd]);
+    expect(v.nodes.some((n) => n.kind === "mcp")).toBe(false);
+    expect(v.edges.some((e) => mcps.includes(e.target))).toBe(false);
+    // Helpdesk Agent: its partial line to Tickets MCP and its default-deny line to HR Directory MCP
+    const into = viewOf(g, filters(), [hd]).edges.filter((e) => mcps.includes(e.target)).length;
+    expect(into).toBe(2);
+    expect(v.hiddenLines[hd]).toBe(into);
+    expect(v.nodes.find((n) => n.id === hd)!.hiddenLines).toBe(into);
+    // two agents: each counts its own
+    const two = viewOf(g, filters({ typesOff: ["mcp"] }), [hd, hr]);
+    expect(two.hiddenLines).toEqual({ [hd]: 2, [hr]: 2 });
+  });
+
+  it("an agent checked by hand against the gateway filter brings its own gateway, unless that's unchecked by hand", () => {
+    const w = world();
+    const other = { ...w.gateways.find((x) => x.type === "egress")!, name: `${EGRESS}-2`, id: "corp-egress-2", bound_engines: [] };
+    const gx = buildPolicyGraph(input({ ...w, gateways: [...w.gateways, other] }));
+    const v = viewOf(gx, filters({ gateway: other.name, forced: [hd] }), [hd]);
+    expect(v.nodes.some((n) => n.id === EGRESS)).toBe(true);
+    expect(v.edges.some((e) => e.id === `trunk:${hd}`)).toBe(true);
+    const off = viewOf(gx, filters({ gateway: other.name, forced: [hd], off: [EGRESS] }), [hd]);
+    expect(off.nodes.some((n) => n.id === EGRESS)).toBe(false);
+    expect(off.edges).toEqual([]);
+    expect(off.hiddenLines[hd]).toBeGreaterThan(0);
   });
 
   it("caps an agent's default-deny lines at DENY_CAP, with the rest counted", () => {
@@ -256,6 +294,118 @@ describe("lines only for the selected agents", () => {
     const two = viewOf(gx, filters({ googleApis: true }), [hd, hr]);
     expect(two.edges.filter((e) => e.implicit && e.caller === hr)).toHaveLength(DENY_CAP);
     expect(viewOf(gx, filters({ denies: false }), [hd]).edges.some((e) => e.implicit)).toBe(false);
+  });
+});
+
+describe("Show: Allows / Denies per MCP tool", () => {
+  const g = buildPolicyGraph(input(w0));
+  const hd = eng("Helpdesk Agent").name;
+  const hr = eng("HR Assistant").name;
+  const tickets = dest("Tickets MCP").name;
+  const hrd = dest("HR Directory MCP").name;
+  const READ = ["get_ticket", "list_tickets", "search_tickets"];
+  const WRITE = ["close_ticket", "create_ticket", "update_ticket"];
+  const into = (v: ReturnType<typeof viewOf>, caller: string, target: string) => v.edges.find((e) => e.caller === caller && e.target === target);
+  const card = (v: ReturnType<typeof viewOf>, id: string) => v.nodes.find((n) => n.id === id)!;
+
+  it("a partial grant (read-only), Denies only: a deny line with just the denied tools", () => {
+    const v = viewOf(g, filters({ allows: false }), [hd]);
+    const e = into(v, hd, tickets)!;
+    // corp-egress is in dry run: would be denied (blocked under ENFORCE)
+    expect(e).toMatchObject({ verdict: "would_deny", whole: "partial", label: "3/6 tools denied", hiddenTools: { allowed: 3, denied: 0 } });
+    expect(e.implicit).toBeFalsy();
+    expect([...e.shownTools!].sort()).toEqual(WRITE);
+    expect([...card(v, tickets).shownTools!].sort()).toEqual(WRITE);
+    // the card's height follows its rows
+    const full = nodeHeight(card(viewOf(g, filters(), [hd]), tickets), true);
+    expect(nodeHeight(card(v, tickets), true)).toBe(full - 3 * 31);
+  });
+
+  it("the same grant under ENFORCE: blocked", () => {
+    const w = world();
+    for (const gw of w.gateways) if (gw.enforcement) gw.enforcement.mode = "ENFORCE";
+    const v = viewOf(buildPolicyGraph(input(w)), filters({ allows: false }), [hd]);
+    expect(into(v, hd, tickets)!.verdict).toBe("blocked");
+  });
+
+  it("Allows only: an allowed (green) line with just the allowed tools", () => {
+    const v = viewOf(g, filters({ denies: false }), [hd]);
+    const e = into(v, hd, tickets)!;
+    expect(e).toMatchObject({ verdict: "allowed", whole: "partial", label: "read-only", hiddenTools: { allowed: 0, denied: 3 } });
+    expect([...e.shownTools!].sort()).toEqual(READ);
+    expect([...card(v, tickets).shownTools!].sort()).toEqual(READ);
+    // a tools list: "2/6 tools"
+    expect(into(viewOf(g, filters({ denies: false }), [hr]), hr, tickets)).toMatchObject({ verdict: "allowed", label: "2/6 tools" });
+  });
+
+  it("both: one partial line, every tool on the card, each marked", () => {
+    const v = viewOf(g, filters(), [hd]);
+    const e = into(v, hd, tickets)!;
+    expect(e).toMatchObject({ verdict: "partial", label: "read-only" });
+    expect(e.hiddenTools).toBeUndefined();
+    expect(e.whole).toBeUndefined();
+    expect(e.shownTools).toHaveLength(6);
+    expect(card(v, tickets).shownTools).toBeUndefined();
+    const flow = toFlow(v, layoutView(v), { node: null, edge: null, hit: null }, new Set([tickets]));
+    const st = flow.nodes.find((n) => n.id === tickets)!.data.toolStates!;
+    expect(READ.every((t) => st[t] === "allowed") && WRITE.every((t) => st[t] === "denied")).toBe(true);
+  });
+
+  it("an MCP server whose every tool is allowed, Denies only: no line, the card back to its no-line state", () => {
+    const v = viewOf(g, filters({ allows: false }), [hr]);
+    expect(into(v, hr, hrd)).toBeUndefined();
+    expect(card(v, hrd).shownTools).toBeUndefined();
+    expect(expandedMcp(v, null).has(hrd)).toBe(false);
+    // and the reverse: an MCP server no grant reaches (every tool denied), Allows only
+    const r = viewOf(g, filters({ denies: false }), [hd]);
+    expect(into(r, hd, hrd)).toBeUndefined();
+    expect(expandedMcp(r, null).has(hrd)).toBe(false);
+    // its default-deny line, Denies only: every tool, denied
+    const d = viewOf(g, filters({ allows: false }), [hd]);
+    expect(into(d, hd, hrd)).toMatchObject({ implicit: true, verdict: "would_deny" });
+    expect(card(d, hrd).shownTools).toBeUndefined();
+  });
+
+  it("a custom condition: its tools are \"?\", shown under either filter", () => {
+    const w = world();
+    const bs = w.inventory.access[tickets];
+    const i = bs.findIndex((b) => b.member === eng("Helpdesk Agent").principal);
+    bs[i] = { ...bs[i], condition: { title: "Business hours", expression: "request.time.getHours('UTC') < 18" } };
+    const gx = buildPolicyGraph(input(w));
+    for (const f of [filters(), filters({ allows: false }), filters({ denies: false })]) {
+      const e = into(viewOf(gx, f, [hd]), hd, tickets)!;
+      expect(e).toMatchObject({ verdict: "conditional", label: "?" });
+      expect(e.shownTools).toHaveLength(6);
+    }
+    expect(viewOf(gx, filters({ allows: false, denies: false }), [hd]).edges.some((e) => e.target === tickets)).toBe(false);
+    const v = viewOf(gx, filters({ allows: false }), [hd]);
+    const flow = toFlow(v, layoutView(v), { node: null, edge: null, hit: null }, new Set([tickets]));
+    expect(Object.values(flow.nodes.find((n) => n.id === tickets)!.data.toolStates!)).toEqual(Array(6).fill("unknown"));
+  });
+
+  it("allowed, denied and \"?\" tools on one line: unknown is neither, shown under both", () => {
+    const base = g.edges.find((e) => e.id === `a:${hd}|${tickets}`)!;
+    const e = { ...base, tools: { allowed: ["get_ticket"], denied: ["close_ticket"], unknown: ["search_tickets"] } };
+    expect(lineUnder(e, filters({ allows: false }))).toMatchObject({ verdict: "would_deny", shownTools: ["close_ticket", "search_tickets"], hiddenTools: { allowed: 1, denied: 0 } });
+    expect(lineUnder(e, filters({ denies: false }))).toMatchObject({ verdict: "allowed", shownTools: ["get_ticket", "search_tickets"], hiddenTools: { allowed: 0, denied: 1 } });
+    expect(lineUnder(e, filters())).toMatchObject({ verdict: "partial", shownTools: ["get_ticket", "close_ticket", "search_tickets"] });
+    // only "?" left: a conditional line
+    const u = { ...base, tools: { allowed: ["get_ticket"], denied: [], unknown: ["search_tickets"] } };
+    expect(lineUnder(u, filters({ allows: false }))).toMatchObject({ verdict: "conditional", label: "?", shownTools: ["search_tickets"] });
+    // the legend hides what's drawn: a would-deny line is hidden with "would be denied"
+    expect(lineUnder(e, filters({ allows: false, hidden: ["would_deny"] }))).toBeNull();
+  });
+
+  it("several agents: a tool row shows if any selected agent's line shows it (the union)", () => {
+    // Helpdesk: read-only (list, get, search); HR Assistant: get_ticket and create_ticket
+    expect([...card(viewOf(g, filters({ denies: false }), [hd, hr]), tickets).shownTools!].sort()).toEqual(["create_ticket", ...READ].sort());
+    // denied: Helpdesk close, create, update; HR list, search, update, close. get_ticket is allowed to both: hidden
+    expect([...card(viewOf(g, filters({ allows: false }), [hd, hr]), tickets).shownTools!].sort()).toEqual(["close_ticket", "create_ticket", "list_tickets", "search_tickets", "update_ticket"]);
+    // the marks stay per agent, in each row's tooltip
+    const v = viewOf(g, filters({ allows: false }), [hd, hr]);
+    const d = toFlow(v, layoutView(v), { node: null, edge: null, hit: null }, new Set([tickets])).nodes.find((n) => n.id === tickets)!.data;
+    expect(d.toolStates).toBeUndefined();
+    expect(d.toolAgents!.create_ticket).toBe("Helpdesk Agent: denied\nHR Assistant: allowed");
   });
 });
 
@@ -399,6 +549,21 @@ describe("layout (§7)", () => {
     const v = viewOf(buildPolicyGraph(input(w0)), filters(), []);
     const { pos } = layoutView(v);
     expect(pos[dest("Tickets MCP").name].y).toBeLessThan(pos[dest("HR Directory MCP").name].y);
+  });
+
+  it("a type filter closes the gap: the column is laid out again without the hidden cards", () => {
+    const g = buildPolicyGraph(input(w0));
+    const all = viewOf(g, filters(), []);
+    const v = viewOf(g, filters({ typesOff: ["runtime", "mcp"] }), []);
+    const before = layoutView(all);
+    const after = layoutView(v);
+    const dests = (l: ReturnType<typeof layoutView>, vv: typeof v) => vv.nodes.filter((n) => n.column === "dests").map((n) => ({ y: l.pos[n.id].y, h: l.size[n.id].h, x: l.pos[n.id].x }));
+    expect(Object.keys(after.pos).some((id) => g.nodes.find((n) => n.id === id)?.kind === "mcp")).toBe(false);
+    const span = (bs: { y: number; h: number }[]) => Math.max(...bs.map((b) => b.y + b.h)) - Math.min(...bs.map((b) => b.y));
+    expect(span(dests(after, v))).toBeLessThan(span(dests(before, all)));
+    // no hole left by a removed card: consecutive cards are GAP_Y apart, or a section's gap and title
+    const col = dests(after, v).sort((a, b) => a.y - b.y);
+    for (let i = 1; i < col.length; i++) expect(col[i].y - (col[i - 1].y + col[i - 1].h)).toBeLessThanOrEqual(34 + HEADER_H + GAP_Y);
   });
 
   it("wraps a section of more than 25 nodes into sub-columns", () => {

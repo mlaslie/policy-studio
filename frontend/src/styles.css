@@ -4546,22 +4546,31 @@ body.resizing * {
 .pmap .react-flow__node:focus-visible > .node {
   box-shadow: 0 0 0 2px var(--surface), 0 0 0 5px var(--blue), var(--shadow-2);
 }
-.pmap .node.filtered {
-  opacity: 0.5;
-  border-style: dashed;
-}
-.pmap .node-filtered {
-  position: absolute;
-  right: 10px;
-  bottom: -9px;
-  font-size: 11px;
+/* a selected caller's lines to hidden objects (layout.ts NOTE_H: a 16px line, 8px above): opens the picker */
+.pmap .node-hidden-note {
+  display: block;
+  max-width: 100%;
+  margin-top: 8px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 11.5px;
   line-height: 16px;
-  padding: 0 6px;
-  border-radius: 999px;
-  color: var(--text-2);
-  background: var(--surface-3);
-  border: 1px solid var(--border);
+  height: 16px;
+  color: var(--text-3);
+  text-align: left;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.pmap .node-hidden-note .node-hidden-show {
+  color: var(--blue);
+}
+.pmap .node-hidden-note:hover .node-hidden-show,
+.pmap .node-hidden-note:focus-visible .node-hidden-show {
+  text-decoration: underline;
 }
 .pmap .react-flow__handle.hnd {
   width: 8px;
@@ -5033,6 +5042,19 @@ body.resizing * {
 .pmap .tool-row.st-unknown {
   border-left-color: var(--e-unknown);
   border-left-style: dotted;
+}
+/* a tool a condition can't decide here: "?" instead of a state dot */
+.pmap .tool-q {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1.5px solid var(--e-allowed);
+  color: var(--e-allowed);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 11px;
+  text-align: center;
 }
 .pmap .state-dot {
   flex-shrink: 0;

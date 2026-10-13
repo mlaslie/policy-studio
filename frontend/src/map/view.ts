@@ -3,9 +3,14 @@
 // groups. Pure, shared by the canvas and the table view.
 //
 // Lines are drawn only for the selected callers (agents, or pseudo callers), each agent's own, never combined: with no
-// selection the map is nodes only. A destination (or gateway) the picker hides is still drawn, faded, while a selected
-// agent has a line to it. The layout reads every shown caller's own grants instead of the drawn lines, so selecting an
-// agent doesn't move the nodes.
+// selection the map is nodes only. An object the picker hides (a type filter, unchecked by hand) is off the map, and so
+// is every line to or from it: the selected agent counts them instead ("N lines to hidden objects"). The layout reads
+// every shown caller's own grants instead of the drawn lines, so selecting an agent doesn't move the nodes.
+//
+// Show: Allows / Denies works per tool on an MCP line (through a gateway) whose grant allows some tools: Denies only
+// draws it as a deny line with just the denied tools, Allows only as an allowed line with just the allowed ones, both
+// as one partial line with every tool marked. Tools a condition can't decide here ("?") show under either. The MCP
+// card draws the tools some selected agent's line shows (the union over the selected agents).
 //
 // Google API endpoints (*.googleapis.com, often a platform allowlist registered as host, host.mtls and host:443) are
 // collapsed into one "Google APIs (N)" node unless "Show Google API endpoints" is on. That checkbox is the group's
@@ -88,8 +93,8 @@ export interface MapView {
   more: number;
   /** The callers whose lines are drawn, in selection order. */
   agents: string[];
-  /** Nodes the picker hides, drawn faded because a selected caller has a line to them. */
-  faded: string[];
+  /** Per selected caller: its lines left out because the object at their other end is hidden (also on its node). */
+  hiddenLines: Record<string, number>;
   /** Drawn lines other than lanes (for the "too many lines" banner). */
   lines: number;
 }
@@ -110,11 +115,38 @@ export function isSource(n: Pick<PNode, "kind" | "column">, direction: Direction
 /** Lanes: an agent's trunk to its gateway, or its direct line (never filtered by Allows / Denies). */
 const isLane = (e: PEdge) => e.verdict === "path" || e.verdict === "direct";
 
-/** Whether a line passes the Allows / Denies choice and the legend. */
+/** Whether a line passes the Allows / Denies choice and the legend (as a whole: see lineUnder for MCP tools). */
 export function keepLine(e: PEdge, f: Pick<MapFilters, "allows" | "denies" | "hidden">): boolean {
   if (e.verdict === "path") return true;
   if (e.direction === "egress" && !isLane(e) && (e.implicit ? !f.denies : !f.allows)) return false;
   return !f.hidden.includes(e.verdict);
+}
+
+/** The default-deny verdict under a gateway's mode (what a tool no grant allows gets). */
+const denyVerdict = (mode: PEdge["mode"]): Verdict => (mode === "ENFORCE" ? "blocked" : mode === "DRY_RUN" ? "would_deny" : "unchecked");
+
+/** A line as Show: Allows / Denies and the legend draw it, or null when they leave it out. An MCP line through a gateway
+ *  with a tool breakdown is split per tool: the tools that pass (allowed under Allows, denied under Denies, "?" under
+ *  either) are its `shownTools`; with only some of them left, it's drawn as what's left (a deny line, an allowed line,
+ *  or "?"), with `whole` its verdict over every tool and `hiddenTools` what it leaves out. Both on: unchanged (one
+ *  partial line, every tool marked). Any other line passes or not as a whole (keepLine). */
+export function lineUnder(e: PEdge, f: Pick<MapFilters, "allows" | "denies" | "hidden">): PEdge | null {
+  const t = e.tools;
+  if (!t || e.implicit || !e.gateway || e.direction !== "egress" || isLane(e)) return keepLine(e, f) ? e : null;
+  const allowed = f.allows ? t.allowed : [];
+  const denied = f.denies ? t.denied : [];
+  const unknown = f.allows || f.denies ? t.unknown : [];
+  const shownTools = [...allowed, ...denied, ...unknown];
+  if (!shownTools.length) return null;
+  const hiddenTools = { allowed: t.allowed.length - allowed.length, denied: t.denied.length - denied.length };
+  let out: PEdge = { ...e, shownTools };
+  if (hiddenTools.allowed || hiddenTools.denied) {
+    const all = t.allowed.length + t.denied.length + t.unknown.length;
+    const verdict: Verdict = denied.length ? denyVerdict(e.mode) : allowed.length ? "allowed" : "conditional";
+    const label = denied.length ? `${denied.length}/${all} tools denied` : allowed.length ? (e.label === "read-only" ? "read-only" : `${allowed.length}/${all} tools`) : "?";
+    out = { ...out, verdict, label, hiddenTools, whole: e.verdict };
+  }
+  return f.hidden.includes(out.verdict) ? null : out;
 }
 
 /** The view. `agents`: the selected callers (only the shown ones count). `active`: the node in the details panel (it
@@ -146,6 +178,9 @@ export function viewOf(g: PolicyGraph, f: MapFilters, agents: string[], opts: { 
       if (!t || !typesOff.has(t)) shown.add(n.id);
     }
   }
+  // An agent checked by hand against the gateway filter brings its own gateway (unless that's unchecked by hand):
+  // without it none of its lines could be drawn.
+  for (const n of g.nodes) if (n.kind === "engine" && n.gateway && shown.has(n.id) && !shown.has(n.gateway) && byId.has(n.gateway) && !off.has(n.gateway)) shown.add(n.gateway);
   const lanes = () => {
     if (!g.nodes.some((n) => n.kind === "engine" && !n.gateway && shown.has(n.id))) return;
     shown.add(g.direction === "egress" ? NOGW.egress : NOGW.ingress);
@@ -161,20 +196,18 @@ export function viewOf(g: PolicyGraph, f: MapFilters, agents: string[], opts: { 
   let sel = agents.filter((id, i) => agents.indexOf(id) === i && callerShown(id));
   if (opts.changesOnly && !sel.length) sel = [...new Set(g.edges.filter((e) => e.pending && !isLane(e) && callerShown(e.caller)).map((e) => e.caller!))];
   const selSet = new Set(sel);
-  let edges = g.edges.filter((e) => !!e.caller && selSet.has(e.caller) && keepLine(e, f));
+  let edges = g.edges.flatMap((e) => (!!e.caller && selSet.has(e.caller) ? (lineUnder(e, f) ?? []) : []));
   if (opts.changesOnly) {
     const callers = new Set(edges.filter((e) => e.pending).map((e) => e.caller));
     edges = edges.filter((e) => e.pending || (isLane(e) && callers.has(e.caller)));
   }
-  // a hidden node a drawn line needs: drawn anyway, faded
-  const faded = new Set<string>();
-  for (const e of edges)
-    for (const id of [e.source, e.target])
-      if (!shown.has(id) && byId.has(id)) {
-        shown.add(id);
-        faded.add(id);
-      }
-  lanes();
+  // A line to or from a hidden object is left out with it, and counted on its caller.
+  const hiddenLines: Record<string, number> = {};
+  edges = edges.filter((e) => {
+    if (shown.has(e.source) && shown.has(e.target)) return true;
+    if (!isLane(e)) hiddenLines[e.caller!] = (hiddenLines[e.caller!] ?? 0) + 1;
+    return false;
+  });
 
   // Google API endpoints collapsed into one node (the one in the panel stays on its own, like the "no grants" groups).
   const gIds = new Set(
@@ -223,7 +256,6 @@ export function viewOf(g: PolicyGraph, f: MapFilters, agents: string[], opts: { 
     // how many of its endpoints some shown caller holds a grant on
     const reached = [...gIds].filter((id) => granted.has(id)).length;
     nodes.push({ ...gNode, sub: `${reached ? `${reached} with grants · ` : "No grants · "}click to show them` });
-    if ([...gIds].every((id) => faded.has(id))) faded.add(gNode.id);
   }
   for (const [section, ns] of groups) {
     const what = SECTION_LABEL[section] ?? section;
@@ -241,16 +273,28 @@ export function viewOf(g: PolicyGraph, f: MapFilters, agents: string[], opts: { 
   }
   // Pseudo callers with no grants at all are left out (they'd only add noise).
   const touched = new Set([...edges, ...layoutEdges].flatMap((e) => [e.source, e.target]));
-  const out = opts.changesOnly
+  const kept = opts.changesOnly
     ? nodes.filter((n) => touched.has(n.id) || n.pending || n.id === active || forced.has(n.id))
     : nodes.filter((n) => n.kind !== "principal_group" || touched.has(n.id) || selSet.has(n.id) || n.id === active || forced.has(n.id));
+  // An MCP card draws the tools some selected agent's line into it shows; a selected caller carries its hidden lines.
+  const toolsInto = new Map<string, Set<string> | null>();
+  for (const e of edges) {
+    if (byId.get(e.target)?.kind !== "mcp" || toolsInto.get(e.target) === null) continue;
+    if (!e.shownTools) toolsInto.set(e.target, null);
+    else toolsInto.set(e.target, new Set([...(toolsInto.get(e.target) ?? []), ...e.shownTools]));
+  }
+  const out = kept.map((n) => {
+    const ts = toolsInto.get(n.id);
+    const shownTools = ts && n.tools && ts.size < n.tools.length ? n.tools.map((t) => t.name).filter((t) => ts.has(t)) : undefined;
+    const hidden = selSet.has(n.id) ? hiddenLines[n.id] : undefined;
+    return shownTools || hidden ? { ...n, ...(shownTools ? { shownTools } : {}), ...(hidden ? { hiddenLines: hidden } : {}) } : n;
+  });
 
   // ---------- table rows: Client-to-Agent rows are the client lines (client, the agent's gateway, the agent) ----------
-  const rows = (sel.length ? rawEdges.filter((e) => !drop.has(e.id)) : g.edges.filter((e) => callerShown(e.caller) && !e.implicit && !e.inherited && shown.has(e.target) && keepLine(e, f))).filter(
-    (e) => e.verdict !== "path" && !e.id.startsWith("out:") && (e.direction === "egress" || e.source.startsWith("client:")),
-  );
-  const outIds = new Set(out.map((n) => n.id));
-  return { nodes: out, edges, layoutEdges, rows, more, agents: sel, faded: [...faded].filter((id) => outIds.has(id)), lines: edges.filter((e) => e.verdict !== "path").length };
+  const rows = (
+    sel.length ? rawEdges.filter((e) => !drop.has(e.id)) : g.edges.flatMap((e) => (callerShown(e.caller) && !e.implicit && !e.inherited && shown.has(e.target) ? (lineUnder(e, f) ?? []) : []))
+  ).filter((e) => e.verdict !== "path" && !e.id.startsWith("out:") && (e.direction === "egress" || e.source.startsWith("client:")));
+  return { nodes: out, edges, layoutEdges, rows, more, agents: sel, hiddenLines, lines: edges.filter((e) => e.verdict !== "path").length };
 }
 
 /** The table's rows (one per agent and endpoint). */

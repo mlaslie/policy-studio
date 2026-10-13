@@ -125,6 +125,18 @@ function EdgeDetails({ edge, inv, gateways, nodeOf, label }: { edge: PEdge; inv:
         <span className={`pmap-verdict st-${edge.verdict}`}>{VERDICT_LABEL[edge.verdict]}</span>
         {edge.label && edge.label !== "?" && <span className="small muted"> {edge.label}</span>}
       </p>
+      {edge.hiddenTools && (
+        // Show: Allows / Denies narrowed this MCP line to some of its tools (view.ts lineUnder)
+        <p className="small muted">
+          {[
+            edge.hiddenTools.allowed ? `${plural(edge.hiddenTools.allowed, "allowed tool")} hidden by the Allows filter` : "",
+            edge.hiddenTools.denied ? `${plural(edge.hiddenTools.denied, "denied tool")} hidden by the Denies filter` : "",
+          ]
+            .filter(Boolean)
+            .join("; ")}
+          {edge.whole ? `. Over every tool the line is ${VERDICT_LABEL[edge.whole].toLowerCase()}.` : "."}
+        </p>
+      )}
       {edge.pending && (
         <div className="pmap-staged">
           <div className="small">
@@ -505,7 +517,8 @@ function ReasonCard({ r, part, multi, head, inv, label }: { r: Reason; part: PEd
       {mcp && tools && (
         <table className="pmap-tools" aria-label={`Tools of ${mcp.display_name} under this grant`}>
           <tbody>
-            {mcp.tools.map((t) => {
+            {/* only the tools the line shows under Show: Allows / Denies */}
+            {mcp.tools.filter((t) => !part.shownTools || part.shownTools.includes(t.name)).map((t) => {
               const st = tools.allowed.includes(t.name) ? "allowed" : tools.denied.includes(t.name) ? "denied" : "unknown";
               return (
                 <tr key={t.name} className={`st-${st}`}>

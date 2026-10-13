@@ -76,16 +76,21 @@ export function wrapRows(widths: number[], width: number, gap = CHIP_GAP): numbe
   return rows;
 }
 
-/** Estimated node height (the canvas measures the real one and lays out again). `expanded`: MCP tool rows shown.
+/** A selected caller's "N lines to hidden objects" note (styles.css .node-hidden-note: 16px line, 8px above). */
+export const NOTE_H = 24;
+
+/** Estimated node height (the canvas measures the real one and lays out again). `expanded`: MCP tool rows shown (the
+ *  ones Show leaves, `shownTools`, when it leaves out some).
  *  Chip rows come from the chips' measured widths, so the estimate is close before React Flow has measured the card
  *  (cards off screen aren't rendered, so aren't measured). */
 export function nodeHeight(n: PNode, expanded = false, measure: Measure = measureText): number {
   const k = n.kind;
   const rows = (c: Chip[]) => wrapRows(c.map((x) => chipW(x, k, measure)), innerW(k));
   const chips = (c: Chip[]) => (c.length ? 10 + rows(c) * (CHIP_H + CHIP_GAP) - CHIP_GAP : 0);
+  const note = n.hiddenLines ? NOTE_H : 0;
   switch (k) {
     case "mcp":
-      return expanded ? 70 + (n.tools?.length ?? 0) * 31 + 6 + chips(n.chips) : 94 + chips(n.chips);
+      return expanded ? 70 + (n.shownTools?.length ?? n.tools?.length ?? 0) * 31 + 6 + chips(n.chips) : 94 + chips(n.chips);
     case "a2a":
     case "runtime_dest": {
       const sk = n.skills ?? [];
@@ -93,7 +98,7 @@ export function nodeHeight(n: PNode, expanded = false, measure: Measure = measur
       return 66 + (sk.length ? 8 + wrapRows(pills, innerW(k), 4) * 26 - 4 : 0) + chips(n.chips);
     }
     case "engine":
-      return 68 + chips(n.chips);
+      return 68 + chips(n.chips) + note;
     case "endpoint":
     case "google_apis":
       return 66 + chips(n.chips);
@@ -107,7 +112,7 @@ export function nodeHeight(n: PNode, expanded = false, measure: Measure = measur
     case "principal_group": {
       // the description wraps (17px lines) instead of being shortened
       const lines = Math.max(1, Math.ceil(measure(n.sub ?? "", fontOf(FIT.sub)) / titleRoom(k)));
-      return 64 + (lines - 1) * 17 + chips(n.chips);
+      return 64 + (lines - 1) * 17 + chips(n.chips) + note;
     }
     default:
       return 64 + chips(n.chips);

@@ -141,10 +141,12 @@ filter's toggle drops the override. Checking an agent also selects it. Its quick
 no grants" and "Show Google API endpoints". The rows show pending changes at once and the map changes on Apply
 (Enter); Cancel or Esc drops them, and a click elsewhere with changes pending keeps it open and asks for Apply or
 Cancel. Clicking agents on the canvas while it's open shows in the rows, keeping the rows you changed. Enter in the
-filter with a single match shows only that object. A destination the picker hides still shows, faded and marked "(hidden by
-filter)", while a selected agent has a line to it. All agents, Behind a gateway and No gateway are shortcuts that
-check those agents in the picker. With agents selected (Agent-to-Anywhere): Show Allows / Denies, and Inherited
-grants. Each legend entry hides or shows that kind of line. Table view lists the selected agents' lines (with none
+filter with a single match shows only that object ("Only this" on an agent keeps its gateway and the destinations its
+lines reach). An object a type filter or the picker hides is off the map, with every line to it, and the layout closes
+up around it; a selected agent counts those lines instead ("3 lines to hidden objects · show", which opens the
+picker), while its chips ("3 allowed", "Denied by default: 10") still count the policy. All agents, Behind a gateway
+and No gateway are shortcuts that check those agents in the picker. With agents selected (Agent-to-Anywhere): Show
+Allows / Denies, and Inherited grants. Each legend entry hides or shows that kind of line. Table view lists the selected agents' lines (with none
 selected, every agent's own grants). Past 400 lines a banner suggests selecting fewer agents. Nodes you drag keep
 their place; the picker is remembered too (both saved in the browser per project, region and direction). Reset view
 collapses the expanded groups, forgets dragged positions, shows every object with no agent selected, and fits.
@@ -160,7 +162,14 @@ full display name and URL. The table view always lists each endpoint, tagged "Go
 destination). Each agent behind a gateway shows a count ("Denied by default: 18"); select it to draw its default-deny
 lines (red, dashed, with a ✕), at most 60 per agent ("+N more"); untick Show: Denies to hide them. When the gateway is
 in dry run they're amber "would be denied: passes today" lines and
-the gateway says "Dry run: nothing is blocked". Grants held by an agent with no egress gateway are drawn as "not
+the gateway says "Dry run: nothing is blocked". On an MCP server Show works per tool: with a grant to some tools
+(say the read-only ones), Denies only draws a deny line ("3/6 tools denied") and the card lists only the denied
+tools; Allows only draws an allowed line and lists only the allowed tools; both draw one partly-allowed line ("read-only",
+"2/6 tools") with every tool marked allowed or denied. Tools a custom condition can't decide here are marked "?" and
+show under either. With several agents selected a tool shows if any of their lines shows it; each agent's mark is in
+the row's tooltip and the line's panel. A server whose every tool is allowed has no line under Denies only (and one no
+grant reaches has none under Allows only), so its card stays collapsed. The panel of a narrowed line lists only the
+tools it shows and says how many the filter hides. Grants held by an agent with no egress gateway are drawn as "not
 enforced" (gray, dotted): nothing checks them. Color is never the only cue: dash patterns, badges and labels tell the
 kinds apart.
 

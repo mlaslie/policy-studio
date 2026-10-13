@@ -183,11 +183,12 @@ const ARIA = {
   "edge.a11yDescription.default": "Press Enter or Space to show the policy behind this line; Escape closes it.",
 };
 
-/** The line now: a selected line is re-found in the current view (by id, then as the same caller and destination), so
- *  the panel follows it into the staged-change view after something is staged. */
-function resolveEdge(edges: PEdge[], e: PEdge): PEdge {
+/** The line now: a selected line is re-found in the current view (its lines and the table's rows; by id, then as the
+ *  same caller and destination), so the panel follows it into the staged-change view after something is staged, and
+ *  shows it as Show: Allows / Denies draws it. null once it's off the map (its object hidden, or Show leaves it out). */
+function resolveEdge(edges: PEdge[], e: PEdge): PEdge | null {
   const all = edges.flatMap((x) => [x, ...(x.members ?? [])]);
-  return all.find((x) => x.id === e.id) ?? all.find((x) => pairKey(x) === pairKey(e)) ?? e;
+  return all.find((x) => x.id === e.id) ?? all.find((x) => pairKey(x) === pairKey(e)) ?? null;
 }
 
 function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
@@ -208,6 +209,8 @@ function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
   const [glide, setGlide] = useState(false);
   const [hover, setHover] = useState<string | null>(null);
   const [fitSeq, setFitSeq] = useState(0);
+  /** Bumped to open the picker (an agent's "N lines to hidden objects" note). */
+  const [pickerReq, setPickerReq] = useState(0);
   const wrap = useRef<HTMLDivElement>(null);
   const opener = useRef<HTMLElement | null>(null);
   const reduced = usePrefersReducedMotion();
@@ -261,7 +264,9 @@ function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
   const envRef = useRef(env);
   envRef.current = env;
   const expanded = useMemo(() => expandedMcp(view, active), [view, active]);
-  const hkey = useCallback((id: string) => `${id}|${expanded.has(id) ? 1 : 0}`, [expanded]);
+  // A measured height holds for the card as drawn: expanded or not, how many tool rows, with the hidden-lines note or not.
+  const looks = useMemo(() => new Map(view.nodes.map((n) => [n.id, `${expanded.has(n.id) ? 1 : 0}|${n.shownTools?.length ?? "all"}|${n.hiddenLines ? 1 : 0}`])), [view, expanded]);
+  const hkey = useCallback((id: string) => `${id}|${looks.get(id) ?? ""}`, [looks]);
   const heights = useMemo(() => Object.fromEntries(view.nodes.map((n) => [n.id, measured[hkey(n.id)]]).filter(([, h]) => h !== undefined)), [view, measured, hkey]);
   // estimates measure chip text (fit.ts); they're measured again once web fonts load
   const fonts = useSyncExternalStore(onFontEpoch, fontEpoch, fontEpoch);
@@ -270,7 +275,7 @@ function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
 
   // Auto-select: with nothing selected and exactly one agent in view, select it (so the map doesn't open empty). Once
   // per set of agents in view, so deselecting it sticks.
-  const inView = useMemo(() => view.nodes.filter((n) => n.kind === "engine" && isSource(n, direction) && !view.faded.includes(n.id)).map((n) => n.id), [view, direction]);
+  const inView = useMemo(() => view.nodes.filter((n) => n.kind === "engine" && isSource(n, direction)).map((n) => n.id), [view, direction]);
   const autoKey = `${pkey}|${inView.join(",")}`;
   useEffect(() => {
     const s = autoSelect(inView, pkRef.current.selected);
@@ -372,7 +377,11 @@ function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
   const nodeById = useMemo(() => new Map([...view.nodes, ...graph.nodes].map((n) => [n.id, n])), [graph, view]);
   const label = useCallback((id: string) => nodeById.get(id)?.label ?? id.split("/").pop() ?? id, [nodeById]);
   const nodeOf = useCallback((id: string) => nodeById.get(id), [nodeById]);
-  const edgeNow = useMemo(() => (selEdge ? resolveEdge(view.edges, selEdge) : null), [selEdge, view]);
+  const edgeNow = useMemo(() => (selEdge ? resolveEdge([...view.edges, ...view.rows], selEdge) : null), [selEdge, view]);
+  // its line left the map: the panel closes
+  useEffect(() => {
+    if (selEdge && !edgeNow) setSelEdge(null);
+  }, [selEdge, edgeNow]);
   /** Remember what had focus, so closing the panel can return there. */
   const remember = () => {
     const a = document.activeElement as HTMLElement | null;
@@ -476,7 +485,8 @@ function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
     },
     [items, setPk],
   );
-  const actions = useMemo(() => ({ jump, unpin }), [jump, unpin]);
+  const openPicker = useCallback(() => setPickerReq((k) => k + 1), []);
+  const actions = useMemo(() => ({ jump, unpin, openPicker }), [jump, unpin, openPicker]);
 
   // ---------- the picker: Apply, the affiliation shortcut, Reset view ----------
   const applyPicker = (next: PickerState, focus: string | null) => {
@@ -653,7 +663,7 @@ function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
                 ))}
               </select>
             )}
-            <ObjectPicker items={items} value={pk} env={env} statuses={statuses} google={egress} onApply={applyPicker} />
+            <ObjectPicker items={items} value={pk} env={env} statuses={statuses} google={egress} onApply={applyPicker} openReq={pickerReq} />
             <span className="pmap-tools-end">
               <Tip tip="Zoom to fit the whole map." placement="bottom">
                 <button type="button" className="btn btn-tonal btn-small" onClick={() => fitMap(rf, bounds, wrap.current, reduced ? 0 : 300)} disabled={table}>
@@ -737,13 +747,13 @@ function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
             {egress && view.agents.length > 0 && (
               <div className="pmap-show" role="group" aria-label="Show lines">
                 <span className="small muted">Show:</span>
-                <Tip tip="Allowed, partly allowed and conditional lines, inherited ones and grants that aren't enforced." placement="bottom">
+                <Tip tip="Allowed, partly allowed and conditional lines, inherited ones and grants that aren't enforced. On an MCP server: the tools a grant allows." placement="bottom">
                   <label className="pmap-check plain">
                     <input type="checkbox" checked={tools.allows} onChange={(e) => setTools((x) => ({ ...x, allows: e.target.checked }))} />
                     Allows
                   </label>
                 </Tip>
-                <Tip tip="Default-deny lines: denied (enforce) or would be denied (dry run) for want of a grant." placement="bottom">
+                <Tip tip="Default-deny lines: denied (enforce) or would be denied (dry run) for want of a grant. On an MCP server: the tools no grant allows." placement="bottom">
                   <label className="pmap-check plain">
                     <input type="checkbox" checked={tools.denies} onChange={(e) => setTools((x) => ({ ...x, denies: e.target.checked }))} />
                     Denies

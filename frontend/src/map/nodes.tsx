@@ -11,7 +11,7 @@ import { W, chipShown, skillRoom, titleRoom } from "./layout";
 import type { MNode, ToolState } from "./toFlow";
 
 /** Actions a node can trigger (kept out of node data so it stays plain). */
-export const MapActions = createContext<{ jump: (id: string) => void; unpin: (id: string) => void }>({ jump: () => undefined, unpin: () => undefined });
+export const MapActions = createContext<{ jump: (id: string) => void; unpin: (id: string) => void; openPicker: () => void }>({ jump: () => undefined, unpin: () => undefined, openPicker: () => undefined });
 
 const H = ({ type, pos, id, style }: { type: "source" | "target"; pos: Position; id: string; style?: CSSProperties }) => (
   <Handle type={type} position={pos} id={id} isConnectable={false} className="hnd" style={style} />
@@ -129,10 +129,29 @@ function Pin({ id, data }: { id: string; data: MNode["data"] }) {
 // "node-picked", not "picked": a global .picked (the Builder's chosen-agent box: display flex, padding, a border) would
 // lay a selected agent's card out as a row, its chips spilling out past the border.
 const cls = (d: MNode["data"], ...more: (string | false | undefined)[]) =>
-  ["node", d.dim && "dim", d.hit && "hit", d.picked && "node-picked", d.filtered && "filtered", d.ring && `ring-${d.ring}`, d.node.pending && (d.node.pending.removed ? "pending-removed" : "pending"), ...more].filter(Boolean).join(" ");
+  ["node", d.dim && "dim", d.hit && "hit", d.picked && "node-picked", d.ring && `ring-${d.ring}`, d.node.pending && (d.node.pending.removed ? "pending-removed" : "pending"), ...more].filter(Boolean).join(" ");
 
-/** A node the picker hides, drawn because a selected agent has a line to it. */
-const Filtered = ({ data }: { data: MNode["data"] }) => (data.filtered ? <span className="node-filtered">(hidden by filter)</span> : null);
+/** A selected caller's lines left off the map with the hidden objects at their other end: a muted note that opens the
+ *  picker. (Its chips count the policy, not the view, so they don't change.) */
+function HiddenNote({ n }: { n: MNode["data"]["node"] }) {
+  const { openPicker } = useContext(MapActions);
+  if (!n.hiddenLines) return null;
+  const what = `${n.hiddenLines} ${n.hiddenLines === 1 ? "line" : "lines"} to hidden objects`;
+  return (
+    <button
+      type="button"
+      className="node-hidden-note nodrag nopan"
+      onClick={(e) => {
+        e.stopPropagation();
+        openPicker();
+      }}
+      title={`${what}: a type filter or the picker hides the object at the other end. Click to open the picker.`}
+      aria-label={`${what}. Open the picker`}
+    >
+      {what} · <span className="node-hidden-show">show</span>
+    </button>
+  );
+}
 
 /** "Same agent" link between an Agent Runtime agent as a caller and as a registry entry. */
 function SameAs({ id, label }: { id?: string; label: string }) {
@@ -163,7 +182,6 @@ const EngineNode = memo(({ id, data }: NodeProps<MNode>) => {
         <Pin id={id} data={data} />
         <SameAs id={n.sameAs} label="registry entry" />
       </Corner>
-      <Filtered data={data} />
       <div className="node-badge badge-runtime">
         <span className="dot" /> Agent Runtime
       </div>
@@ -174,6 +192,7 @@ const EngineNode = memo(({ id, data }: NodeProps<MNode>) => {
         <Titles kind={n.kind} title={n.label} sub={n.sub} subStyle={FIT.monoSub} subCut="middle" />
       </div>
       <Chips chips={n.chips} kind={n.kind} />
+      <HiddenNote n={n} />
     </div>
   );
 });
@@ -192,7 +211,6 @@ const GatewayNode = memo(({ id, data }: NodeProps<MNode>) => {
       <Corner>
         <Pin id={id} data={data} />
       </Corner>
-      <Filtered data={data} />
       <div className="node-head">
         <span className="node-icon icon-gateway">
           <GatewayIcon size={22} />
@@ -227,7 +245,6 @@ const PseudoNode = memo(({ id, data }: NodeProps<MNode>) => {
       <Corner>
         <Pin id={id} data={data} />
       </Corner>
-      <Filtered data={data} />
       <div className="node-head">
         <span className={`node-icon ${n.kind === "client" ? "icon-client" : "icon-person"}`}>
           <PersonIcon size={20} />
@@ -235,6 +252,7 @@ const PseudoNode = memo(({ id, data }: NodeProps<MNode>) => {
         <Titles kind={n.kind} title={n.label} sub={n.sub} wrapSub />
       </div>
       <Chips chips={n.chips} kind={n.kind} />
+      <HiddenNote n={n} />
     </div>
   );
 });
@@ -267,7 +285,6 @@ const DestNode = memo(({ id, data }: NodeProps<MNode>) => {
         <Pin id={id} data={data} />
         {n.kind === "runtime_dest" && <SameAs id={n.sameAs} label="caller" />}
       </Corner>
-      <Filtered data={data} />
       <div className={`node-badge ${n.kind === "registry" ? "" : "badge-cloudrun"}`}>
         {n.kind === "a2a" && <CloudIcon size={12} />} {DEST_BADGE[n.kind]}
       </div>
@@ -315,6 +332,8 @@ const TOOL_TITLE: Record<ToolState, string> = { allowed: "allowed", denied: "den
 const McpNode = memo(({ id, data }: NodeProps<MNode>) => {
   const n = data.node;
   const tools = n.tools ?? [];
+  // the rows Show: Allows / Denies leaves (view.ts shownTools), every tool otherwise
+  const rows = n.shownTools ? tools.filter((t) => n.shownTools!.includes(t.name)) : tools;
   const destructive = tools.filter((t) => t.destructive).length;
   return (
     <div className={cls(data, "node-mcp", n.unreadable && "unreadable")} style={box(n.kind)}>
@@ -322,7 +341,6 @@ const McpNode = memo(({ id, data }: NodeProps<MNode>) => {
       <Corner>
         <Pin id={id} data={data} />
       </Corner>
-      <Filtered data={data} />
       <div className="node-badge badge-cloudrun">
         <CloudIcon size={12} /> MCP
       </div>
@@ -335,14 +353,21 @@ const McpNode = memo(({ id, data }: NodeProps<MNode>) => {
       </div>
       {data.expanded ? (
         <div className="tools">
-          {tools.map((t) => {
+          {rows.map((t) => {
             const st = data.toolStates?.[t.name];
+            const per = data.toolAgents?.[t.name];
             return (
-              <div key={t.name} className={`tool-row ${st ? `st-${st}` : ""}`} title={`${t.name}: ${t.readOnly ? "read-only" : t.destructive ? "destructive" : "write"}${st ? `, ${TOOL_TITLE[st]}` : ""}`}>
+              <div key={t.name} className={`tool-row ${st ? `st-${st}` : ""}`} title={`${t.name}: ${t.readOnly ? "read-only" : t.destructive ? "destructive" : "write"}${st ? `, ${TOOL_TITLE[st]}` : ""}${per ? `\n${per}` : ""}`}>
                 <span className={`tool-kind ${t.readOnly ? "ro" : "rw"}`}>{t.readOnly ? <BookIcon size={13} /> : <PencilIcon size={13} />}</span>
                 <span className="tool-name mono">{t.name}</span>
                 <span className={`tool-access ${t.readOnly ? "ro" : "rw"}`}>{t.readOnly ? "read" : "write"}</span>
-                {st && <span className={`state-dot st-${st === "allowed" ? "allowed" : st === "denied" ? "blocked" : "conditional"}`} />}
+                {st === "unknown" ? (
+                  <span className="tool-q" aria-label={TOOL_TITLE[st]}>
+                    ?
+                  </span>
+                ) : (
+                  st && <span className={`state-dot st-${st === "allowed" ? "allowed" : "blocked"}`} aria-label={TOOL_TITLE[st]} />
+                )}
               </div>
             );
           })}
@@ -372,7 +397,6 @@ const GroupNode = memo(({ id, data }: NodeProps<MNode>) => (
     <Corner>
       <Pin id={id} data={data} />
     </Corner>
-    <Filtered data={data} />
     <div className="node-head">
       <span className="node-icon icon-registry">
         <ApiIcon size={18} />
@@ -391,7 +415,6 @@ const GoogleGroupNode = memo(({ id, data }: NodeProps<MNode>) => {
       <Corner>
         <Pin id={id} data={data} />
       </Corner>
-      <Filtered data={data} />
       <div className="node-badge badge-cloudrun">API endpoints · collapsed</div>
       <div className="node-head">
         <span className="node-icon icon-api">
@@ -411,7 +434,6 @@ const SinkNode = memo(({ id, data }: NodeProps<MNode>) => (
     <Corner>
       <Pin id={id} data={data} />
     </Corner>
-    <Filtered data={data} />
     <div className="node-head">
       <span className="node-icon icon-sink">
         <CloudIcon size={20} />

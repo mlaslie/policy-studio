@@ -45,9 +45,11 @@ type Props = {
   google: boolean;
   /** `focus`: the one object "Only this" (or Enter on a single match) left on, to reveal and center. */
   onApply: (next: PickerState, focus: string | null) => void;
+  /** Opens it when it changes (an agent's "N lines to hidden objects" note on the canvas). */
+  openReq?: number;
 };
 
-export default function ObjectPicker({ items, value, env, statuses, google, onApply }: Props) {
+export default function ObjectPicker({ items, value, env, statuses, google, onApply, openReq = 0 }: Props) {
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<PickerState>(value);
   /** The state the draft started from (or was last rebased on). */
@@ -85,6 +87,10 @@ export default function ObjectPicker({ items, value, env, statuses, google, onAp
     setOnly(null);
     setOpen(true);
   };
+  useEffect(() => {
+    if (openReq && !open) show();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openReq]);
   const close = (focusButton = true) => {
     setOpen(false);
     if (focusButton) requestAnimationFrame(() => btn.current?.focus({ preventScroll: true }));
@@ -236,7 +242,7 @@ export default function ObjectPicker({ items, value, env, statuses, google, onAp
                     const rs = ds.get(i.id);
                     const on = !!rs?.on;
                     const sel = draft.selected.includes(i.id);
-                    const why = rs?.manual ? `manual override (${HIDDEN_LABEL[rs.manual].replace(/^hidden: /, "")})` : rs?.hidden ? [HIDDEN_LABEL[rs.hidden], rs.faded ? "drawn faded for a selected agent's line" : ""].filter(Boolean).join(" · ") : "";
+                    const why = rs?.manual ? `manual override (${HIDDEN_LABEL[rs.manual].replace(/^hidden: /, "")})` : rs?.hidden ? HIDDEN_LABEL[rs.hidden] : "";
                     return (
                       <div key={i.id} className={`pmap-pick-row ${on ? "on" : ""}`}>
                         <label title={why ? `${i.id} (${why})` : i.id}>

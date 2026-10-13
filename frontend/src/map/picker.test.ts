@@ -109,12 +109,18 @@ describe("the draft", () => {
     expect(setItems(E, all, agents, false).selected).toEqual([]);
   });
 
-  it("Only this: everything else unchecked; an agent is the only one selected", () => {
+  it("Only this: everything else unchecked; an agent is the only one selected, with what its lines reach", () => {
     const st = onlyThis(E, { ...DEFAULT_PICKER, selected: [hr] }, items, hd);
-    expect(st.off).toHaveLength(items.length - 1);
     expect(st.off).not.toContain(hd);
     expect(st.selected).toEqual([hd]);
-    expect(onlyThis(E, DEFAULT_PICKER, items, tickets).selected).toEqual([]);
+    // the other agents and callers are unchecked; its gateway and its lines' destinations stay
+    expect(items.filter((i) => i.group === "engine" && i.id !== hd).every((i) => st.off.includes(i.id))).toBe(true);
+    expect(st.off).not.toContain(EGRESS);
+    expect(st.off).not.toContain(tickets);
+    // a destination: just it
+    const d = onlyThis(E, DEFAULT_PICKER, items, tickets);
+    expect(d.selected).toEqual([]);
+    expect(d.off).toHaveLength(items.length - 1);
   });
 
   it("the Lines toggle selects or deselects a checked agent without hiding it", () => {
@@ -157,15 +163,27 @@ describe("the picker on the map", () => {
     expect(v.edges).toEqual([]);
     const sel = view(toggleItem(E, st, item(hd)));
     expect(sel.agents).toEqual([hd]);
-    // Tickets MCP is unchecked, but Helpdesk Agent has a line to it: drawn faded
-    expect(sel.faded).toContain(tickets);
+    // Tickets MCP is unchecked: off the map with Helpdesk Agent's line to it, which the agent counts
+    expect(sel.nodes.some((n) => n.id === tickets)).toBe(false);
+    expect(sel.edges.some((e) => e.target === tickets)).toBe(false);
+    expect(sel.hiddenLines[hd]).toBe(1);
+    expect(sel.nodes.find((n) => n.id === hd)!.hiddenLines).toBe(1);
   });
 
-  it("Only this on an agent: just it, with its gateway and destinations faded in for its lines", () => {
-    const v = view(applyDraft(onlyThis(E, DEFAULT_PICKER, items, hr)), { denies: false });
+  it("Only this on an agent: it, its gateway and the destinations its lines reach, all checked", () => {
+    const e = env(g, { denies: false });
+    const st = applyDraft(onlyThis(e, DEFAULT_PICKER, items, hr));
+    const v = view(st, { denies: false });
     expect(v.nodes.filter((n) => n.kind === "engine").map((n) => n.id)).toEqual([hr]);
-    expect(v.faded).toContain(EGRESS);
-    expect(v.faded).toContain(dest("HR Directory MCP").name);
+    expect(v.nodes.some((n) => n.id === EGRESS)).toBe(true);
+    expect(v.nodes.some((n) => n.id === dest("HR Directory MCP").name)).toBe(true);
+    expect(v.hiddenLines).toEqual({});
+    const s = pickerStatus(e, st);
+    expect([EGRESS, dest("HR Directory MCP").name, hr].every((id) => s.get(id)!.on)).toBe(true);
+    // the destinations it has no line to (Allows only): unchecked
+    const none = items.filter((i) => ["a2a", "runtime", "mcp", "api"].includes(i.group) && !v.edges.some((x) => x.target === i.id));
+    expect(none.length).toBeGreaterThan(0);
+    expect(none.every((i) => !s.get(i.id)!.on)).toBe(true);
   });
 
   it("the quick toggles: Hide destinations with no grants, Show Google API endpoints", () => {
@@ -329,9 +347,8 @@ describe("the picker reflects the map: filters write through to the checks", () 
       changesOnly: e.changesOnly,
       active: e.active,
     });
-    const faded = new Set(v.faded);
     const ids = new Set(pickerItems(e.graph).map((i) => i.id));
-    return v.nodes.filter((n) => ids.has(n.id) && !faded.has(n.id)).map((n) => n.id).sort();
+    return v.nodes.filter((n) => ids.has(n.id)).map((n) => n.id).sort();
   };
   const checked = (st: PickerState, e = E) => {
     const s = pickerStatus(e, st);
@@ -458,9 +475,15 @@ describe("the picker reflects the map: filters write through to the checks", () 
     expect(pickerStatus(E, t).get(tickets)).toEqual({ on: true, manual: "type" });
   });
 
-  it("a hidden destination a selected agent has a line to: unchecked, drawn faded", () => {
+  it("a hidden destination a selected agent has a line to: unchecked with its reason, off the map", () => {
     const st = { ...DEFAULT_PICKER, off: [tickets], selected: [hd] };
-    expect(pickerStatus(E, st).get(tickets)).toEqual({ on: false, hidden: "unchecked", faded: true });
+    expect(pickerStatus(E, st).get(tickets)).toEqual({ on: false, hidden: "unchecked" });
+    expect(view(st).nodes.some((n) => n.id === tickets)).toBe(false);
+    // a type filter: the same, with its own reason
+    const t = { ...DEFAULT_PICKER, typesOff: ["mcp" as const], selected: [hd] };
+    expect(pickerStatus(E, t).get(tickets)).toEqual({ on: false, hidden: "type" });
+    expect(view(t).nodes.some((n) => n.kind === "mcp")).toBe(false);
+    expect(view(t).hiddenLines[hd]).toBe(2);
   });
 
   it("the direction switch: Client-to-Agent lists only what it can show, all checked; type filters don't apply", () => {
