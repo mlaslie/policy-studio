@@ -5,12 +5,14 @@
 // sooner, once there are more than 25 of them).
 // Deterministic: the same view gives the same positions.
 import { DEST_SECTIONS, NOGW, SECTION_LABEL, type Chip, type PEdge, type PNode, type PNodeKind } from "./graph";
+import type { XY } from "./usePositions";
 import type { MapView } from "./view";
 
 export const GAP_X = 140;
 export const GAP_Y = 22;
 const SECTION_GAP = 34;
-const HEADER_H = 26;
+/** Room above a section for its title (also the title's box when resolving overlaps). */
+export const HEADER_H = 26;
 const SUB_GAP = 46;
 /** A section with more nodes than this wraps into sub-columns. */
 export const WRAP = 25;
@@ -72,6 +74,8 @@ export interface Layout {
   size: Record<string, { w: number; h: number }>;
   /** Section titles drawn above each group of nodes. */
   headers: { id: string; label: string; x: number; y: number; w: number }[];
+  /** The column of each node and section title (callers, gateways, dests, sink), for resolveOverlaps. */
+  column: Record<string, string>;
 }
 
 type Col = "callers" | "gateways" | "dests" | "sink";
@@ -123,9 +127,10 @@ export function layoutView(view: Pick<MapView, "nodes" | "edges">, opts: { expan
   const y: Record<string, number> = {};
   const x: Record<string, number> = {};
   const headers: Layout["headers"] = [];
+  const column: Layout["column"] = {};
 
   /** Stack sections top to bottom (sub-columns past WRAP), centered on 0. Writes y (center) and x offsets. */
-  const stack = (secs: [string, PNode[]][], colX: number, colW: number, withHeaders: boolean, wrap = WRAP) => {
+  const stack = (secs: [string, PNode[]][], col: Col, colX: number, colW: number, withHeaders: boolean, wrap = WRAP) => {
     const out: { id: string; top: number; dx: number }[] = [];
     const hdr: { section: string; top: number; w: number }[] = [];
     let top = 0;
@@ -150,7 +155,10 @@ export function layoutView(view: Pick<MapView, "nodes" | "edges">, opts: { expan
       y[o.id] = o.top + shift + h(byId.get(o.id)!) / 2;
       x[o.id] = colX + o.dx;
     }
-    for (const s of hdr) headers.push({ id: `hdr:${colX}:${s.section}`, label: sectionTitle(s.section, byId), x: colX, y: s.top + shift, w: s.w });
+    for (const s of hdr) {
+      headers.push({ id: `hdr:${colX}:${s.section}`, label: sectionTitle(s.section, byId), x: colX, y: s.top + shift, w: s.w });
+      column[`hdr:${colX}:${s.section}`] = col;
+    }
   };
   const mean = (ids: string[], fallback: number) => {
     const v = ids.map((i) => y[i]).filter((n) => n !== undefined);
@@ -178,16 +186,16 @@ export function layoutView(view: Pick<MapView, "nodes" | "edges">, opts: { expan
   const headed = (secs: [string, PNode[]][]) => secs.length > 1 || secs.some(([s]) => s !== "clients");
 
   // ---------- two barycenter passes ----------
-  stack(callerSecs, X.callers, cw, false, cwrap);
+  stack(callerSecs, "callers", X.callers, cw, false, cwrap);
   for (let pass = 0; pass < 2; pass++) {
     destSecs = order(destSecs, 1);
-    stack(destSecs, X.dests, dw, false);
+    stack(destSecs, "dests", X.dests, dw, false);
     callerSecs = order(callerSecs, 0);
-    stack(callerSecs, X.callers, cw, false, cwrap);
+    stack(callerSecs, "callers", X.callers, cw, false, cwrap);
   }
   headers.length = 0;
-  stack(callerSecs, X.callers, cw, headed(callerSecs), cwrap);
-  stack(destSecs, X.dests, dw, true);
+  stack(callerSecs, "callers", X.callers, cw, headed(callerSecs), cwrap);
+  stack(destSecs, "dests", X.dests, dw, true);
 
   // ---------- gateways: centered on the agents behind them, then pushed apart ----------
   const gwTarget = (g: PNode) => {
@@ -224,8 +232,60 @@ export function layoutView(view: Pick<MapView, "nodes" | "edges">, opts: { expan
     const hh = h(n);
     size[n.id] = { w: W[n.kind], h: hh };
     pos[n.id] = { x: Math.round(x[n.id] ?? 0), y: Math.round((y[n.id] ?? 0) - hh / 2) };
+    column[n.id] = colOf(n);
   }
-  return { pos, size, headers };
+  return { pos, size, headers, column };
+}
+
+/** A node or section title for resolveOverlaps: its top-left, size, layout column, and whether it's pinned. */
+export interface Box {
+  id: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  column?: string;
+  pinned: boolean;
+}
+
+const hits = (a: Omit<Box, "id" | "pinned">, b: Omit<Box, "id" | "pinned">) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+
+/** Keep auto-placed nodes off pinned ones (docs/VISUALIZATION_PLAN.md §7). Pinned boxes never move. Within each
+ *  column (`column`, else the box's x), unpinned boxes are taken top to bottom; one that hits a pinned box moves down
+ *  past it plus `gap` (again, if that lands it on another pinned box), and every box after it in the column moves by
+ *  the same amount, so the column keeps its order and spacing. Pure and deterministic (ties by x, then id). */
+export function resolveOverlaps(boxes: Box[], gap: number): Record<string, XY> {
+  const out: Record<string, XY> = {};
+  const pinned = boxes.filter((b) => b.pinned).sort((a, b) => a.y - b.y || a.x - b.x || a.id.localeCompare(b.id));
+  for (const b of pinned) out[b.id] = { x: b.x, y: b.y };
+  const cols = new Map<string, Box[]>();
+  for (const b of boxes.filter((c) => !c.pinned)) {
+    const k = b.column ?? `x:${b.x}`;
+    cols.set(k, [...(cols.get(k) ?? []), b]);
+  }
+  for (const k of [...cols.keys()].sort()) {
+    let shift = 0;
+    for (const b of cols.get(k)!.sort((p, q) => p.y - q.y || p.x - q.x || p.id.localeCompare(q.id))) {
+      const at = { ...b, y: b.y + shift };
+      // each push lands below a pinned box's bottom, so it can't hit that one again: this ends
+      for (let p = pinned.find((q) => hits(at, q)); p; p = pinned.find((q) => hits(at, q))) {
+        const d = p.y + p.h + gap - at.y;
+        at.y += d;
+        shift += d;
+      }
+      out[b.id] = { x: b.x, y: at.y };
+    }
+  }
+  return out;
+}
+
+/** Where a dropped node lands: where it was dropped, or, if that's on another pinned node, the nearest free spot
+ *  straight below. (Unpinned nodes under it make way through resolveOverlaps; pinned ones never move.) */
+export function freeSpot(drop: Omit<Box, "pinned">, others: Box[], gap: number): XY {
+  const at = { ...drop };
+  const pinned = others.filter((o) => o.pinned && o.id !== drop.id);
+  for (let p = pinned.find((q) => hits(at, q)); p; p = pinned.find((q) => hits(at, q))) at.y = p.y + p.h + gap;
+  return { x: at.x, y: at.y };
 }
 
 /** Edges that belong to a node (incident, or a combined line one of whose parts is that caller's). */

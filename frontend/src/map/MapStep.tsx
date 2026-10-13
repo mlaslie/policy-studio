@@ -24,7 +24,7 @@ import { useStudio } from "../store";
 import { plural } from "../lib/util";
 import { buildPolicyGraph, type Direction, type PEdge, type PolicyGraph, type Verdict } from "./graph";
 import { DEFAULT_DIRECTION, DEFAULT_FILTERS, TOO_MANY_LINES, expandGroup, revealPatch, type Affiliation, type DestType, type MapFilters, viewOf } from "./view";
-import { layoutView } from "./layout";
+import { GAP_Y, HEADER_H, freeSpot, layoutView } from "./layout";
 import { VERDICT_LABEL, edgeAria, expandedMcp, toFlow, type MNode } from "./toFlow";
 import { nodeTypes, MapActions } from "./nodes";
 import { EdgeMarkers, edgeTypes } from "./edges";
@@ -32,7 +32,7 @@ import MapTable from "./MapTable";
 import PolicyPanel from "./PolicyPanel";
 import { simulate } from "./simulate";
 import { diffGraphs, mergeStaged, pairKey, pendingCount } from "./diff";
-import { posKey, usePositions } from "./usePositions";
+import { placeNodes, posKey, usePositions } from "./usePositions";
 import { findFocusEdge, type MapFocus } from "./focus";
 
 const PAD = { top: "40px", bottom: "40px", left: "24px", right: "40px" } as const;
@@ -150,6 +150,7 @@ function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
   const [searchMsg, setSearchMsg] = useState("");
   const [announce, setAnnounce] = useState("");
   const [measured, setMeasured] = useState<Record<string, number>>({});
+  const [widths, setWidths] = useState<Record<string, number>>({});
   const [showPref, setShowPref] = useState<Show | null>(null);
   const [focusReq, setFocusReq] = useState<MapFocus | null>(null);
   const [glide, setGlide] = useState(false);
@@ -186,34 +187,57 @@ function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
   const pinned = useMemo(() => new Set(Object.keys(pins)), [pins]);
   const flow = useMemo(() => toFlow(view, layout, { node: selected, edge: selEdge?.id ?? null, hit }, expanded, reduced, pinned), [view, layout, selected, selEdge, hit, expanded, reduced, pinned]);
 
-  // Nodes are controlled so they can be dragged: a pinned node takes its saved place, the rest the auto layout.
+  // Nodes are controlled so they can be dragged: a pinned node takes its saved place, the rest the auto layout, moved
+  // down their column off any pinned node they'd sit under (resolveOverlaps). Sizes: measured by React Flow where known
+  // (heights reach the layout through `heights`), else the layout's estimates; section titles are HEADER_H tall.
   // Measured sizes are kept so nodes don't flash while React Flow re-measures.
+  const sizes = useMemo(() => {
+    const out: Record<string, { w: number; h: number }> = {};
+    for (const [id, z] of Object.entries(layout.size)) out[id] = { w: widths[id] ?? z.w, h: z.h };
+    for (const h of layout.headers) out[h.id] = { w: h.w, h: HEADER_H };
+    return out;
+  }, [layout, widths]);
+  const placed = useMemo(
+    () => placeNodes(Object.fromEntries(flow.nodes.map((n) => [n.id, n.position])), pins, { size: sizes, column: layout.column }),
+    [flow.nodes, pins, sizes, layout],
+  );
   const [rfNodes, setRfNodes] = useState<MNode[]>([]);
   useEffect(() => {
     setRfNodes((prev) => {
       const old = new Map(prev.map((n) => [n.id, n]));
-      return flow.nodes.map((n) => ({ ...n, measured: old.get(n.id)?.measured, position: pins[n.id] ?? n.position }));
+      return flow.nodes.map((n) => ({ ...n, measured: old.get(n.id)?.measured, position: placed[n.id] ?? n.position }));
     });
-  }, [flow.nodes, pins]);
+  }, [flow.nodes, placed]);
   const hkeyRef = useRef(hkey);
   hkeyRef.current = hkey;
   const measuredRef = useRef(measured);
   measuredRef.current = measured;
   const placedRef = useRef<Record<string, { x: number; y: number }>>({});
-  // where each node sits before a drag (its pin, or the auto layout): a drop elsewhere pins it
-  placedRef.current = Object.fromEntries(flow.nodes.map((n) => [n.id, pins[n.id] ?? n.position]));
+  // where each node sits before a drag (its pin, or the auto layout off the pins): a drop elsewhere pins it
+  placedRef.current = placed;
+  const dropRef = useRef({ pins, sizes });
+  dropRef.current = { pins, sizes };
   const onNodesChange = useCallback(
     (changes: NodeChange<MNode>[]) => {
       // Drops and arrow-key moves (dragging false) pin the node where it is; a click that didn't move it doesn't.
       for (const c of changes)
         if (c.type === "position" && c.position && c.dragging === false && !c.id.startsWith("hdr:")) {
           const was = placedRef.current[c.id];
-          if (!was || Math.abs(was.x - c.position.x) > 0.5 || Math.abs(was.y - c.position.y) > 0.5) pin(c.id, c.position);
+          if (!was || Math.abs(was.x - c.position.x) > 0.5 || Math.abs(was.y - c.position.y) > 0.5) {
+            // A drop onto another pinned node slides down to the nearest free spot below it (pinned nodes never move);
+            // unpinned nodes under the drop make way themselves (placeNodes).
+            const { pins: ps, sizes: sz } = dropRef.current;
+            const box = (id: string, p: { x: number; y: number }) => ({ id, ...p, w: sz[id]?.w ?? 0, h: sz[id]?.h ?? 0 });
+            const others = Object.entries(ps).map(([id, p]) => ({ ...box(id, p), pinned: true }));
+            pin(c.id, freeSpot(box(c.id, c.position), others, GAP_Y));
+          }
         }
       setRfNodes((ns) => applyNodeChanges(changes.filter((c) => c.type !== "remove"), ns));
       const upd: Record<string, number> = {};
       for (const c of changes) {
         if (c.type === "dimensions" && c.dimensions && !c.id.startsWith("hdr:")) {
+          const w = Math.round(c.dimensions.width);
+          if (w > 0) setWidths((m) => (m[c.id] === w ? m : { ...m, [c.id]: w }));
           const k = hkeyRef.current(c.id);
           if (Math.abs((measuredRef.current[k] ?? -99) - c.dimensions.height) > 1) upd[k] = Math.round(c.dimensions.height);
         }

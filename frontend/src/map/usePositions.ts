@@ -4,6 +4,7 @@
 // Zoom and pan aren't saved. Every storage access is wrapped: private windows and disabled storage just don't pin.
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Direction } from "./graph";
+import { GAP_Y, resolveOverlaps } from "./layout";
 
 export type XY = { x: number; y: number };
 export type Pins = Record<string, XY>;
@@ -51,11 +52,15 @@ export function savePins(store: PinStore | null, key: string, pins: Pins) {
   }
 }
 
-/** Layout positions with the pins on top (a pin wins; nodes without one take the auto layout). */
-export function placeNodes(auto: Record<string, XY>, pins: Pins): Record<string, XY> {
+/** Layout positions with the pins on top (a pin wins; nodes without one take the auto layout). With `size`, auto
+ *  placed nodes (and section titles) are then moved off the pinned ones, within their `column` (resolveOverlaps). */
+export function placeNodes(auto: Record<string, XY>, pins: Pins, opts: { size?: Record<string, { w: number; h: number }>; column?: Record<string, string>; gap?: number } = {}): Record<string, XY> {
   const out: Record<string, XY> = {};
   for (const [id, p] of Object.entries(auto)) out[id] = pins[id] ?? p;
-  return out;
+  const { size } = opts;
+  if (!size) return out;
+  const boxes = Object.entries(out).map(([id, p]) => ({ id, ...p, w: size[id]?.w ?? 0, h: size[id]?.h ?? 0, column: opts.column?.[id], pinned: !!pins[id] }));
+  return resolveOverlaps(boxes, opts.gap ?? GAP_Y);
 }
 
 /** Pins for one map key. `known` decides which saved ids are still in the graph; `ready` = the graph is loaded. */
