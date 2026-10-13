@@ -427,11 +427,10 @@ describe("the picker reflects the map: filters write through to the checks", () 
     // partly checked (some hidden by another filter): a click hides the type
     expect(typeState(pickerStatus(E, DEFAULT_PICKER), items, ["api", "google"], DEFAULT_PICKER)).toBe("some");
     expect(toggleTypes(E, DEFAULT_PICKER, ["api", "google"]).typesOff.sort()).toEqual(["api", "google"]);
-    // all of a type still hidden by another filter once restored (Google APIs collapsed): checking it shows them
-    // (here by turning "Show Google API endpoints" on), so the click is never lost
+    // restored as it was: collapsed into the Google APIs group, which is on the map, so the box reads "some"
     const restored = setTypes(E, { ...DEFAULT_PICKER, typesOff: ["google"] }, ["google"], true);
-    expect(restored).toMatchObject({ typesOff: [], googleApis: true, forced: [] });
-    expect(checkState(pickerStatus(E, restored), google)).toBe("all");
+    expect(restored).toMatchObject({ typesOff: [], googleApis: false, forced: [] });
+    expect(typeState(pickerStatus(E, restored), items, ["google"], restored)).toBe("some");
   });
 
   it("the gateway filter: other gateways and their agents unchecked; a new choice drops its overrides", () => {

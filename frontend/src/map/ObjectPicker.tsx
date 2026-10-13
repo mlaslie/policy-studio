@@ -14,6 +14,7 @@ import { plural } from "../lib/util";
 import {
   HIDDEN_LABEL,
   checkState,
+  countGrouped,
   countOn,
   enterInFilter,
   filterItems,
@@ -28,6 +29,7 @@ import {
   toggleItem,
   toggleSelected,
   toggleTypes,
+  typeState,
   type PickItem,
   type PickerEnv,
   type PickerState,
@@ -216,10 +218,11 @@ export default function ObjectPicker({ items, value, env, statuses, google, onAp
           </div>
           <div className="pmap-picker-list" ref={list} role="group" aria-label="Objects: checked ones are on the map" onKeyDown={onListKey}>
             {groups.map((g) => {
-              const st = checkState(ds, g.items);
-              // a destination type's group checkbox is the type filter (the toolbar's type box), unless the text
-              // filter narrows the rows: then it checks or unchecks the rows shown
+              // a destination type's group checkbox is the type filter (the toolbar's type box, the same state), unless
+              // the text filter narrows the rows: then it checks or unchecks the rows shown
               const typeBox = google && !query.trim();
+              const st = typeBox && isTypeGroup(g.group) ? typeState(ds, g.items, [g.group], draft) : checkState(ds, g.items);
+              const grouped = countGrouped(ds, g.items);
               return (
                 <div key={g.group} role="group" aria-labelledby={`${id}-${g.group}`} className="pmap-pick-group">
                   <div className="pmap-pick-head">
@@ -236,6 +239,7 @@ export default function ObjectPicker({ items, value, env, statuses, google, onAp
                     </label>
                     <span className="small muted">
                       {countOn(ds, g.items)} of {g.items.length}
+                      {grouped ? ` · ${grouped} in a group` : ""}
                     </span>
                   </div>
                   {g.items.map((i) => {

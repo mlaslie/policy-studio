@@ -133,6 +133,7 @@ function EdgeDetails({ edge, inv, gateways, nodeOf, label }: { edge: PEdge; inv:
           {[
             edge.hiddenTools.allowed ? `${plural(edge.hiddenTools.allowed, "allowed tool")} hidden by the Allows filter` : "",
             edge.hiddenTools.denied ? `${plural(edge.hiddenTools.denied, "denied tool")} hidden by the Denies filter` : "",
+            edge.hiddenTools.inherited ? `${plural(edge.hiddenTools.inherited, "tool")} allowed only through an inherited grant, hidden with Inherited grants off` : "",
           ]
             .filter(Boolean)
             .join("; ")}

@@ -7,6 +7,12 @@
 // (its own grants, the group, public and registry-wide grants it inherits, and default deny), never combined across
 // agents. Group, public and registry-wide grants are also drawn once from their pseudo caller. The map draws only the
 // selected callers' lines (view.ts).
+//
+// Default deny (implicit lines, the "Denied by default" chip) means no grant applies at all: not the agent's own, not an
+// inherited one (project-wide principalSet, public, registry-wide) and not a group one that might (those are "?", never
+// denied). With Inherited grants off, a destination reached only through an inherited grant gets no line (it isn't
+// denied), and an MCP tool allowed only through one is set aside (ToolSplit.inherited) instead of being denied. The
+// Agent Registry node stands for registry-wide grants, not a destination: never a default-deny line, never counted.
 import type { Access, Binding, ContextInfo, Ctx, EnforcementMode, Engine, Gateway, Inventory, ModelArmorResp } from "../api/types";
 import { ROLE, accessFromCondition } from "../lib/policy";
 import { ENGINE_PRINCIPAL_RE, EVERYONE, PROJECT_AGENTS_RE, conditionAllows, evaluateTools, isReadOnlyHint, memberMatches, parseTools } from "./evaluate";
@@ -49,7 +55,9 @@ export type Tone = "neutral" | "blue" | "red" | "green" | "amber" | "orange";
 /** pending: a staged change (drawn with a clock). */
 export type Chip = { text: string; tone: Tone; title?: string; pending?: boolean };
 export type Pending = "add" | "remove" | "change";
-export type ToolSplit = { allowed: string[]; denied: string[]; unknown: string[] };
+/** inherited: tools only an inherited grant allows (or might), set aside on a line drawn with Inherited grants off:
+ *  neither drawn as allowed nor as denied. */
+export type ToolSplit = { allowed: string[]; denied: string[]; unknown: string[]; inherited?: string[] };
 
 /** One binding that contributes to a line. */
 export interface Reason {
@@ -139,7 +147,7 @@ export interface PEdge {
   /** Set by the view (view.ts) on an MCP line Show: Allows / Denies narrows to some tools: the tools it still shows,
    *  how many allowed and denied ones it leaves out, and the verdict over every tool. `shownTools` unset = every tool. */
   shownTools?: string[];
-  hiddenTools?: { allowed: number; denied: number };
+  hiddenTools?: { allowed: number; denied: number; inherited?: number };
   whole?: Verdict;
   /** Short text on the line ("read-only", "3/6 tools", "?"). */
   label?: string;
@@ -477,23 +485,51 @@ function buildEgress(input: GraphInput): PolicyGraph {
     const e = inv.engines.find((x) => x.name === n.id)!;
     const gw = engineGw.get(e.name) ?? null;
     const mode = gw ? (gwByName.get(gw)?.enforcement?.mode ?? null) : null;
+    const deny = (d: Dest, tools?: ToolSplit): PEdge => ({
+      id: `x:${e.name}|${d.id}`,
+      source: gw!,
+      target: d.id,
+      direction: "egress",
+      verdict: mode === "ENFORCE" ? "blocked" : mode === "DRY_RUN" ? "would_deny" : "unchecked",
+      reasons: [],
+      implicit: true,
+      caller: e.name,
+      ...(tools ? { tools } : {}),
+      ...gwMeta(gw),
+    });
     let own = 0;
     let inh = 0;
     let denied = 0;
     for (const d of dests) {
       if (d.node.unreadable) continue;
-      const line = pairFor(e, d, withInherited);
-      // the summary always counts inherited reach, whatever the lines show
+      let line = pairFor(e, d, withInherited);
+      // every grant that applies, inherited ones included: what decides default deny, whatever the lines show
       const full = withInherited ? line : pairFor(e, d, true);
-      if (full?.inherited) inh++;
+      // the registry node isn't a destination: its lines are drawn, but it's never denied nor counted
+      const registry = d.kind === "registry";
+      if (full?.inherited && !registry) inh++;
       // no default-deny line to the agent's own registry entry (it doesn't call itself through the gateway)
       const self = d.node.sameAs === e.name;
-      if (!full && gw && !self) denied++;
+      if (!full && gw && !self && !registry) denied++;
+      // Inherited grants off, MCP: tools only an inherited grant allows aren't denied. On the agent's own line they're
+      // set aside; with no own grant, only the tools no grant allows are left, as a default-deny line.
+      let rest: ToolSplit | undefined;
+      if (!withInherited && full?.tools && gw) {
+        const fd = new Set(full.tools.denied);
+        if (line?.tools) {
+          const set = line.tools.denied.filter((t) => !fd.has(t));
+          if (set.length) line = { ...line, tools: { ...line.tools, denied: line.tools.denied.filter((t) => fd.has(t)), inherited: set } };
+        } else if (!line && fd.size && !self) {
+          const names = Object.keys(d.tools ?? {});
+          rest = { allowed: [], denied: names.filter((t) => fd.has(t)), unknown: [], inherited: names.filter((t) => !fd.has(t)) };
+        }
+      }
       if (line) {
         edges.push(line);
-        if (!line.inherited) own++;
-      } else if (gw && !self)
-        edges.push({ id: `x:${e.name}|${d.id}`, source: gw, target: d.id, direction: "egress", verdict: mode === "ENFORCE" ? "blocked" : mode === "DRY_RUN" ? "would_deny" : "unchecked", reasons: [], implicit: true, caller: e.name, ...gwMeta(gw) });
+        if (!line.inherited && !registry) own++;
+      } else if (rest) edges.push({ ...deny(d, rest), label: `${rest.denied.length}/${rest.denied.length + rest.inherited!.length} tools denied` });
+      // default deny only when no grant applies at all (an inherited-only destination, Inherited off: no line)
+      else if (!full && gw && !self && !registry) edges.push(deny(d));
     }
     n.inheritedCount = inh;
     n.deniedCount = gw ? denied : 0;

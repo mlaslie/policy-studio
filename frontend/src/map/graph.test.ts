@@ -164,8 +164,17 @@ describe("each agent's inherited and default-deny lines", () => {
     expect(ls.filter((l) => l.implicit)).toEqual([]);
   });
 
-  it("with inherited grants off, only the agent's own grants count", () => {
-    expect(line(lines(w0, { inherited: false }), hd.name, dest("Calendar Agent").name)).toMatchObject({ verdict: "would_deny", implicit: true });
+  it("with inherited grants off, only the agent's own grants are drawn; what an inherited grant reaches isn't denied", () => {
+    const ls = lines(w0, { inherited: false });
+    // Calendar Agent: allAuthenticatedUsers; Vertex AI API: principalSet. Reached, so no line at all (not a deny)
+    expect(line(ls, hd.name, dest("Calendar Agent").name)).toBeUndefined();
+    expect(line(ls, hd.name, dest("Vertex AI API").name)).toBeUndefined();
+    expect(line(ls, hd.name, dest("Knowledge Base Agent").name)).toMatchObject({ verdict: "allowed", inherited: false });
+    // no grant at all: still denied by default
+    expect(line(ls, hd.name, dest("HR Directory MCP").name)).toMatchObject({ verdict: "would_deny", implicit: true });
+    // the same default-deny lines either way
+    const deny = (xs: PEdge[]) => xs.filter((l) => l.caller === hd.name && l.implicit).map((l) => l.target).sort();
+    expect(deny(ls)).toEqual(deny(lines(w0)));
   });
 
   it("an agent with no gateway: dormant lines, no implicit denies", () => {
@@ -530,8 +539,10 @@ describe("layout (§7)", () => {
 
   it("doesn't move nodes when an agent is selected (its default-deny lines can bring grouped destinations out)", () => {
     const g = buildPolicyGraph(input(w0));
-    const none = layoutView(viewOf(g, filters(), [])).pos;
-    const sel = layoutView(viewOf(g, filters({ denies: false }), [eng("HR Assistant").name])).pos;
+    // the Agent Registry node is shown for a selected agent only when a registry-wide grant applies to it (none does
+    // here), so it's left out of both views
+    const none = layoutView(viewOf(g, filters({ off: [REG] }), [])).pos;
+    const sel = layoutView(viewOf(g, filters({ denies: false, off: [REG] }), [eng("HR Assistant").name])).pos;
     expect(sel[eng("Helpdesk Agent").name]).toEqual(none[eng("Helpdesk Agent").name]);
     expect(sel[dest("Tickets MCP").name]).toEqual(none[dest("Tickets MCP").name]);
   });

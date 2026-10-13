@@ -25,9 +25,15 @@ export type Affiliation = "all" | "gateway" | "none";
 /** The toolbar's destination type checkboxes, one per picker group (the toolbar's APIs box is "api" and "google"). */
 export type DestType = "a2a" | "runtime" | "mcp" | "api" | "google";
 export const DEST_TYPES: readonly DestType[] = ["a2a", "runtime", "mcp", "api", "google"];
-/** A destination's type (Agent-to-Anywhere), or null (registry entries, callers, gateways: no type filter). */
-export function destType(n: Pick<PNode, "kind" | "googleApi">): DestType | null {
+/** A destination's type (Agent-to-Anywhere), or null (the registry node, callers, gateways: no type filter of their
+ *  own). Group nodes take the type of what they hold: the Google APIs group is "google", a "no grants" group its
+ *  section's type. The Agent Registry node (registry-wide grants) is on while any destination type is (registryShown). */
+export function destType(n: Pick<PNode, "kind" | "googleApi"> & { section?: string }): DestType | null {
   switch (n.kind) {
+    case "google_apis":
+      return "google";
+    case "endpoint_group":
+      return n.section === "a2a" || n.section === "runtime" || n.section === "mcp" || n.section === "api" ? n.section : null;
     case "a2a":
       return "a2a";
     case "runtime_dest":
@@ -40,6 +46,12 @@ export function destType(n: Pick<PNode, "kind" | "googleApi">): DestType | null 
       return null;
   }
 }
+/** The Agent Registry node stands for registry-wide grants, which reach every destination type: it follows the type
+ *  filter as "on while any destination type is on" (every type unchecked hides it). */
+export const registryShown = (typesOff: Iterable<DestType>) => {
+  const off = new Set(typesOff);
+  return DEST_TYPES.some((t) => !off.has(t));
+};
 export interface MapFilters {
   /** "all" or one gateway's full name. */
   gateway: string;
@@ -129,22 +141,31 @@ const denyVerdict = (mode: PEdge["mode"]): Verdict => (mode === "ENFORCE" ? "blo
  *  with a tool breakdown is split per tool: the tools that pass (allowed under Allows, denied under Denies, "?" under
  *  either) are its `shownTools`; with only some of them left, it's drawn as what's left (a deny line, an allowed line,
  *  or "?"), with `whole` its verdict over every tool and `hiddenTools` what it leaves out. Both on: unchanged (one
- *  partial line, every tool marked). Any other line passes or not as a whole (keepLine). */
+ *  partial line, every tool marked). Tools set aside as allowed only through an inherited grant (Inherited grants off,
+ *  graph.ts) are never shown: neither allowed nor denied. A default-deny line with a tool breakdown (an MCP server only
+ *  inherited grants reach, Inherited off) shows its denied tools under Denies. Any other line passes or not as a whole
+ *  (keepLine). */
 export function lineUnder(e: PEdge, f: Pick<MapFilters, "allows" | "denies" | "hidden">): PEdge | null {
   const t = e.tools;
-  if (!t || e.implicit || !e.gateway || e.direction !== "egress" || isLane(e)) return keepLine(e, f) ? e : null;
+  if (!t || !e.gateway || e.direction !== "egress" || isLane(e)) return keepLine(e, f) ? e : null;
+  if (e.implicit && !f.denies) return null;
   const allowed = f.allows ? t.allowed : [];
   const denied = f.denies ? t.denied : [];
   const unknown = f.allows || f.denies ? t.unknown : [];
+  const inherited = t.inherited?.length ?? 0;
   const shownTools = [...allowed, ...denied, ...unknown];
   if (!shownTools.length) return null;
-  const hiddenTools = { allowed: t.allowed.length - allowed.length, denied: t.denied.length - denied.length };
+  const hiddenTools = { allowed: t.allowed.length - allowed.length, denied: t.denied.length - denied.length, ...(inherited ? { inherited } : {}) };
   let out: PEdge = { ...e, shownTools };
-  if (hiddenTools.allowed || hiddenTools.denied) {
-    const all = t.allowed.length + t.denied.length + t.unknown.length;
-    const verdict: Verdict = denied.length ? denyVerdict(e.mode) : allowed.length ? "allowed" : "conditional";
-    const label = denied.length ? `${denied.length}/${all} tools denied` : allowed.length ? (e.label === "read-only" ? "read-only" : `${allowed.length}/${all} tools`) : "?";
-    out = { ...out, verdict, label, hiddenTools, whole: e.verdict };
+  if (hiddenTools.allowed || hiddenTools.denied || inherited) {
+    const all = t.allowed.length + t.denied.length + t.unknown.length + inherited;
+    // both allowed and denied tools left: still one partial line
+    const both = allowed.length && denied.length;
+    const verdict: Verdict = both ? e.verdict : denied.length ? denyVerdict(e.mode) : allowed.length ? "allowed" : "conditional";
+    const label = both
+      ? e.label === "read-only" ? "read-only" : `${allowed.length}/${all} tools`
+      : denied.length ? `${denied.length}/${all} tools denied` : allowed.length ? (e.label === "read-only" ? "read-only" : `${allowed.length}/${all} tools`) : "?";
+    out = { ...out, verdict, label, hiddenTools, ...(e.implicit ? {} : { whole: e.verdict }) };
   }
   return f.hidden.includes(out.verdict) ? null : out;
 }
@@ -175,7 +196,7 @@ export function viewOf(g: PolicyGraph, f: MapFilters, agents: string[], opts: { 
       if (f.gateway === "all" || n.id === f.gateway) shown.add(n.id);
     } else if (n.column === "dests") {
       const t = destType(n);
-      if (!t || !typesOff.has(t)) shown.add(n.id);
+      if (n.kind === "registry" ? registryShown(typesOff) : !t || !typesOff.has(t)) shown.add(n.id);
     }
   }
   // An agent checked by hand against the gateway filter brings its own gateway (unless that's unchecked by hand):
@@ -216,7 +237,7 @@ export function viewOf(g: PolicyGraph, f: MapFilters, agents: string[], opts: { 
   const gNode: PNode | null = gIds.size ? googleGroupNode(g.nodes.filter((n) => gIds.has(n.id))) : null;
   const rawEdges = edges;
   if (gNode) edges = mergeIntoGroup(edges, gIds, gNode.id);
-  const layoutEdges = opts.changesOnly ? edges : gNode ? mergeIntoGroup(base, gIds, gNode.id) : base;
+  let layoutEdges = opts.changesOnly ? edges : gNode ? mergeIntoGroup(base, gIds, gNode.id) : base;
 
   // Default-deny lines: at most DENY_CAP per agent, in destination order.
   let more = 0;
@@ -244,7 +265,14 @@ export function viewOf(g: PolicyGraph, f: MapFilters, agents: string[], opts: { 
     // endpoints" is on (they'd otherwise just move from the Google APIs group into "+N … with no grants").
     const keep = forced.has(n.id) || n.id === active || (f.googleApis && n.kind === "endpoint" && !!n.googleApi);
     const empty = g.direction === "egress" && n.column === "dests" && !granted.has(n.id) && !into.has(n.id) && !n.unreadable && !keep;
-    if (empty && n.kind === "registry") continue; // no registry-wide grants: nothing to show
+    // The Agent Registry node (registry-wide grants, not a destination: never a default-deny line, graph.ts) is shown
+    // only for a registry-wide grant that matters here: with callers selected, one of their drawn lines goes into it
+    // (a grant that applies to them, under Inherited grants for an inherited one and Allows); with none, some shown
+    // caller holds one.
+    if (n.kind === "registry" && !keep && !n.unreadable && !(sel.length ? into.has(n.id) : granted.has(n.id) || into.has(n.id))) {
+      layoutEdges = layoutEdges.filter((e) => e.target !== n.id);
+      continue;
+    }
     if (empty && opts.changesOnly) continue;
     if (empty && f.hideEmpty && !f.expanded.includes(n.section)) {
       groups.set(n.section, [...(groups.get(n.section) ?? []), n]);

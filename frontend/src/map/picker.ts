@@ -17,7 +17,7 @@
 // edits a draft: Apply commits it, Cancel and Esc drop it; a change made elsewhere while it's open (a canvas click,
 // auto-select) is merged into it row by row (rebaseDraft), keeping the rows the person already changed.
 import type { Direction, PNode, PolicyGraph } from "./graph";
-import { DEFAULT_FILTERS, DEST_TYPES, destType, isSource, viewOf, type Affiliation, type DestType, type MapFilters, type MapView } from "./view";
+import { DEFAULT_FILTERS, DEST_TYPES, destType, isSource, registryShown, viewOf, type Affiliation, type DestType, type MapFilters, type MapView } from "./view";
 import type { MapFocus } from "./focus";
 import type { PinStore } from "./usePositions";
 
@@ -168,7 +168,7 @@ function reasonIn(env: PickerEnv, d: PickerState, n: PNode, aff: Affiliation | n
     return "unchecked";
   }
   const t = env.graph.direction === "egress" ? destType(n) : null;
-  if (t && d.typesOff.includes(t) && !d.forced.includes(n.id)) return "type";
+  if (((t && d.typesOff.includes(t)) || (n.kind === "registry" && env.graph.direction === "egress" && !registryShown(d.typesOff))) && !d.forced.includes(n.id)) return "type";
   if (f.gateway !== "all" && !d.forced.includes(n.id) && ((n.kind === "engine" && isSource(n, env.graph.direction) && n.gateway !== f.gateway) || (n.kind === "gateway" && n.id !== f.gateway))) return "otherGateway";
   const grp = groupedIn.get(n.id);
   if (grp) return grp === "google_apis" ? "google" : "noGrants";
@@ -214,6 +214,11 @@ export function pickerStatus(env: PickerEnv, d: PickerState, view?: MapView): St
 
 /** "N of M": the rows on the map. */
 export const countOn = (s: Statuses, items: PickItem[]) => items.filter((i) => s.get(i.id)?.on).length;
+
+/** Unchecked rows that are on the map inside a group node (the collapsed Google APIs node, a "no grants" group). */
+const inGroup = (r: RowStatus | undefined) => r?.hidden === "google" || r?.hidden === "noGrants";
+/** "N in a group": rows unchecked only because a group node on the map holds them. */
+export const countGrouped = (s: Statuses, items: PickItem[]) => items.filter((i) => inGroup(s.get(i.id))).length;
 
 /** "all" / "some" / "none" of these rows checked (a group checkbox's state). */
 export function checkState(s: Statuses, items: PickItem[]): "all" | "some" | "none" {
@@ -273,14 +278,19 @@ export function setTypes(env: PickerEnv, d: PickerState, types: DestType[], on: 
   const forced = d.forced.filter((x) => !ids.has(x));
   if (!on) return { ...d, typesOff: uniq([...d.typesOff, ...types]), forced };
   const next = { ...d, typesOff: d.typesOff.filter((t) => !types.includes(t)), off: d.off.filter((x) => !ids.has(x)), forced };
-  return rows.length && checkState(pickerStatus(env, next), rows) === "none" ? checkRows(env, next, rows) : next;
+  return rows.length && typeState(pickerStatus(env, next), rows, types, next) === "none" ? checkRows(env, next, rows) : next;
 }
 
-/** A type box's state: its rows' checks; with no rows of that type, its filter. */
+/** A type box's state (the toolbar's, and the picker's group checkbox of that type): "all" when every row is on the
+ *  map as itself, "none" when none of the type is on the map at all, "some" otherwise. Rows held by a group node on the
+ *  map (the collapsed Google APIs node, a "no grants" group) count as on the map, not as itself: a type shown only as
+ *  groups reads "some", never "none", so the box never reads unchecked while the type's groups are drawn, and a click
+ *  hides them. With no rows of that type, its filter. */
 export function typeState(s: Statuses, items: PickItem[], types: DestType[], d: PickerState): "all" | "some" | "none" {
   const rows = items.filter((i) => (types as string[]).includes(i.group));
-  if (rows.length) return checkState(s, rows);
-  return types.every((t) => d.typesOff.includes(t)) ? "none" : "all";
+  if (!rows.length) return types.every((t) => d.typesOff.includes(t)) ? "none" : "all";
+  const st = checkState(s, rows);
+  return st === "none" && rows.some((i) => inGroup(s.get(i.id))) ? "some" : st;
 }
 
 /** Clicking a type box: unchecked shows the type, checked or partly checked hides it. */

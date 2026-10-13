@@ -690,7 +690,7 @@ function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
                         st === "all"
                           ? `On the map. Click to hide them (the picker's group unchecks too).`
                           : st === "some"
-                            ? `Some are hidden by another filter or by hand (the picker says why). Click to hide them all.`
+                            ? `Some are only in a group (Google APIs, no grants), hidden by another filter or by hand (the picker says why). Click to hide them all.`
                             : b.types.every((t) => pk.typesOff.includes(t))
                               ? `Hidden by this type filter. Click to show them again.`
                               : `None is on the map: another filter hides them (the picker says why). Click to show them anyway.`
