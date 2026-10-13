@@ -19,6 +19,11 @@ what the generated commands do:
 
 Events: {intent_id, state: running|done|verified|failed|skipped, detail, operation?, undo?}, then
 {type: "done", summary}. Final results are appended to the apply log (settings.apply_log_path()).
+
+Stored isn't in effect: a "verified" event also carries the expected time until the gateway enforces the
+change (timing.py), as effect ("Stored. Takes effect ..."), effect_after_s, effect_max_s and effect_measured
+(seconds after the event). The log's done entry adds ready_after_s and ready_max_s: the largest of those among the
+verified items.
 """
 from __future__ import annotations
 
@@ -32,14 +37,14 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Iterator, Optional
 
-from . import settings
+from . import settings, timing
 from .conditions import exact_access, same_condition
 from .gcp.engines import gateways_of, tail
 from .gcp import model_armor as ma_mod
 from .preflight import blockers, duplicates, friendly
 from .gcp.rest import CRM, IAP, NETWORKSECURITY, NETWORKSERVICES, GcpError, aiplatform, err_text
 from .model import Access, Context, GatewayRef, Intent, SetupParams
-from .render import (PLACEHOLDER_EXT, ENF_LEARN, MODE_LABEL, RenderEnv, bind_spec, ded_ext_url, ded_policy_url,
+from .render import (PLACEHOLDER_EXT, MODE_LABEL, RenderEnv, bind_spec, ded_ext_url, ded_policy_url,
                      ded_spec, enf_spec, engine_body, engine_full, engine_url, ext_copy, ext_mode, ext_spec, ext_url,
                      iam_spec, ma_body, ma_spec, ma_template_url, ma_url, mode_metadata, proj_iam_spec, provider_body,
                      short, template_spec)
@@ -219,6 +224,10 @@ class Applier:
                 extra["raw_error"], detail = detail, nice
         ev: dict[str, Any] = {"intent_id": intent_id, "state": state, "detail": detail}
         ev.update({k: v for k, v in extra.items() if v is not None})
+        it = self._intents.get(intent_id)
+        if state == "verified" and it is not None:
+            # Stored isn't in effect yet: say how long the gateway takes to enforce it.
+            ev.update({"effect": timing.stored_detail(it.kind), **timing.effect_fields(it.kind)})
         if isinstance(ev.get("undo"), Intent):
             ev["undo"] = ev["undo"].model_dump(exclude_none=True)
         if state in FINAL and not extra.get("progress"):
@@ -300,7 +309,8 @@ class Applier:
             summary = {"total": len(intents) + len(invalid), **counts}
             if blocked:
                 summary["blocked"] = len(blocked)
-            self._log({"intent_id": "", "type": "done", "summary": summary})
+            stored = [self._intents[i].kind for i, s in self.final.items() if s == "verified" and i in self._intents]
+            self._log({"intent_id": "", "type": "done", "summary": summary, **timing.ready_fields(stored)})
             self.q.put({"type": "done", "summary": summary})
         finally:
             if self.on_finish:
@@ -466,7 +476,8 @@ class Applier:
                                          "gateway": GatewayRef(name=prev or sp.gateway, direction=sp.direction)})
         self.emit(it.id, "running", f"PATCH {short(engine)} agentGatewayConfig (keeps the other direction)")
         op = self.writer.patch_engine(engine_url(env, engine), engine_body(sp.new)) or {}
-        self.emit(it.id, "done", "Engine update started; it redeploys (several minutes)", operation=op.get("name"),
+        self.emit(it.id, "done", "Engine update started; the agent redeploys (about 5 minutes). Traffic switches "
+                  "when it finishes; calls in flight can fail during the switch", operation=op.get("name"),
                   undo=undo)
         self._background(engine, self._finish_bind, it.id, op, region, engine, sp.new, undo)
 
@@ -481,7 +492,7 @@ class Applier:
             return self.emit(intent_id, "failed", msg, operation=name or None, undo=undo)
         got = gateways_of(self.rest.get(f"{aiplatform(region)}/{engine}") or {})
         if {d: tail(g) for d, g in got.items()} == {d: tail(g) for d, g in want.items()}:
-            self.emit(intent_id, "verified", "Read back: agentGatewayConfig is " + (
+            self.emit(intent_id, "verified", "Read back: the redeploy finished and agentGatewayConfig is " + (
                 ", ".join(f"{d} → {short(g)}" for d, g in sorted(got.items())) or "empty"),
                 operation=name or None, undo=undo)
         else:
@@ -751,7 +762,7 @@ class Applier:
         if ext_mode(back) == mode and bool(back.get("failOpen")) == fail_open:
             extra = "" if undo else f". Undo: revert giving the gateway its own extension (deletes {ext_id})"
             return self.emit(intent_id, "verified", f"Read back: {ext_id} is in {MODE_LABEL[mode].lower()} (failOpen "
-                             f"{str(fail_open).lower()}); {ENF_LEARN}{extra}", operation=name, undo=undo)
+                             f"{str(fail_open).lower()}){extra}", operation=name, undo=undo)
         self.emit(intent_id, "failed", f"Read back: {ext_id} is in {MODE_LABEL.get(ext_mode(back) or '', '?')} "
                   f"(failOpen {str(bool(back.get('failOpen'))).lower()}), expected {MODE_LABEL[mode].lower()}",
                   operation=name, undo=undo)

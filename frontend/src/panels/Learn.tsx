@@ -79,7 +79,7 @@ const LESSONS: Record<StepKey, { title: string; body: ReactNode; flow: ReactNode
         </p>
         <p>
           <b>Shared extensions.</b> Several gateways can use the same extension, and then they switch together. To change one gateway only, give it <b>its own extension</b> (a copy) first; Policy Studio stages both steps. A change
-          takes effect in about 2–3 minutes (measured), sometimes before the operation reports done.
+          takes effect about 2–3 minutes after Apply (measured), sometimes before the operation reports done.
         </p>
       </>
     ),

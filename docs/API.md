@@ -143,8 +143,8 @@ Intent = { id, kind: "grant"|"revoke"|"modify"|"bind_gateway"|"unbind_gateway"|"
   //   verified: gcloud authz-policies import updating the existing policy in place. The UI stages it with a
   //   set_enforcement of the copy (extension = the copy's name, scope "dedicated"); render folds that into the copy's
   //   Terraform resource. revert is destructive (deletes the copy; kept if another policy still uses it).
-  // A mode change takes effect in about 2–3 minutes (measured), and can take effect before the operation reports
-  // done.
+  // A mode change takes effect about 2–3 minutes after Apply (measured), and can take effect before the operation
+  // reports done.
 SetupParams = { project? /* default: the gateway project */, delete?: boolean /* the inverse (undo) */,
   // model_armor_template
   template_id?, block_message?, inspect_template? /* sdp "advanced" */,
@@ -334,14 +334,16 @@ Available only when `can_apply`; otherwise it returns 403 with the reason.
 
 `confirm.project` must equal `context.project`. Revokes, unbinds, `model_armor_off`, setup deletes (`params.delete`), `set_enforcement` to `DRY_RUN` and `dedicate_extension` with `revert` need `acknowledge_destructive: true`.
 
-The response streams NDJSON or SSE events per intent: `{intent_id, state: "running"|"done"|"verified"|"failed"|"skipped", detail, operation?, undo?: Intent, raw_error?, blocked?, fix?}`, then `{type: "done", summary}` (`summary.blocked` counts preflight refusals).
+The response streams NDJSON or SSE events per intent: `{intent_id, state: "running"|"done"|"verified"|"failed"|"skipped", detail, operation?, undo?: Intent, raw_error?, blocked?, fix?, effect?, effect_after_s?, effect_max_s?, effect_measured?}`, then `{type: "done", summary}` (`summary.blocked` counts preflight refusals).
+
+Verified means stored, not in effect. A `verified` event also says how long the gateway takes to enforce the change (`backend/policy_studio/timing.py`, the same table as `frontend/src/lib/timing.ts`): `effect` ("Stored. Takes effect in a few minutes (up to about 7)."), `effect_after_s` and `effect_max_s` (typical and max seconds after the event) and `effect_measured`. Grants, revokes, modify and service agent roles: 120 / 420 (Google's documented IAM range). Bind / unbind: 60 / 120 after the redeploy (about 5 minutes, which Apply waits for). `set_enforcement`: 120 / 180 (measured: 2m40s, 2m08s, 2m19s after Apply). `dedicate_extension`: 150 / 180. Model Armor on / off and setup: 180 / 300 (not measured). The apply log records the same fields per item, and the done entry adds `ready_after_s` / `ready_max_s`: the largest typical and the largest max among the verified items. Generated bundles and items end with a comment saying how long their changes take.
 
 Before any call, duplicates are `skipped` and the `/preflight` blockers `failed` with `blocked: true`. Known Google Cloud errors get a plain-English `detail` (e.g. the AGENT_IDENTITY 400 on a bind) with the original in `raw_error`.
 
 Each intent is applied, then read back and verified:
 - **IAP grant/revoke:** getIamPolicy → modify → setIamPolicy with the etag, version 3, and the condition preserved; read back and confirm the binding is there (or gone).
 - **modify:** one getIamPolicy → remove the member from the binding matching `access_from` exactly (by expression, whitespace-insensitive) → add the binding for `access` (unless it's already there) → one setIamPolicy with the etag (version 3, other bindings untouched; an etag conflict retries from a fresh read) → read back: the new binding is there and the old one is gone. `access_from` not found: `failed` ("The grant changed since you looked"), or `skipped` when the new binding is already there. Undo: the reverse modify (`access_from` = the new condition verbatim, `access` = the removed one verbatim). Several bindings (`access_from_list` / `access_list`): the same single read-modify-write removing every listed binding and adding the new one(s); any one missing → `failed`; read back: every new binding there and every replaced one gone; undo = `access_from_list` [the new binding(s)] → `access_list` [every removed binding verbatim]. The remove-all form (`access_list: []`) is destructive (acknowledge_destructive).
-- **bind/unbind gateway:** an engine PATCH that keeps the other direction, one PATCH per engine at a time. It's a long-running operation; the result reports the operation, and a later read-back confirms `agentGatewayConfig`.
+- **bind/unbind gateway:** an engine PATCH that keeps the other direction, one PATCH per engine at a time. It's a long-running operation (the agent redeploys, about 5 minutes): the `done` event reports the operation and the stream polls it; the `verified` read-back of `agentGatewayConfig` comes after the redeploy finishes. Traffic switches only then, and calls in flight during the switch can fail.
 - **model_armor_on/off:** create or delete the `CONTENT_AUTHZ` authz policy (long-running operation, about 4 min).
 - **model_armor_template:** create (or delete) the template on `modelarmor.<R>.rep.googleapis.com`; read back.
 - **model_armor_extension:** create (or delete) the authz extension (long-running; waited for, so a `model_armor_on` in the same request can use it); read back that it names the template.

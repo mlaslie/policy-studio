@@ -27,6 +27,7 @@ import { evaluateTools } from "./evaluate";
 import { PENDING_WORD, VERDICT_LABEL, VIA_LABEL, lineFrom } from "./toFlow";
 import { pendingText } from "./diff";
 import { allowFor, bindFor, ingressInfo, isGroupGrant, limitToAgent, modifyFor, reachedBy, reasonGrant, revokeFor, sameAccess } from "./actions";
+import { stageTip } from "../lib/timing";
 
 type Props = {
   edge: PEdge | null;
@@ -320,13 +321,13 @@ function IngressDetails({ edge, inv, gateways }: { edge: PEdge; inv: Inventory; 
               <ClockIcon size={11} /> {maStaged.kind === "model_armor_on" ? "Model Armor on staged" : "Model Armor off staged"}
             </Badge>
           ) : maAction.kind === "off" ? (
-            <Tip tip={`Stage turning off Model Armor on ${gw.id} (removes its content-screening policy): prompts reach its agents unscreened. Apply asks you to confirm it. Nothing changes until you Review and Apply.`}>
+            <Tip tip={`Stage turning off Model Armor on ${gw.id} (removes its content-screening policy): prompts reach its agents unscreened. Apply asks you to confirm it. Nothing changes until you Review and Apply. ${stageTip("model_armor_off")}`}>
               <button type="button" className="btn btn-small btn-danger" onClick={() => addIntents([maAction.intent])}>
                 Turn Model Armor off
               </button>
             </Tip>
           ) : maAction.kind === "on" ? (
-            <Tip tip={`Stage turning on Model Armor for ${gw.id} (attaches a content-screening policy). Nothing changes until you Review and Apply.`}>
+            <Tip tip={`Stage turning on Model Armor for ${gw.id} (attaches a content-screening policy). Nothing changes until you Review and Apply. ${stageTip("model_armor_on")}`}>
               <button type="button" className="btn btn-small btn-primary" onClick={() => addIntents([maAction.intent])}>
                 Turn Model Armor on
               </button>
@@ -355,7 +356,7 @@ function IngressDetails({ edge, inv, gateways }: { edge: PEdge; inv: Inventory; 
                     <ClockIcon size={11} /> Unbind staged
                   </Badge>
                 ) : (
-                  <Tip tip={`Stage unbinding ${engine.display_name} from ${gw!.id}: calls then reach it directly, unscreened. The agent redeploys when it's applied, and Apply asks you to confirm it.`}>
+                  <Tip tip={`Stage unbinding ${engine.display_name} from ${gw!.id}: calls then reach it directly, unscreened. Apply asks you to confirm it. ${stageTip("unbind_gateway")}`}>
                     <button type="button" className="btn btn-small btn-danger" onClick={() => addIntents([unbind])}>
                       Unbind
                     </button>
@@ -412,7 +413,7 @@ function IngressBind({ engine, why, ingress, prefer, staged }: { engine: Engine;
               ))}
             </select>
           )}
-          <Tip tip={why ?? `Stage binding ${engine.display_name} to ${target?.id}: calls to it then go through the gateway. The agent redeploys when it's applied.`}>
+          <Tip tip={why ?? `Stage binding ${engine.display_name} to ${target?.id}: calls to it then go through the gateway. ${stageTip("bind_gateway")}`}>
             <button type="button" className="btn btn-small btn-primary" disabled={!!why || !target} onClick={() => addIntents([bindFor(engine, target!, "ingress")])}>
               Bind{ingress.length > 1 ? "" : ` to ${target?.id ?? "a gateway"}`}
             </button>
@@ -740,7 +741,7 @@ function BindBox({ engine, gateways }: { engine: Engine; gateways: Gateway[] }) 
                 ))}
               </select>
             )}
-            <Tip tip={why ?? `Stage binding ${engine.display_name} to ${target!.id}. The agent redeploys when it's applied.`}>
+            <Tip tip={why ?? `Stage binding ${engine.display_name} to ${target!.id}. ${stageTip("bind_gateway")}`}>
               <button type="button" className="btn btn-small btn-primary" disabled={!!why} onClick={() => addIntents([bindFor(engine, target!)])}>
                 Bind to {target?.id ?? "an egress gateway"}
               </button>

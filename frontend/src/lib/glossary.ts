@@ -5,7 +5,7 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
   "dry-run": {
     term: "Enforce vs dry run",
     short: "Enforce blocks calls without a grant; dry run lets every call through (for testing grants).",
-    long: "A gateway's IAP check (its REQUEST_AUTHZ policy) calls an IAP authz extension, and the mode lives on that extension, not on the gateway. Enforce: failOpen false and no iamEnforcementMode, so calls without a roles/iap.egressor grant get a 403. Dry run: metadata iamEnforcementMode DRY_RUN (and failOpen true): every call goes through, and the request log shows the ones IAP would deny as allowed (Policy Studio computes them from the grants). One extension can serve several gateways; changing it changes all of them, so Policy Studio can give a gateway its own copy first. A change takes effect in about 2–3 minutes (measured), sometimes before the operation reports done.",
+    long: "A gateway's IAP check (its REQUEST_AUTHZ policy) calls an IAP authz extension, and the mode lives on that extension, not on the gateway. Enforce: failOpen false and no iamEnforcementMode, so calls without a roles/iap.egressor grant get a 403. Dry run: metadata iamEnforcementMode DRY_RUN (and failOpen true): every call goes through, and the request log shows the ones IAP would deny as allowed (Policy Studio computes them from the grants). One extension can serve several gateways; changing it changes all of them, so Policy Studio can give a gateway its own copy first. A change takes effect about 2–3 minutes after Apply (measured), sometimes before the operation reports done.",
   },
   "agent-gateway": {
     term: "Agent Gateway",

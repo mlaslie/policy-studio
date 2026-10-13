@@ -526,3 +526,30 @@ def test_invalid_intent_fails_alone_in_apply(client, gcp, adc):
     assert f["bad"]["state"] == "failed" and "invalid intent" in f["bad"]["detail"]
     assert f["g1"]["state"] == "verified"
     assert ev[-1]["summary"] == {"total": 2, "failed": 1, "verified": 1}
+
+
+# ====================================================================== how long until it takes effect
+def test_verified_events_and_log_carry_effect_timing(client, gcp, adc, tmp_path):
+    ev = run(client, [grant_intent(),
+                      grant_intent(iid="g2", principal=F.principal("111")),                  # already there: skipped
+                      {"id": "b1", "kind": "bind_gateway", "engine": F.E2,
+                       "gateway": {"name": F.EG, "direction": "egress"}}])
+    f = final(ev)
+    g, b, skipped = f["g1"], f["b1"], f["g2"]
+    assert g["state"] == "verified" and b["state"] == "verified" and skipped["state"] == "skipped"
+    # stored isn't in effect: the verified event says how long the gateway takes
+    assert g["effect"] == "Stored. Takes effect in a few minutes (up to about 7)."
+    assert (g["effect_after_s"], g["effect_max_s"], g["effect_measured"]) == (120, 420, False)
+    assert b["effect"] == "Stored. Takes effect within about a minute of the redeploy finishing (not measured)."
+    assert (b["effect_after_s"], b["effect_max_s"]) == (60, 120)
+    assert "about 5 minutes" in next(e["detail"] for e in ev if e.get("intent_id") == "b1" and e["state"] == "done"
+                                     and not e.get("progress"))
+    assert not any("effect_after_s" in e for e in ev if e.get("state") != "verified")      # only once stored
+    log = [json.loads(x) for x in (tmp_path / "apply-log.jsonl").read_text().splitlines()]
+    verified = {x["intent_id"]: x for x in log if x.get("state") == "verified"}
+    assert (verified["g1"]["effect_after_s"], verified["g1"]["effect_max_s"]) == (120, 420)
+    assert (verified["b1"]["effect_after_s"], verified["b1"]["effect_max_s"]) == (60, 120)
+    assert not any("effect_after_s" in x for x in log if x.get("state") == "skipped")
+    done = log[-1]
+    # the largest typical and the largest max among the verified items
+    assert done["type"] == "done" and (done["ready_after_s"], done["ready_max_s"]) == (120, 420)

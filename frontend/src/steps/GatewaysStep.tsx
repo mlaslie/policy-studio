@@ -13,6 +13,7 @@ import { useApplyGate } from "../components/Mode";
 import { fmtDate, plural } from "../lib/util";
 import { ShowOnMap } from "../components/ShowOnMap";
 import { focusForGateway } from "../map/focus";
+import { TIMING, effectText, stageTip } from "../lib/timing";
 
 export function ProviderChip({ p }: { p: Gateway["authz_policies"][number] }) {
   const label = p.provider === "iap" ? "IAP" : p.provider === "model_armor" ? "Model Armor" : "Other";
@@ -56,7 +57,7 @@ function BindPicker({ gw, onDone }: { gw: Gateway; onDone: () => void }) {
             </option>
           ))}
         </select>
-        <Tip tip={chosen ? `Stage binding ${chosen.display_name} to ${gw.id} in the cart. Nothing changes in Google Cloud until you apply.` : "Choose an agent first."}>
+        <Tip tip={chosen ? `Stage binding ${chosen.display_name} to ${gw.id} in the cart. Nothing changes in Google Cloud until you apply. ${stageTip("bind_gateway")}` : "Choose an agent first."}>
           <button
             className="btn btn-primary"
             disabled={!chosen}
@@ -98,7 +99,7 @@ function BindPicker({ gw, onDone }: { gw: Gateway; onDone: () => void }) {
 
 const EXT_NAME_RE = /^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$/;
 const MODE_TEXT: Record<EnforcementMode, string> = { ENFORCE: "Enforce", DRY_RUN: "Dry run" };
-const PROPAGATION = "Takes effect in about 2–3 minutes (measured), sometimes before the operation reports done.";
+const PROPAGATION = `Takes effect ${effectText("set_enforcement")}, sometimes before the operation reports done.`;
 
 const extFull = (source: string, name: string) => source.replace(/\/authzExtensions\/[^/]+$/, `/authzExtensions/${name}`);
 const listText = (xs: string[]) => (xs.length <= 1 ? xs.join("") : `${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`);
@@ -198,6 +199,7 @@ function EnforcementChange({ gw, enf, target, onDone }: { gw: Gateway; enf: Gate
       )}
       <p className="tiny muted">
         <ClockIcon size={11} /> {PROPAGATION}
+        {choice === "own" && shared.length > 0 && ` With its own extension, the policy update comes first (about 20 s); then ${TIMING.dedicate_extension.after}.`}
       </p>
       <div className="row">
         <Tip tip={`Add ${preview.length === 1 ? "this change" : "these 2 steps"} to the cart. Nothing changes in Google Cloud until you apply.${nameErr ? ` Unavailable: ${nameErr}` : ""}`}>
@@ -428,7 +430,7 @@ function Enforcement({ gw }: { gw: Gateway }) {
       <div className="enf-row">
         <div className={`seg enf-seg ${disabledWhy ? "enf-seg-off" : ""}`} role="radiogroup" aria-label={`Enforcement mode of ${gw.id}`}>
           {(["ENFORCE", "DRY_RUN"] as const).map((m) => (
-            <Tip key={m} tip={disabledWhy ? `Unavailable: ${disabledWhy}` : mode === m ? `${TIPS[m]} This is the current mode.` : `${TIPS[m]} Click to stage the change (nothing changes until you apply).`}>
+            <Tip key={m} tip={disabledWhy ? `Unavailable: ${disabledWhy}` : mode === m ? `${TIPS[m]} This is the current mode.` : `${TIPS[m]} Click to stage the change (nothing changes until you apply). ${stageTip("set_enforcement")}`}>
               <button
                 type="button"
                 role="radio"
@@ -544,7 +546,7 @@ function GatewayCard({ gw }: { gw: Gateway }) {
                   {staged(b.engine) ? (
                     <Badge tone="amber">Unbind staged</Badge>
                   ) : (
-                    <Tip tip={`Stage detaching ${b.display_name} from ${gw.id} in the cart. Nothing changes in Google Cloud until you apply.`}>
+                    <Tip tip={`Stage detaching ${b.display_name} from ${gw.id} in the cart. Nothing changes in Google Cloud until you apply. ${stageTip("unbind_gateway")}`}>
                       <button
                         className="btn btn-small btn-outline"
                         onClick={() => addIntents([{ id: newId(), kind: "unbind_gateway", gateway: { name: gw.name, direction: gw.type }, engine: b.engine, engine_label: b.display_name }])}
@@ -563,7 +565,7 @@ function GatewayCard({ gw }: { gw: Gateway }) {
         {binding ? (
           <BindPicker gw={gw} onDone={() => setBinding(false)} />
         ) : (
-          <Tip tip={`Pick an agent to send its ${gw.type} traffic through ${gw.id}. Binding is staged in the cart; nothing changes until you apply.`}>
+          <Tip tip={`Pick an agent to send its ${gw.type} traffic through ${gw.id}. Binding is staged in the cart; nothing changes until you apply. ${stageTip("bind_gateway")}`}>
             <button className="btn btn-tonal" onClick={() => setBinding(true)}>
               <PlusIcon size={16} /> Bind an agent…
             </button>
@@ -592,7 +594,7 @@ function Unprotected({ engines, egress }: { engines: Engine[]; egress?: Gateway 
               ) : staged ? (
                 <Badge tone="blue">Bind staged</Badge>
               ) : egress ? (
-                <Tip tip={`Stage binding ${e.display_name} to ${egress.id} in the cart. Nothing changes in Google Cloud until you apply.`}>
+                <Tip tip={`Stage binding ${e.display_name} to ${egress.id} in the cart. Nothing changes in Google Cloud until you apply. ${stageTip("bind_gateway")}`}>
                   <button
                     className="link-btn"
                     onClick={() => addIntents([{ id: newId(), kind: "bind_gateway", gateway: { name: egress.name, direction: "egress" }, engine: e.name, engine_label: e.display_name } satisfies Intent])}

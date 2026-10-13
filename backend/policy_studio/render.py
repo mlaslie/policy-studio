@@ -34,9 +34,11 @@ Sources of truth (REST shapes, gcloud flags and Terraform resources verified liv
                  dedicate: create a copy of the extension, then PATCH the gateway's REQUEST_AUTHZ policy
                    ?updateMask=customProvider.authzExtension.resources,labels with the current labels re-sent (a
                    PATCH without labels in the mask clears them; seen live). Verified live: the PATCH updates the
-                   policy in place (~20 s operation), a flip takes effect in about 2-3 minutes, and Terraform plans
-                   an in-place update of the imported policy. Not verified: gcloud authz-policies import updating
-                   an existing policy in place.
+                   policy in place (~20 s operation), a flip takes effect about 2-3 minutes after Apply, and
+                   Terraform plans an in-place update of the imported policy. Not verified: gcloud authz-policies
+                   import updating an existing policy in place.
+  timing         every bundle and item ends with a comment saying how long its changes take to reach the gateway
+                   (timing.py): stored isn't in effect.
 """
 from __future__ import annotations
 
@@ -46,7 +48,7 @@ import re
 from dataclasses import dataclass, field, replace
 from typing import Any, Optional
 
-from . import hcl
+from . import hcl, timing
 from .conditions import EGRESSOR, compare_access_many, condition_for
 from .english import PROJECT_AGENTS_RE, engine_principal_parts, intent_english, member_label, modify_change
 from .gcp import model_armor as ma_mod
@@ -1527,8 +1529,8 @@ DRY_RUN_KEY = "iamEnforcementMode"
 EXT_COPY_FIELDS = ("labels", "service", "timeout", "failOpen", "metadata", "authority", "loadBalancingScheme",
                    "forwardHeaders", "forwardAttributes", "wireFormat")
 ASSUMED_EXT = {"service": "iap.googleapis.com", "timeout": "1s", "metadata": {"iapPolicyVersion": "V1"}}
-ENF_LEARN = ("the change takes effect in about 2–3 minutes (measured), and can take effect before the operation "
-             "reports done")
+ENF_LEARN = ("the change takes effect about 2–3 minutes after Apply (measured), and can take effect before the "
+             "operation reports done")
 MODE_LABEL = {"ENFORCE": "Enforce", "DRY_RUN": "Dry run"}
 _EXT_NAME_RE = re.compile(r"^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$")
 
@@ -2121,8 +2123,11 @@ def _python_script(helpers: str, calls: list[str]) -> str:
 def _assemble(intent_id: str, kind: str, english: str, anatomy: Anatomy, sp: Any, g: str, rb: str, helpers: str,
               call: str, tf: str, name: str, warnings: list[str]) -> _Rendered:
     header = f"# {english}\n"
-    outputs = Outputs(terraform=header + tf, gcloud=header + g + "\n", rest=header + TOKEN_LINE + "\n" + rb + "\n",
-                      python=header + _python_script(helpers, [call]))
+    note = timing.item_comment(kind)
+    tail = "\n" + hcl.comment_lines(note) if note else ""      # how long until the gateway enforces it
+    outputs = Outputs(terraform=header + tf + tail, gcloud=header + g + "\n" + tail,
+                      rest=header + TOKEN_LINE + "\n" + rb + "\n" + tail,
+                      python=header + _python_script(helpers, [call]) + tail)
     item = RenderItem(intent_id=intent_id, english=english, anatomy=anatomy, outputs=outputs, warnings=warnings)
     return _Rendered(item=item, kind=kind, spec=sp, py_helpers=helpers, py_call=call, rest_body=rb, gcloud_body=g,
                      tf_name=name)
@@ -2331,8 +2336,11 @@ def bundle(env: RenderEnv, rendered: list[_Rendered]) -> Bundle:
           + '. Review before running."""\n' + "\n\n".join(h.rstrip() + "\n" for h in helpers)
           + "\n\n" + "\n\n".join(f"# [{i}/{n}] {r.item.english}\n{r.py_call}" for i, r in enumerate(ordered, 1))
           + "\n")
-    return Bundle(terraform={"main.tf": _main_tf(env, ordered), "variables.tf": _variables(env)},
-                  gcloud="".join(gcloud_parts), rest="".join(rest_parts), python=py)
+    # Stored isn't in effect: how long the gateway takes to enforce these changes, at the end of each bundle.
+    wait = timing.wait_note(r.kind for r in ordered)
+    end = "\n" + hcl.comment_lines(wait) if wait else ""
+    return Bundle(terraform={"main.tf": _main_tf(env, ordered) + end, "variables.tf": _variables(env)},
+                  gcloud="".join(gcloud_parts) + end, rest="".join(rest_parts) + end, python=py + end)
 
 
 def render(intents: list[Intent], env: RenderEnv) -> RenderResult:

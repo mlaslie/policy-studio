@@ -5722,3 +5722,46 @@ button.legend-item:hover {
     order: -1;
   }
 }
+
+/* ---------- how long changes take (lib/timing.ts) ---------- */
+.timing-note {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+  margin: 8px 0;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+.timing-note > svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: var(--blue);
+}
+.effect-line,
+.effect-plan {
+  display: block;
+}
+.effect-line > svg,
+.effect-plan > svg {
+  vertical-align: -1px;
+}
+.ready-banner {
+  margin: 12px 0;
+}
+.ready-banner .callout {
+  margin: 0;
+}
+.ready-left {
+  white-space: nowrap;
+  color: var(--text-2);
+}
+.ready-kinds {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+.pv-timing {
+  margin-top: 12px;
+}

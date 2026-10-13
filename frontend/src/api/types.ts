@@ -311,6 +311,12 @@ export type ApplyItemEvent = {
   /** Refused by the preflight before any change. */
   blocked?: boolean;
   fix?: PreflightFix;
+  /** Verified only: stored isn't in effect. "Stored. Takes effect …", and the expected seconds until the gateway
+   *  enforces it (typical, max), as in lib/timing.ts. */
+  effect?: string;
+  effect_after_s?: number;
+  effect_max_s?: number;
+  effect_measured?: boolean;
 };
 export type PreflightItem = { intent_id: string; status: "ok" | "blocked" | "duplicate" | "invalid"; reason?: string; fix?: PreflightFix; duplicate_of?: string; /** ok, but it affects more than it names (a shared IAP extension). */ warning?: string };
 

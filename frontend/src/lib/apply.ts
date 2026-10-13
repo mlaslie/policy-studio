@@ -1,6 +1,7 @@
 // Apply (P3) helpers shared by the store, the Apply step and Review: run state types, which kinds are
-// destructive, typical durations and plain-English labels.
+// destructive, typical durations (from lib/timing.ts) and plain-English labels.
 import type { Access, ApplyState, AuthInfo, DiffStatus, Intent } from "../api/types";
+import { TIMING } from "./timing";
 import { accessFromCondition, accessFroms, accessTos, conditionFor, intentKey, modifyChange, removesAll, shortName } from "./policy";
 
 export type RunItemState = ApplyState | "queued";
@@ -109,21 +110,9 @@ export const DESTRUCTIVE_PHRASE: Partial<Record<Intent["kind"], string>> = {
   dedicate_extension: "deletes a gateway's own IAP extension",
 };
 
-/** Typical time per kind, shown next to the elapsed timer. */
-export const TYPICAL: Record<Intent["kind"], { label: string; seconds: number }> = {
-  grant: { label: "a few seconds", seconds: 5 },
-  revoke: { label: "a few seconds", seconds: 5 },
-  modify: { label: "a few seconds", seconds: 5 },
-  bind_gateway: { label: "about 5 min", seconds: 300 },
-  unbind_gateway: { label: "about 5 min", seconds: 300 },
-  model_armor_on: { label: "about 4 min", seconds: 240 },
-  model_armor_off: { label: "about 4 min", seconds: 240 },
-  model_armor_template: { label: "a few seconds", seconds: 5 },
-  model_armor_extension: { label: "about 1 min", seconds: 60 },
-  iam_project_grant: { label: "a few seconds", seconds: 5 },
-  set_enforcement: { label: "about 1 min (in effect in 2–3 min)", seconds: 60 },
-  dedicate_extension: { label: "a few minutes", seconds: 180 },
-};
+/** Typical time of the Apply call per kind, shown next to the elapsed timer (lib/timing.ts has the table, with how
+ *  long each kind then takes to take effect). */
+export const TYPICAL = Object.fromEntries(Object.entries(TIMING).map(([k, v]) => [k, v.apply])) as Record<Intent["kind"], { label: string; seconds: number }>;
 export const isLongRunning = (i: Intent) => TYPICAL[i.kind].seconds >= 60;
 
 export const CHANGE_KIND: Record<Intent["kind"], string> = {

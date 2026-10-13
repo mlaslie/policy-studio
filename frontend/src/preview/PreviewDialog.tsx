@@ -24,6 +24,7 @@ import { EdgeMarkers, edgeTypes } from "../map/edges";
 import { previewGraph } from "./graph";
 import { previewModel, type ChangeRow, type PreviewModel, type ToolState } from "./changes";
 import { TOOL_STATE_TEXT, TOOL_STATE_WORDS, toolRowLabel } from "../lib/toolMarks";
+import { TimingNote } from "../components/Timing";
 
 const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
@@ -302,6 +303,7 @@ export default function PreviewDialog({ intent, extras, approveLabel, onApprove,
               </li>
             </ul>,
           )}
+          <TimingNote kinds={[intent.kind]} className="pv-timing" />
         </div>
         <div className="pv-foot">
           <button className="btn btn-text" onClick={onCancel}>

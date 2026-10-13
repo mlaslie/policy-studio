@@ -18,6 +18,8 @@ import { PlayIcon } from "../components/Icons";
 import { DESTRUCTIVE_PHRASE, MODIFY_STATUS, isDestructive } from "../lib/apply";
 import { ShowOnMap } from "../components/ShowOnMap";
 import { focusForIntent } from "../map/focus";
+import { TimingNote } from "../components/Timing";
+import { timingNote } from "../lib/timing";
 
 function ApplyButton({ ids, label, small }: { ids: string[] | null; label: string; small?: boolean }) {
   const { openApply, cart, ctx } = useStudio();
@@ -207,6 +209,8 @@ Pick one way to apply it (they do the same thing):
   Python:     python3 apply.py    (pip install google-cloud-iap google-cloud-network-security google-auth)
 
 Run with credentials that can change IAM in ${ctx.project}.
+
+${timingNote(sorted.map((i) => i.kind)).replace(/^After Apply: /, "After running it: ")}
 `;
     const blob = makeZip([
       { name: "policy-studio/main.tf", content: res.bundle.terraform["main.tf"] },
@@ -279,6 +283,7 @@ Run with credentials that can change IAM in ${ctx.project}.
           <ApplyButton ids={focus ? [focus] : null} label={focus ? "Apply this" : `Apply all ${sorted.length}`} />
         </div>
       </div>
+      <TimingNote kinds={shown.map((i) => i.kind)} className="review-timing" />
       {missing.length > 0 && (
         <Callout tone="warn" title="Some context is missing">
           <ul className="plain-list">
@@ -303,7 +308,7 @@ Run with credentials that can change IAM in ${ctx.project}.
         ))}
       </div>
       <p className="muted small">
-        <WarnIcon size={13} /> Generated for <span className="mono">{ctx.project}</span> / <span className="mono">{ctx.region}</span>. Review before running; IAM changes take effect within a minute or two.
+        <WarnIcon size={13} /> Generated for <span className="mono">{ctx.project}</span> / <span className="mono">{ctx.region}</span>. Review before running. When a command finishes, the gateway may not enforce the change yet: see the timing note above.
       </p>
     </>
   );

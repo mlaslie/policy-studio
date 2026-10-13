@@ -95,8 +95,10 @@ def test_read_only_grant_snapshot():
     it = one(Intent(id="g", kind="grant", source=HR, destination=DEST["mcp_server"], access=ACCESS["read_only_hint"]))
     assert it.english == ("HR Assistant can call only the read-only tools of Tickets MCP (by MCP hint; new read-only "
                           "tools are included automatically).")
-    assert it.outputs.gcloud.splitlines()[-1] == (
+    code = [ln for ln in it.outputs.gcloud.splitlines() if ln and not ln.startswith("#")]
+    assert code[-1] == (
         "  --condition=\"^~^title=Read-only MCP tools (by hint)~expression=" + READ_ONLY_EXPRESSION + "\"")
+    assert it.outputs.gcloud.splitlines()[-1].startswith("# IAM grants usually take effect within a few minutes")
     assert '    expression = "' + READ_ONLY_EXPRESSION + '"' in it.outputs.terraform
     assert any("''" in n for n in it.anatomy.notes)
     assert not it.warnings
@@ -320,3 +322,37 @@ def test_intent_ignores_unknown_fields_and_bad_intent_is_per_item():
                              access=Access.model_construct(mode="tools", tools=[1, None]))], ENV)
     assert res.items[0].error is None and res.items[1].intent_id == "bad" and res.items[1].error
     assert res.bundle.gcloud.count("-X PATCH") == 1             # the bad item is left out of the bundle
+
+
+# ------------------------------------------------------------------ how long until it takes effect
+def _prose(text: str) -> str:
+    """Comment lines joined back into one line of prose."""
+    return " ".join(ln[2:] for ln in text.splitlines() if ln.startswith("# "))
+
+
+def test_outputs_say_how_long_changes_take():
+    intents = [Intent(id="g", kind="grant", source=HR, destination=DEST["agent"]),
+               Intent(id="b", kind="bind_gateway", engine=F.E2, gateway=GatewayRef(name="corp-out")),
+               Intent(id="m", kind="model_armor_on", gateway=GatewayRef(name="corp-in", direction="ingress",
+                                                                         extension="ma-ext"))]
+    res = render(intents, ENV)
+    g, b, m = res.items
+    for o in g.outputs.model_dump().values():
+        assert "# IAM grants usually take effect within a few minutes (up to about 7). Wait before testing." in o
+    for o in b.outputs.model_dump().values():
+        assert "# Binding redeploys the agent (about 5 minutes). Wait before testing." in o
+    assert "not measured" in _prose(m.outputs.gcloud)
+    bundle = res.bundle
+    wait = ("After running this: binding redeploys the agent (about 5 minutes); turning Model Armor on takes about 4 "
+            "minutes, then usually a few more (not measured); IAM grants usually take effect within a few minutes (up "
+            "to about 7). Wait before testing.")
+    for text in (bundle.terraform["main.tf"], bundle.gcloud, bundle.rest, bundle.python):
+        assert _prose(text).endswith(wait), text[-400:]
+    for k in ("gcloud", "rest"):
+        r = subprocess.run(["bash", "-n"], input=getattr(bundle, k), capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+    compile(bundle.python, "<bundle>", "exec")
+    if TERRAFORM:
+        r = subprocess.run([TERRAFORM, "fmt", "-check", "-"], input=bundle.terraform["main.tf"], capture_output=True,
+                           text=True)
+        assert r.returncode == 0, bundle.terraform["main.tf"]

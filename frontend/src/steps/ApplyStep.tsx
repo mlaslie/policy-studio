@@ -14,6 +14,8 @@ import { CopyButton } from "../components/Glass";
 import { KIND_LABEL, KIND_ORDER, intentEnglish } from "../lib/policy";
 import { CHANGE_KIND, DESTRUCTIVE_PHRASE, MODIFY_STATUS, TYPICAL, fmtElapsed, isDestructive, isLongRunning, kindBlockedReason, sameChange, type ApplyRun, type RunItem } from "../lib/apply";
 import { LocalSetup, projectMismatch } from "./CredentialsCard";
+import { EffectLine, ReadyBanner, TimingNote } from "../components/Timing";
+import { clock, effectText, effectWhy, readyWindow } from "../lib/timing";
 
 const STATUS: Record<DiffItem["status"], { label: string; tone: "green" | "neutral" | "amber" | "red" }> = {
   add: { label: "Will add", tone: "green" },
@@ -127,10 +129,15 @@ function PlanRow({ intent, n, d, p }: { intent: Intent; n: number; d: DiffItem |
             {noop && " Apply will skip it."}
           </span>
         )}
+        {!noop && !blocked && (
+          <span className="tiny muted effect-plan" title={effectWhy(intent.kind)}>
+            <ClockIcon size={11} /> Takes effect {effectText(intent.kind)}.
+          </span>
+        )}
       </div>
       <div className="plan-side">
         {d && !d.error && <Badge tone={STATUS[d.status].tone}>{(intent.kind === "modify" && MODIFY_STATUS[d.status]) || STATUS[d.status].label}</Badge>}
-        <span className="tiny muted" title="Typical time for this kind of change">
+        <span className="tiny muted" title="Typical time for Apply to make this kind of change">
           <ClockIcon size={11} /> {TYPICAL[intent.kind].label}
         </span>
       </div>
@@ -188,6 +195,7 @@ function ConfirmCard({ items, diff, blocked }: { items: Intent[]; diff: DiffItem
         )}
         {lro > 0 && <> {lro} of them {lro > 1 ? "are" : "is a"} long-running operation{lro > 1 ? "s" : ""} (binding an agent takes about 5 minutes, Model Armor about 4); you can keep using Policy Studio meanwhile.</>}
       </p>
+      <TimingNote kinds={items.map((i) => i.kind)} />
       {denied.length > 0 && (
         <Callout tone="warn" title="You can't apply some of these changes">
           {kindBlockedReason(auth.data, denied[0].kind)} Get the role and click Check again on Context, or copy the commands for {denied.length > 1 ? "them" : "it"} from Review and run them with an account that can.{" "}
@@ -267,6 +275,7 @@ function RunRow({ it, now }: { it: RunItem; now: number }) {
           <b>{STATE_LABEL[it.state]}</b>
           {it.detail ? ` · ${it.detail}` : ""}
         </span>
+        {it.state === "verified" && <EffectLine kind={it.intent.kind} />}
         {it.operation && <span className="mono tiny muted" title="Long-running operation">{it.operation}</span>}
         {it.rawError && (
           <Disclosure summary="Show the Google Cloud error">
@@ -299,6 +308,8 @@ function counts(r: ApplyRun) {
   }
   return c;
 }
+
+const verifiedKinds = (r: ApplyRun) => r.items.filter((i) => i.state === "verified").map((i) => i.intent.kind);
 
 function UndoList({ run }: { run: ApplyRun }) {
   const { stageUndo, cart } = useStudio();
@@ -336,6 +347,9 @@ function UndoList({ run }: { run: ApplyRun }) {
                       <CheckIcon size={11} /> Already staged
                     </span>
                   )}
+                  <span className="tiny muted effect-plan" title={effectWhy(u.kind)}>
+                    <ClockIcon size={11} /> Takes effect {effectText(u.kind)}.
+                  </span>
                 </div>
               ))}
             </div>
@@ -408,6 +422,7 @@ function RunPanel({ run }: { run: ApplyRun }) {
           {!c.verified && c.failed > 0 && <p>Nothing was changed by the failed items. They stay in the cart so you can retry.</p>}
         </Callout>
       )}
+      {run.done && <ReadyBanner kinds={verifiedKinds(run)} finishedAt={run.endedAt ?? now} />}
       {run.done && <UndoList run={run} />}
       {run.done && (
         <div className="row">
@@ -420,6 +435,17 @@ function RunPanel({ run }: { run: ApplyRun }) {
         </div>
       )}
     </>
+  );
+}
+
+/** When a past apply's changes were expected to take effect. */
+function HistoryReady({ r }: { r: ApplyRun }) {
+  const w = r.endedAt ? readyWindow(verifiedKinds(r), r.endedAt) : null;
+  if (!w) return null;
+  return (
+    <p className="tiny muted">
+      <ClockIcon size={11} /> Expected in effect around {clock(w.at)}, by about {clock(w.latest)} at the latest.
+    </p>
   );
 }
 
@@ -458,6 +484,7 @@ function History() {
                   ))}
                 </ul>
                 {r.error && <p className="small mono field-error">{r.error}</p>}
+                <HistoryReady r={r} />
                 {undo.length > 0 && (
                   <Tip tip="Stage the reverse of every change in this apply and open Apply. Nothing changes in Google Cloud until you confirm.">
                     <button className="btn btn-outline btn-small" onClick={() => stageUndo(undo)}>

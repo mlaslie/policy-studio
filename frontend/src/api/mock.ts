@@ -14,6 +14,7 @@ import { ROLE, accessFroms, accessTos, conditionFor, intentEnglish, intentKey, i
 import { NO_IDENTITY_REASON } from "../components/Redeploy";
 import { accessFromCondition } from "../lib/grants";
 import { modifyWarning } from "../lib/apply";
+import { TIMING, isMeasured, storedText } from "../lib/timing";
 
 const clone = <T,>(x: T): T => JSON.parse(JSON.stringify(x));
 
@@ -659,9 +660,9 @@ export async function* applyStream(ctx: Ctx, intents: Intent[], confirm: ApplyCo
                   ? "Read back: the new binding is there and the old ones are gone."
                   : "Read back: the new binding is there and the old one is gone."
             : i.kind.endsWith("gateway")
-              ? "Read back: agentGatewayConfig matches."
+              ? "Read back: the redeploy finished and agentGatewayConfig matches."
               : i.kind === "set_enforcement"
-                ? `Read back: ${short(i.extension)} is in ${i.mode === "DRY_RUN" ? "dry run (failOpen true)" : "enforce (failOpen false)"}. Takes effect in about 2–3 minutes (measured), sometimes before the operation reports done.${fresh ? ` Undo: revert giving the gateway its own extension (deletes ${short(i.extension)}).` : ""}`
+                ? `Read back: ${short(i.extension)} is in ${i.mode === "DRY_RUN" ? "dry run (failOpen true)" : "enforce (failOpen false)"}.${fresh ? ` Undo: revert giving the gateway its own extension (deletes ${short(i.extension)}).` : ""}`
                 : i.kind === "dedicate_extension"
                   ? i.revert
                     ? `Read back: ${short(i.gateway?.name)} uses ${short(i.source_extension)} again and ${i.new_name} is gone.`
@@ -675,6 +676,11 @@ export async function* applyStream(ctx: Ctx, intents: Intent[], confirm: ApplyCo
                     : "Read back: the CONTENT_AUTHZ policy matches.",
       operation: op,
       undo,
+      // Like the backend: stored isn't in effect yet (lib/timing.ts).
+      effect: storedText(i.kind),
+      effect_after_s: Math.round(TIMING[i.kind].typical * 60),
+      effect_max_s: Math.round(TIMING[i.kind].max * 60),
+      effect_measured: isMeasured(i.kind),
     };
   }
   yield { type: "done", summary: counts };

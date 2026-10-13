@@ -98,9 +98,11 @@ def test_render_set_enforcement_all_formats():
     o = it.outputs
     assert it.english.startswith("Enforce IAP on gateway corp-out")
     assert it.anatomy.resource == EXT and it.anatomy.role == "enforcement: Dry run → Enforce"
-    assert any("about 2–3 minutes (measured)" in n and "before the operation reports done" in n
+    assert any("about 2–3 minutes after Apply (measured)" in n and "before the operation reports done" in n
                for n in it.anatomy.notes)
     assert not any("not yet measured" in n or "verified live" in n for n in it.anatomy.notes)
+    for text in o.model_dump().values():                                 # how long it takes, at the end of each
+        assert "# An enforcement change takes effect about 2–3 minutes after it's sent (measured). Wait" in text
     # REST: the PATCH with exactly metadata + failOpen; other metadata keys kept, the dry-run key gone
     assert f"https://networkservices.googleapis.com/v1/{EXT}?updateMask=metadata,failOpen" in o.rest
     assert '{"metadata":{"iapPolicyVersion":"V1"},"failOpen":false}' in o.rest
@@ -317,7 +319,8 @@ def test_apply_enforce_then_undo_dry_run(gcp):
     assert method == "PATCH" and url == f"https://networkservices.googleapis.com/v1/{EXT}?updateMask=metadata,failOpen"
     assert body == {"metadata": {"iapPolicyVersion": "V1"}, "failOpen": False}
     assert gcp.extensions["corp-out-iap"]["metadata"] == {"iapPolicyVersion": "V1"}
-    assert "about 2–3 minutes (measured)" in f["enf"]["detail"]
+    assert f["enf"]["effect"] == "Stored. Takes effect about 2–3 minutes after Apply (measured)."
+    assert f["enf"]["effect_after_s"] == 120 and f["enf"]["effect_max_s"] == 180 and f["enf"]["effect_measured"]
     undo = f["enf"]["undo"]
     assert undo["kind"] == "set_enforcement" and undo["mode"] == "DRY_RUN" and undo["extension"] == EXT
     detail, _ = run([undo], ack=False, status=400)                     # dry run is destructive

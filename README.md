@@ -104,6 +104,8 @@ Apply is available when the mode is `apply` and no check is an error.
 - Engine binds read the engine first and keep the other direction; changes to one engine run one at a time. Binds and
   Model Armor are long-running operations: the stream reports the operation, polls it (up to 10 minutes) and reads the
   result back.
+- Verified means stored, not in effect: each verified item says how long the gateway takes to enforce it, and the
+  results show when to test ([How long changes take to apply](#how-long-changes-take-to-apply)).
 - Each change is applied exactly as the generated commands would do it (same specs as the code generator), read back,
   and returned with its inverse (`undo`). Results are appended to `~/.policy-studio/apply-log.jsonl`
   (`STUDIO_APPLY_LOG` overrides the path).
@@ -248,11 +250,41 @@ One extension can serve several gateways, and then they switch together. When it
 **Change for all N gateways** or **Give this gateway its own extension** (recommended): a copy of the extension, then
 the gateway's IAP policy pointed at the copy, then the mode change on the copy, staged together. In apply mode both are
 applied, read back and undoable (dry run and reverting a dedicated extension need the destructive acknowledgement;
-undoing both is a single revert, since the copy is deleted). A flip takes effect in about 2–3 minutes (measured), and
-can take effect before the operation reports done. Pointing the policy at the copy is an in-place PATCH (verified
+undoing both is a single revert, since the copy is deleted). A flip takes effect about 2–3 minutes after Apply
+(measured), and can take effect before the operation reports done (see
+[How long changes take to apply](#how-long-changes-take-to-apply)). Pointing the policy at the copy is an in-place PATCH (verified
 live; about 20 s) with `labels` in the update mask and the current labels re-sent, because a PATCH of the provider
 alone clears the policy's labels. Terraform imports the policy and plans an in-place update (verified live). Not
 verified: `gcloud network-security authz-policies import` updating the existing policy in place.
+
+## How long changes take to apply
+
+Verified (read back) means the setting is stored. It doesn't mean the gateway enforces it yet. A grant applied and
+verified at 20:12:46 UTC still got a 403 from the gateway 30 s later, and the same call worked a few minutes later.
+So every place that stages or applies a change says how long it takes: the Review step and the Apply confirm card
+("After Apply: … Wait before testing."), each verified item ("Stored. Takes effect …"), a **Ready to test around
+HH:MM** banner after an apply (with a countdown that turns into "Should be in effect now"), the Build preview, Undo,
+the Gateways step and the map panel tooltips, and a comment at the end of each generated bundle and item.
+
+The times below count from when Apply reports the item verified. Apply already waits for long-running operations (an
+agent redeploy, a Model Armor policy), so those aren't counted twice. The banner's time is the apply finish time plus
+the largest typical time among the verified items; its latest time adds the largest max (which can come from another
+kind).
+
+| Change | Apply call | Takes effect after it's verified | Typical / max (min) | Basis |
+|---|---|---|---|---|
+| Grant, revoke, change access (IAP `roles/iap.egressor`) | a few seconds | in a few minutes (up to about 7) | 2 / 7 | Google's documented range: IAM changes usually propagate within about 2 minutes and can take up to 7. Seen here: not in effect 30 s after read-back, in effect a few minutes later. |
+| Service agent roles (project IAM, Model Armor setup) | a few seconds | in a few minutes (up to about 7) | 2 / 7 | The IAM rule above. |
+| Bind / unbind an agent (engine PATCH) | about 5 min: the agent is redeployed | within about a minute of the redeploy finishing | 1 / 2 | Not measured. Traffic goes through (or stops going through) the gateway only once the redeploy finishes; calls in flight during the switch can fail. |
+| Enforcement mode (Enforce ↔ Dry run) | about 1 min | about 2–3 minutes after Apply | 2 / 3 | **Measured**: 2m40s, 2m08s and 2m19s after Apply. It can take effect before the operation reports done. |
+| Own IAP extension (dedicate) | a few minutes (the policy update is about 20 s) | about 2–3 minutes after the policy update | 2.5 / 3 | Not measured: expected to match the enforcement change. |
+| Model Armor on / off (`CONTENT_AUTHZ` policy) | about 4 min | usually in a few minutes | 3 / 5 | Not measured. |
+| Model Armor template, extension (setup) | a few seconds / about 1 min | in a few minutes | 3 / 5 | Not measured. |
+
+One table drives all of it: `frontend/src/lib/timing.ts`, with the same numbers in `backend/policy_studio/timing.py`
+(a test compares them). The apply log records them per item (`effect_after_s`, `effect_max_s`, `effect_measured`, in
+seconds after the verified entry) and for the whole apply (`ready_after_s`, `ready_max_s` on the done entry), so a
+later check can compare.
 
 ## Permissions
 
