@@ -25,7 +25,7 @@ import { ClockIcon, CloseIcon, ExpandIcon, ShieldIcon } from "../components/Icon
 import { useStudio } from "../store";
 import { plural } from "../lib/util";
 import { buildPolicyGraph, type Direction, type PEdge, type PolicyGraph, type Verdict } from "./graph";
-import { DEFAULT_DIRECTION, DEFAULT_FILTERS, TOO_MANY_LINES, expandGroup, isSource, revealPatch, type Affiliation, type MapFilters, viewOf } from "./view";
+import { DEFAULT_DIRECTION, TOO_MANY_LINES, expandGroup, isSource, revealPatch, type Affiliation, type DestType, type MapFilters, viewOf } from "./view";
 import { GAP_Y, HEADER_H, freeSpot, layoutView } from "./layout";
 import { VERDICT_LABEL, edgeAria, expandedMcp, toFlow, type MNode } from "./toFlow";
 import { nodeTypes, MapActions } from "./nodes";
@@ -37,12 +37,42 @@ import { simulate } from "./simulate";
 import { diffGraphs, mergeStaged, pairKey, pendingCount } from "./diff";
 import { placeNodes, posKey, storage, usePositions } from "./usePositions";
 import { findFocusEdge, type MapFocus } from "./focus";
-import { affiliationOf, autoSelect, focusPicker, loadPicker, pickerItems, pickerKey, presetAffiliation, resetPicker, savePicker, toggleAgent, type PickerState } from "./picker";
+import {
+  DEFAULT_TOOLS,
+  PICKER_KEYS,
+  affiliationOf,
+  autoSelect,
+  checkRows,
+  dropOverrides,
+  filtersOf,
+  focusPicker,
+  loadPicker,
+  pickerItems,
+  pickerKey,
+  pickerStatus,
+  presetAffiliation,
+  resetPicker,
+  savePicker,
+  toggleAgent,
+  toggleTypes,
+  typeState,
+  type PickerEnv,
+  type PickerState,
+  type Tools,
+} from "./picker";
 
 const PAD = { top: "40px", bottom: "40px", left: "24px", right: "40px" } as const;
 /** Low enough for Fit to show a map of the §7 scale (about 100 destinations) whole. */
 const MIN_ZOOM = 0.08;
 
+/** The toolbar's destination type boxes (restored 2026-10-12): each mirrors the picker's group of that type, so they
+ *  can't disagree; APIs covers the API endpoints and the Google APIs groups. */
+const TYPE_BOXES: { label: string; types: DestType[] }[] = [
+  { label: "A2A agents", types: ["a2a"] },
+  { label: "Agent Runtime", types: ["runtime"] },
+  { label: "MCP servers", types: ["mcp"] },
+  { label: "APIs", types: ["api", "google"] },
+];
 const AFFILIATION: { id: Affiliation; label: string; tip: string }[] = [
   { id: "all", label: "All agents", tip: "Check every Agent Runtime agent in the picker, with or without a gateway." },
   { id: "gateway", label: "Behind a gateway", tip: "Check only the agents bound to a gateway: their connections are checked by policy." },
@@ -52,10 +82,6 @@ const LEGEND: Record<Direction, Verdict[]> = {
   egress: ["allowed", "partial", "conditional", "would_deny", "blocked", "unchecked", "dormant", "direct"],
   ingress: ["screened", "unscreened", "direct"],
 };
-/** The toolbar's own filters; the picker holds the rest (which objects, the selection, the quick toggles). */
-type Tools = Omit<MapFilters, "off" | "hideEmpty" | "googleApis">;
-const PICKER_KEYS = ["off", "hideEmpty", "googleApis"] as const;
-const DEFAULT_TOOLS: Tools = (({ off: _o, hideEmpty: _h, googleApis: _g, ...t }) => t)(DEFAULT_FILTERS);
 /** A filter change, split into the picker's part and the toolbar's. */
 function splitPatch(p: Partial<MapFilters>): { picker: Partial<PickerState>; tools: Partial<Tools> } {
   const picker: Partial<PickerState> = {};
@@ -216,7 +242,7 @@ function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
     },
     [pkey],
   );
-  const filters: MapFilters = useMemo(() => ({ ...tools, off: pk.off, hideEmpty: pk.hideEmpty, googleApis: pk.googleApis }), [tools, pk]);
+  const filters: MapFilters = useMemo(() => filtersOf(tools, pk), [tools, pk]);
   /** A filter change: the picker's part saved with the picker, the rest to the toolbar. */
   const set = (p: Partial<MapFilters>) => {
     const { picker, tools: t } = splitPatch(p);
@@ -228,6 +254,11 @@ function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
 
   // ---------- view → layout → React Flow ----------
   const view = useMemo(() => viewOf(graph, filters, pk.selected, { changesOnly: show === "changes", active }), [graph, filters, pk.selected, show, active]);
+  // The picker's rows, read off this view: checked = on the map, unchecked with the filter that hides it.
+  const env: PickerEnv = useMemo(() => ({ graph, tools, changesOnly: show === "changes", active }), [graph, tools, show, active]);
+  const statuses = useMemo(() => pickerStatus(env, pk, view), [env, pk, view]);
+  const envRef = useRef(env);
+  envRef.current = env;
   const expanded = useMemo(() => expandedMcp(view, active), [view, active]);
   const hkey = useCallback((id: string) => `${id}|${expanded.has(id) ? 1 : 0}`, [expanded]);
   const heights = useMemo(() => Object.fromEntries(view.nodes.map((n) => [n.id, measured[hkey(n.id)]]).filter(([, h]) => h !== undefined)), [view, measured, hkey]);
@@ -430,15 +461,16 @@ function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
   const jump = useCallback(
     (id: string) => {
       // The same agent in the other column: Agent Runtime agents appear as callers and as registry entries.
+      // checked (forced on if a filter hides it) and, an agent, selected
+      const item = items.find((i) => i.id === id);
       const st = pkRef.current;
-      const shown = { ...st, off: st.off.filter((x) => x !== id) };
-      setPk(sourceIds.has(id) && !st.selected.includes(id) ? toggleAgent(shown, id) : shown);
+      setPk(item ? checkRows(envRef.current, st, [item], true) : { ...st, off: st.off.filter((x) => x !== id) });
       setActive(id);
       setSelEdge(null);
       setHit(id);
       pendingCenter.current = id;
     },
-    [sourceIds, setPk],
+    [items, setPk],
   );
   const actions = useMemo(() => ({ jump, unpin }), [jump, unpin]);
 
@@ -448,7 +480,7 @@ function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
     let t: Tools = next.hideEmpty !== pk.hideEmpty ? { ...tools, expanded: [] } : tools;
     // "Only this" (or Enter on a single match) on an object inside a group: expand what hides it
     if (focus) {
-      const patch = revealPatch(graph, { ...t, off: st.off, hideEmpty: st.hideEmpty, googleApis: st.googleApis }, st.selected, focus, { changesOnly: show === "changes", active });
+      const patch = revealPatch(graph, filtersOf(t, st), st.selected, focus, { changesOnly: show === "changes", active });
       if (patch) {
         const sp = splitPatch(patch);
         st = { ...st, ...sp.picker };
@@ -460,13 +492,23 @@ function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
     setPk(st);
     setTools(t);
     if (active && st.off.includes(active)) setActive(null);
-    const on = items.filter((i) => !st.off.includes(i.id)).length;
+    const on = [...pickerStatus({ ...env, tools: t }, st).values()].filter((x) => x.on).length;
     setAnnounce(`${on} of ${items.length} objects on the map${st.selected.length ? `, lines of ${plural(st.selected.length, "selected agent")}` : ", no agent selected"}.`);
   };
   const affiliation = affiliationOf(pk, graph);
   const presetAff = (a: Affiliation) => {
     setPk(presetAffiliation(pk, graph, a));
     setFitSeq((k) => k + 1);
+  };
+  /** A toolbar type box: the same as the picker's group checkbox of that type. */
+  const toggleType = (types: DestType[]) => {
+    setPk(toggleTypes(env, pk, types, statuses));
+    setFitSeq((k) => k + 1);
+  };
+  /** The gateway filter: a new choice drops the overrides of the old one. */
+  const setGateway = (gateway: string) => {
+    setPk(dropOverrides(pk, statuses, "otherGateway"));
+    setTools((x) => ({ ...x, gateway }));
   };
   /** Reset view: groups collapsed, pins cleared, every object visible and nothing selected (then auto-select), fit.
    *  Direction, Allows / Denies and Inherited grants stay. */
@@ -498,7 +540,7 @@ function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
     if (!focusReq || (focusReq.direction && focusReq.direction !== direction)) return;
     if (!focusReq.picked) {
       // the node and the target checked in the picker; an agent (or pseudo caller) selected, so its lines draw
-      setPk(focusPicker(pkRef.current, focusReq, (id) => sourceIds.has(id)));
+      setPk(focusPicker(pkRef.current, focusReq, (id) => sourceIds.has(id), envRef.current));
       setActive(focusReq.node ?? focusReq.target ?? null);
       setFocusReq({ ...focusReq, picked: true });
       return;
@@ -598,7 +640,7 @@ function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
               ))}
             </div>
             {dirGws.length > 1 && (
-              <select className="pmap-select" value={tools.gateway} onChange={(e) => setTools((x) => ({ ...x, gateway: e.target.value }))} aria-label="Gateway">
+              <select className="pmap-select" value={tools.gateway} onChange={(e) => setGateway(e.target.value)} aria-label="Gateway">
                 <option value="all">All gateways</option>
                 {dirGws.map((g) => (
                   <option key={g.name} value={g.name}>
@@ -607,7 +649,7 @@ function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
                 ))}
               </select>
             )}
-            <ObjectPicker items={items} value={pk} google={egress} onApply={applyPicker} />
+            <ObjectPicker items={items} value={pk} env={env} statuses={statuses} google={egress} onApply={applyPicker} />
             <span className="pmap-tools-end">
               <Tip tip="Zoom to fit the whole map." placement="bottom">
                 <button type="button" className="btn btn-tonal btn-small" onClick={() => fitMap(rf, bounds, wrap.current, reduced ? 0 : 300)} disabled={table}>
@@ -625,10 +667,44 @@ function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
             </span>
           </div>
           <div className="pmap-tools-row">
+            {egress && (
+              <div className="pmap-types" role="group" aria-label="Destination types (the picker's groups of these types)">
+                {TYPE_BOXES.map((b) => {
+                  const st = typeState(statuses, items, b.types, pk);
+                  return (
+                    <Tip key={b.label} tip={
+                        st === "all"
+                          ? `On the map. Click to hide them (the picker's group unchecks too).`
+                          : st === "some"
+                            ? `Some are hidden by another filter or by hand (the picker says why). Click to hide them all.`
+                            : b.types.every((t) => pk.typesOff.includes(t))
+                              ? `Hidden by this type filter. Click to show them again.`
+                              : `None is on the map: another filter hides them (the picker says why). Click to show them anyway.`
+                      } placement="bottom">
+                      <label className={`pmap-check ${st !== "none" ? "on" : ""}`}>
+                        <input
+                          type="checkbox"
+                          checked={st === "all"}
+                          ref={(el) => {
+                            if (el) el.indeterminate = st === "some";
+                          }}
+                          onChange={() => toggleType(b.types)}
+                        />
+                        {b.label}
+                      </label>
+                    </Tip>
+                  );
+                })}
+              </div>
+            )}
             <div className="seg seg-small" role="group" aria-label="Show staged changes">
               {SHOW.map((o) => (
                 <Tip key={o.id} tip={!cart.length && o.id !== "today" ? "The cart is empty: nothing is staged." : o.tip} placement="bottom">
-                  <button type="button" className={`seg-btn ${show === o.id ? "on" : ""}`} aria-pressed={show === o.id} disabled={!cart.length && o.id !== "today"} onClick={() => setShowPref(o.id)}>
+                  <button type="button" className={`seg-btn ${show === o.id ? "on" : ""}`} aria-pressed={show === o.id} disabled={!cart.length && o.id !== "today"} onClick={() => {
+                      if (o.id !== show) setPk(dropOverrides(pkRef.current, statuses, "changes"));
+                      setShowPref(o.id);
+                    }}
+                  >
                     {o.label}
                   </button>
                 </Tip>

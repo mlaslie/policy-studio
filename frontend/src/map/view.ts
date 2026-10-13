@@ -17,6 +17,24 @@ import { DEST_SECTIONS, NOGW, PSEUDO, SECTION_LABEL, bestVerdict, type Chip, typ
 /** The map opens on Agent-to-Anywhere. */
 export const DEFAULT_DIRECTION: Direction = "egress";
 export type Affiliation = "all" | "gateway" | "none";
+/** The toolbar's destination type checkboxes, one per picker group (the toolbar's APIs box is "api" and "google"). */
+export type DestType = "a2a" | "runtime" | "mcp" | "api" | "google";
+export const DEST_TYPES: readonly DestType[] = ["a2a", "runtime", "mcp", "api", "google"];
+/** A destination's type (Agent-to-Anywhere), or null (registry entries, callers, gateways: no type filter). */
+export function destType(n: Pick<PNode, "kind" | "googleApi">): DestType | null {
+  switch (n.kind) {
+    case "a2a":
+      return "a2a";
+    case "runtime_dest":
+      return "runtime";
+    case "mcp":
+      return "mcp";
+    case "endpoint":
+      return n.googleApi ? "google" : "api";
+    default:
+      return null;
+  }
+}
 export interface MapFilters {
   /** "all" or one gateway's full name. */
   gateway: string;
@@ -35,6 +53,10 @@ export interface MapFilters {
   denies: boolean;
   /** Objects unchecked in the picker: hidden. */
   off: string[];
+  /** Objects checked in the picker that a filter would hide: shown anyway (a manual override). */
+  forced: string[];
+  /** Destination types unchecked (the toolbar's type checkboxes, the picker's type group checkboxes). */
+  typesOff: DestType[];
 }
 export const DEFAULT_FILTERS: MapFilters = {
   gateway: "all",
@@ -46,6 +68,8 @@ export const DEFAULT_FILTERS: MapFilters = {
   allows: true,
   denies: true,
   off: [],
+  forced: [],
+  typesOff: [],
 };
 /** Default-deny lines drawn per agent, at most (then "+N more"). */
 export const DENY_CAP = 60;
@@ -100,6 +124,8 @@ export function viewOf(g: PolicyGraph, f: MapFilters, agents: string[], opts: { 
   const byId = new Map(g.nodes.map((n) => [n.id, n]));
   const active = opts.active ?? null;
   const off = new Set(f.off);
+  const forced = new Set(f.forced ?? []);
+  const typesOff = new Set(g.direction === "egress" ? (f.typesOff ?? []) : []);
   const callerCol = g.direction === "egress" ? "callers" : "dests";
   const isCaller = (n: PNode) => n.kind === "engine" || n.kind === "principal_group" || n.kind === "client";
 
@@ -107,11 +133,18 @@ export function viewOf(g: PolicyGraph, f: MapFilters, agents: string[], opts: { 
   const shown = new Set<string>();
   for (const n of g.nodes) {
     if (off.has(n.id) && n.id !== active) continue;
+    if (forced.has(n.id) && n.kind !== "no_gateway" && n.kind !== "anywhere") {
+      shown.add(n.id);
+      continue;
+    }
     if (isCaller(n) && (n.column === callerCol || n.kind === "client")) {
       if (n.kind !== "engine" || f.gateway === "all" || n.gateway === f.gateway) shown.add(n.id);
     } else if (n.kind === "gateway") {
       if (f.gateway === "all" || n.id === f.gateway) shown.add(n.id);
-    } else if (n.column === "dests") shown.add(n.id);
+    } else if (n.column === "dests") {
+      const t = destType(n);
+      if (!t || !typesOff.has(t)) shown.add(n.id);
+    }
   }
   const lanes = () => {
     if (!g.nodes.some((n) => n.kind === "engine" && !n.gateway && shown.has(n.id))) return;
@@ -145,7 +178,7 @@ export function viewOf(g: PolicyGraph, f: MapFilters, agents: string[], opts: { 
 
   // Google API endpoints collapsed into one node (the one in the panel stays on its own, like the "no grants" groups).
   const gIds = new Set(
-    g.direction === "egress" && !f.googleApis ? g.nodes.filter((n) => n.kind === "endpoint" && n.googleApi && shown.has(n.id) && n.id !== active).map((n) => n.id) : [],
+    g.direction === "egress" && !f.googleApis ? g.nodes.filter((n) => n.kind === "endpoint" && n.googleApi && shown.has(n.id) && n.id !== active && !forced.has(n.id)).map((n) => n.id) : [],
   );
   const gNode: PNode | null = gIds.size ? googleGroupNode(g.nodes.filter((n) => gIds.has(n.id))) : null;
   const rawEdges = edges;
@@ -174,7 +207,10 @@ export function viewOf(g: PolicyGraph, f: MapFilters, agents: string[], opts: { 
   const groups = new Map<string, PNode[]>();
   for (const n of g.nodes) {
     if (!shown.has(n.id) || gIds.has(n.id)) continue;
-    const empty = g.direction === "egress" && n.column === "dests" && !granted.has(n.id) && !into.has(n.id) && !n.unreadable && n.id !== active;
+    // Shown with no grants anyway: a forced one, the one in the panel, and Google API endpoints while "Show Google API
+    // endpoints" is on (they'd otherwise just move from the Google APIs group into "+N … with no grants").
+    const keep = forced.has(n.id) || n.id === active || (f.googleApis && n.kind === "endpoint" && !!n.googleApi);
+    const empty = g.direction === "egress" && n.column === "dests" && !granted.has(n.id) && !into.has(n.id) && !n.unreadable && !keep;
     if (empty && n.kind === "registry") continue; // no registry-wide grants: nothing to show
     if (empty && opts.changesOnly) continue;
     if (empty && f.hideEmpty && !f.expanded.includes(n.section)) {
@@ -206,8 +242,8 @@ export function viewOf(g: PolicyGraph, f: MapFilters, agents: string[], opts: { 
   // Pseudo callers with no grants at all are left out (they'd only add noise).
   const touched = new Set([...edges, ...layoutEdges].flatMap((e) => [e.source, e.target]));
   const out = opts.changesOnly
-    ? nodes.filter((n) => touched.has(n.id) || n.pending || n.id === active)
-    : nodes.filter((n) => n.kind !== "principal_group" || touched.has(n.id) || selSet.has(n.id) || n.id === active);
+    ? nodes.filter((n) => touched.has(n.id) || n.pending || n.id === active || forced.has(n.id))
+    : nodes.filter((n) => n.kind !== "principal_group" || touched.has(n.id) || selSet.has(n.id) || n.id === active || forced.has(n.id));
 
   // ---------- table rows: Client-to-Agent rows are the client lines (client, the agent's gateway, the agent) ----------
   const rows = (sel.length ? rawEdges.filter((e) => !drop.has(e.id)) : g.edges.filter((e) => callerShown(e.caller) && !e.implicit && !e.inherited && shown.has(e.target) && keepLine(e, f))).filter(

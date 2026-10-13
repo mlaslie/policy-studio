@@ -268,12 +268,13 @@ describe("filters (§5.1)", () => {
     const v = viewOf(g, filters(), []);
     // by default the 38 Google API endpoints are one node: only Partner payments is left with no grants
     expect(v.nodes.find((n) => n.id === "group:api")!.grouped).toHaveLength(1);
-    // shown one by one: 25 + 13 platform Google APIs + 2 others; 16 with project-wide grants, Weather API granted,
-    // 1 unreadable (always shown), 22 grouped
+    // shown one by one: 25 + 13 platform Google APIs + 2 others, every one of the 38 Google API endpoints on its own
+    // (with or without grants: "Show Google API endpoints" asked for them); only Partner payments is still grouped
     const all = viewOf(g, filters({ googleApis: true }), []);
+    expect(all.nodes.filter((n) => n.kind === "endpoint" && n.googleApi)).toHaveLength(38);
     const group = all.nodes.find((n) => n.id === "group:api")!;
-    expect(group.grouped).toHaveLength(22);
-    expect(group.label).toBe("+22 API endpoints with no grants");
+    expect(group.grouped).toHaveLength(1);
+    expect(group.label).toBe("+1 API endpoint with no grants");
     expect(viewOf(g, filters({ googleApis: true, expanded: ["api"] }), []).nodes.some((n) => n.id === "group:api")).toBe(false);
     expect(viewOf(g, filters({ googleApis: true, hideEmpty: false }), []).nodes.filter((n) => n.kind === "endpoint")).toHaveLength(40);
   });

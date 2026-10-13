@@ -129,12 +129,19 @@ the policy behind it: one card per binding, with the member, the resource, the c
 and, for MCP servers, which tools it allows.
 
 **Filters.** Direction (Agent-to-Anywhere or Client-to-Agent); one gateway (when there's more than one); Today, With
-staged changes or Changes only. The **Objects** picker ("Objects: 3 of 42") lists every agent, gateway and destination
-by type (Agent Runtime agents, other callers, gateways, A2A agents, MCP servers, API endpoints, Google APIs), with a
-filter on name, id and URL, Select all / Clear, a checkbox per group, and "Only this" on each row; checked objects
-are on the map, and checking an agent also selects it. Its quick toggles are "Hide destinations with no grants" and
-"Show Google API endpoints". Changes apply on Apply (Enter); Cancel or Esc drops them; Enter in the filter with a
-single match shows only that object. A destination the picker hides still shows, faded and marked "(hidden by
+staged changes or Changes only; destination types (A2A agents, Agent Runtime, MCP servers, APIs: each box mirrors
+the picker's group of that type, unchecking one unchecks the other). The **Objects** picker ("Objects: 3 of 42") lists
+every object the direction can show (Agent-to-Anywhere: agents, other callers, gateways, A2A agents, MCP servers, API
+endpoints, Google APIs; Client-to-Agent: agents, gateways, clients), with a filter on name, id and URL, Select all /
+Clear, a checkbox per group, and "Only this" on each row. A row is checked exactly when its object is on the map: one
+a filter hides is unchecked, with the reason ("hidden: no grants", "hidden: type filter", "hidden: Google API
+(collapsed)", "hidden: no gateway", "hidden: other gateway", "hidden: not changed"), so changing a filter unchecks its
+rows and relaxing it checks them again. Checking a hidden row shows it anyway, marked "manual override"; changing that
+filter's toggle drops the override. Checking an agent also selects it. Its quick toggles are "Hide destinations with
+no grants" and "Show Google API endpoints". The rows show pending changes at once and the map changes on Apply
+(Enter); Cancel or Esc drops them, and a click elsewhere with changes pending keeps it open and asks for Apply or
+Cancel. Clicking agents on the canvas while it's open shows in the rows, keeping the rows you changed. Enter in the
+filter with a single match shows only that object. A destination the picker hides still shows, faded and marked "(hidden by
 filter)", while a selected agent has a line to it. All agents, Behind a gateway and No gateway are shortcuts that
 check those agents in the picker. With agents selected (Agent-to-Anywhere): Show Allows / Denies, and Inherited
 grants. Each legend entry hides or shows that kind of line. Table view lists the selected agents' lines (with none
@@ -145,7 +152,7 @@ collapses the expanded groups, forgets dragged positions, shows every object wit
 **Google APIs.** Endpoints on `*.googleapis.com` (a platform allowlist is often each API registered as host, host.mtls
 and host:443) are collapsed by default into one "Google APIs (N)" node, with their lines merged per caller and a count
 ("16 APIs"). Click it, tick "Show Google API endpoints" in the picker, or pick one of them with "Only this" to show
-them one by one; untick to collapse. Endpoint cards are titled by host (a display name that only repeats the host is dropped), shortened from the
+them one by one (every one, with or without grants); untick to collapse. Endpoint cards are titled by host (a display name that only repeats the host is dropped), shortened from the
 middle so the service name and port show (`iamcredentials.mtls…apis.com:443`); hover or the details panel shows the
 full display name and URL. The table view always lists each endpoint, tagged "Google API".
 

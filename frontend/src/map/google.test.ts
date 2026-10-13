@@ -182,10 +182,10 @@ describe("revealing an entry inside the group (the picker's Only this, Show on m
     expect(viewOf(g, filters({ googleApis: true }), []).nodes.some((n) => n.id === target.id)).toBe(true);
   });
 
-  it("an entry with no grants: the group, then its \"no grants\" group", () => {
+  it("an entry with no grants: the group is enough (shown one by one, Google API endpoints aren't grouped as \"no grants\")", () => {
     const iam = ep("IAM Credentials API").name; // no grants
     const patch = revealPatch(g, filters(), [], iam)!;
-    expect(patch).toEqual({ googleApis: true, expanded: ["api"] });
+    expect(patch).toEqual({ googleApis: true });
     expect(viewOf(g, filters(patch), []).nodes.some((n) => n.id === iam)).toBe(true);
   });
 

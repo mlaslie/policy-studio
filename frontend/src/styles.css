@@ -4081,6 +4081,21 @@ body.resizing * {
   font-size: 11.5px;
   color: var(--text-3);
 }
+/* why a row is unchecked ("hidden: no grants"), or that checking it overrode a filter */
+.pmap-pick-why {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  font-style: italic;
+  color: var(--text-3);
+}
+.pmap-pick-why.manual {
+  font-style: normal;
+  color: var(--amber);
+}
 .pmap-pick-lines,
 .pmap-pick-only {
   flex: none;
@@ -4118,7 +4133,22 @@ body.resizing * {
 .pmap-picker-foot {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
   gap: 8px;
+}
+.pmap-picker-pending {
+  margin-right: auto;
+  color: var(--text-2);
+}
+.pmap-picker-pending.nudge {
+  color: var(--amber);
+  font-weight: 600;
+}
+.pmap-types {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
 }
 .pmap-show {
   display: inline-flex;
