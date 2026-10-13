@@ -1,18 +1,18 @@
 // The scale scenario (docs/VISUALIZATION_PLAN.md §7, §11.5–11.6): the mock's us-west1 region, generated from a seeded
-// PRNG. Its size, its gateways, and the §7 budget: the graph builds in under 50 ms and stays under the 400-line banner
-// with the default filters (twice the size goes past it, and one gateway brings it back under).
+// PRNG. Its size, its gateways, and the §7 budget: the graph (every agent's own lines) builds in under 50 ms; with no
+// agent selected the map has no lines, one selected agent stays under the 400-line banner, every agent goes past it.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MOCK_NUMBER, buildWorld } from "../api/mockData";
 import { SCALE, scaleFactor } from "../api/mockScale";
 import type { Ctx } from "../api/types";
 import { buildPolicyGraph, type Direction } from "./graph";
 import { layoutView } from "./layout";
-import { DEFAULT_FILTERS, IMPLICIT_CAP, TOO_MANY_LINES, viewOf } from "./view";
+import { DEFAULT_FILTERS, DENY_CAP, TOO_MANY_LINES, viewOf } from "./view";
 
 const CTX: Ctx = { project: "my-demo-project", region: "us-west1" };
 const w = buildWorld(CTX);
 const inv = w.inventory;
-const build = (direction: Direction, focus?: string, world = w) => buildPolicyGraph({ inventory: world.inventory, gateways: world.gateways, modelArmor: world.modelArmor, direction, focus });
+const build = (direction: Direction, world = w) => buildPolicyGraph({ inventory: world.inventory, gateways: world.gateways, modelArmor: world.modelArmor, direction });
 const bindings = (x = inv) => Object.values(x.access).reduce((n, bs) => n + bs.length, 0);
 /** The fastest of a few runs (the first warms up the JIT). */
 function timed<T>(f: () => T, runs = 5): { ms: number; out: T } {
@@ -68,30 +68,36 @@ describe("us-west1: the §7 budget", () => {
     const g = timed(() => build("egress"));
     expect(g.ms).toBeLessThan(50);
     const v = timed(() => {
-      const view = viewOf(g.out, DEFAULT_FILTERS, null);
+      const view = viewOf(g.out, DEFAULT_FILTERS, []);
       return { view, layout: layoutView(view) };
     });
     expect(v.ms).toBeLessThan(50);
     expect(Object.keys(v.out.layout.pos)).toHaveLength(v.out.view.nodes.length);
-    // the selected-agent view too
+    // one agent selected (agent-017) too
     const agent = inv.engines.find((e) => e.display_name === "agent-017")!;
-    expect(timed(() => build("egress", agent.name)).ms).toBeLessThan(50);
+    const one = timed(() => {
+      const view = viewOf(g.out, DEFAULT_FILTERS, [agent.name]);
+      return { view, layout: layoutView(view) };
+    });
+    expect(one.ms).toBeLessThan(50);
+    expect(one.out.view.agents).toEqual([agent.name]);
   });
 
-  it("combines lines: a few hundred instead of one per grant, under the banner with the default filters", () => {
+  it("lines only for the selected agents: none by default, one agent under the banner, every agent past it", () => {
     const g = build("egress");
-    const v = viewOf(g, DEFAULT_FILTERS, null);
-    const perAgent = v.edges.flatMap((e) => e.parts ?? [e]).filter((e) => e.verdict !== "path").length;
-    expect(v.lines).toBeGreaterThan(250);
-    expect(v.lines).toBeLessThanOrEqual(TOO_MANY_LINES);
-    expect(perAgent).toBeGreaterThan(v.lines);
-    // one gateway: fewer lines
-    const one = viewOf(g, { ...DEFAULT_FILTERS, gateway: w.gateways[0].name }, null);
-    expect(one.lines).toBeLessThan(v.lines / 2);
+    expect(viewOf(g, DEFAULT_FILTERS, []).lines).toBe(0);
+    const behind = inv.engines.filter((e) => e.gateways.egress);
+    const one = viewOf(g, DEFAULT_FILTERS, [behind[0].name]);
+    expect(one.lines).toBeGreaterThan(0);
+    expect(one.lines).toBeLessThanOrEqual(TOO_MANY_LINES);
+    const all = viewOf(g, DEFAULT_FILTERS, inv.engines.map((e) => e.name));
+    expect(all.lines).toBeGreaterThan(TOO_MANY_LINES);
+    // Allows only: much fewer
+    expect(viewOf(g, { ...DEFAULT_FILTERS, denies: false }, inv.engines.map((e) => e.name)).lines).toBeLessThan(all.lines / 2);
   });
 
   it("wraps the callers into sub-columns, so the map is about as tall as its destination column", () => {
-    const v = viewOf(build("egress"), DEFAULT_FILTERS, null);
+    const v = viewOf(build("egress"), DEFAULT_FILTERS, []);
     const { pos, size } = layoutView(v);
     const span = (ids: string[]) => Math.max(...ids.map((id) => pos[id].y + size[id].h)) - Math.min(...ids.map((id) => pos[id].y));
     const callers = v.nodes.filter((n) => n.column === "callers").map((n) => n.id);
@@ -103,10 +109,10 @@ describe("us-west1: the §7 budget", () => {
     expect(Math.min(...gw)).toBeGreaterThan(Math.max(...callers.map((id) => pos[id].x + size[id].w)));
   });
 
-  it("caps the selected agent's default-deny lines", () => {
-    const behind = inv.engines.find((e) => e.display_name.startsWith("agent-") && e.gateways.egress)!;
-    const v = viewOf(build("egress", behind.name), DEFAULT_FILTERS, behind.name);
-    expect(v.edges.filter((e) => e.implicit)).toHaveLength(IMPLICIT_CAP);
+  it("caps each selected agent's default-deny lines", () => {
+    const behind = inv.engines.filter((e) => e.display_name.startsWith("agent-") && e.gateways.egress).slice(0, 2);
+    const v = viewOf(build("egress"), { ...DEFAULT_FILTERS, googleApis: true }, behind.map((e) => e.name));
+    for (const e of behind) expect(v.edges.filter((x) => x.implicit && x.caller === e.name)).toHaveLength(DENY_CAP);
     expect(v.more).toBeGreaterThan(0);
   });
 
@@ -118,9 +124,9 @@ describe("us-west1: the §7 budget", () => {
     const big = buildWorld(CTX);
     expect(big.inventory.engines).toHaveLength(2 * SCALE.engines);
     expect(bindings(big.inventory)).toBe(2 * SCALE.bindings);
-    const g = timed(() => build("egress", undefined, big), 3);
+    const g = timed(() => build("egress", big), 3);
     expect(g.ms).toBeLessThan(100);
-    expect(viewOf(g.out, DEFAULT_FILTERS, null).lines).toBeGreaterThan(TOO_MANY_LINES);
-    expect(viewOf(g.out, { ...DEFAULT_FILTERS, gateway: big.gateways[0].name }, null).lines).toBeLessThanOrEqual(TOO_MANY_LINES);
+    expect(viewOf(g.out, DEFAULT_FILTERS, []).lines).toBe(0);
+    expect(viewOf(g.out, DEFAULT_FILTERS, [big.inventory.engines.find((e) => e.gateways.egress)!.name]).lines).toBeLessThanOrEqual(TOO_MANY_LINES);
   });
 });

@@ -22,7 +22,7 @@ import { TemplateCard } from "../steps/ModelArmorStep";
 import { plural } from "../lib/util";
 import type { PEdge, PNode, Reason } from "./graph";
 import { evaluateTools } from "./evaluate";
-import { PENDING_WORD, VERDICT_LABEL, VIA_LABEL } from "./toFlow";
+import { PENDING_WORD, VERDICT_LABEL, VIA_LABEL, lineFrom } from "./toFlow";
 import { pendingText } from "./diff";
 import { allowFor, bindFor, ingressInfo, isGroupGrant, limitToAgent, modifyFor, reachedBy, reasonGrant, revokeFor, sameAccess } from "./actions";
 
@@ -83,7 +83,7 @@ export default function PolicyPanel({ edge, node, inv, gateways, nodeOf, label, 
     e.stopPropagation();
     onClose();
   };
-  const from = edge ? label(edge.caller && edge.caller !== edge.target ? edge.caller : edge.source) : "";
+  const from = edge ? lineFrom(edge, label) : "";
   return (
     <aside className="pmap-panel glass" ref={ref} tabIndex={-1} aria-label={edge ? `Policy for the line ${from} to ${label(edge.target)}` : `Details of ${node?.label ?? ""}`} onKeyDown={onKey}>
       <div className="pmap-panel-head">
@@ -113,8 +113,8 @@ export default function PolicyPanel({ edge, node, inv, gateways, nodeOf, label, 
 // ------------------------------------------------------------------ a line
 function EdgeDetails({ edge, inv, gateways, nodeOf, label }: { edge: PEdge; inv: Inventory; gateways: Gateway[]; nodeOf: (id: string) => PNode | undefined; label: (id: string) => string }) {
   const openGateway = useOpenGateway();
-  // a line into the collapsed Google APIs group stands for one line per endpoint (each maybe combined per agent)
-  const parts = edge.members ? edge.members.flatMap((m) => m.parts ?? [m]) : (edge.parts ?? [edge]);
+  // a line into the collapsed Google APIs group stands for one line per endpoint
+  const parts = edge.members ?? [edge];
   const gwNode = edge.gateway ? nodeOf(edge.gateway) : undefined;
   const caller = edge.caller ? inv.engines.find((e) => e.name === edge.caller) : undefined;
   const dest = nodeOf(edge.target);
@@ -220,7 +220,7 @@ function EdgeDetails({ edge, inv, gateways, nodeOf, label }: { edge: PEdge; inv:
 
       {parts.some((p) => p.reasons.length) && (
         <>
-          <h4 className="pmap-h4">{edge.members ? `Why: ${plural(parts.reduce((k, p) => k + p.reasons.length, 0), "grant")} on this line` : parts.length > 1 ? `Why: ${plural(parts.length, "agent")} on this line` : "Why"}</h4>
+          <h4 className="pmap-h4">{edge.members ? `Why: ${plural(parts.reduce((k, p) => k + p.reasons.length, 0), "grant")} on this line` : "Why"}</h4>
           {parts.map((p) =>
             p.reasons.map((r, i) => (
               <ReasonCard key={`${p.caller}|${p.target}|${i}|${r.binding.member}|${r.resource}`} r={r} part={p} multi={parts.length > 1} head={edge.members ? `${label(p.caller ?? p.source)} → ${label(p.target)}` : undefined} inv={inv} label={label} />

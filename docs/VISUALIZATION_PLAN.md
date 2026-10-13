@@ -1,6 +1,6 @@
 # Policy Studio: Policy Map (visualization plan)
 
-Status: implemented, phases 0–6 of [§15](#15-phases-rough-sizes): [phase 0 and 0b](#15-phases-rough-sizes) (step keys, the map as step 1, the `modify` intent) in 833d824, phases 1–2 (graph, canvas, filters, table view) in ddf9186, phases 3–4 (policy panel, actions, staged view, saved positions) in 10bd7f5, and phases 5–6 (Client-to-Agent actions, the us-west1 scale scenario, performance, docs) after it. The optional phases 7 and 8 aren't started. Scope: the frontend (`frontend/src`) plus one backend addition (`modify`). Every change still goes through the cart, then Review, then Apply.
+Status: implemented, phases 0–6 of [§15](#15-phases-rough-sizes): [phase 0 and 0b](#15-phases-rough-sizes) (step keys, the map as step 1, the `modify` intent) in 833d824, phases 1–2 (graph, canvas, filters, table view) in ddf9186, phases 3–4 (policy panel, actions, staged view, saved positions) in 10bd7f5, and phases 5–6 (Client-to-Agent actions, the us-west1 scale scenario, performance, docs) after it. The optional phases 7 and 8 aren't started. **Redesign (2026-10-12):** lines only for selected agents, each agent's own (never combined), the object picker in place of search and the type checkboxes, Show: Allows / Denies, and Reset view; see [§5.4](#54-redesign-2026-10-12-lines-only-for-selected-agents-the-object-picker). Scope: the frontend (`frontend/src`) plus one backend addition (`modify`). Every change still goes through the cart, then Review, then Apply.
 
 ## 1. Goal
 
@@ -133,7 +133,7 @@ For each engine E and destination D in the inventory:
 
 ### 4.5 Routing
 
-The direction is always left to right: callers, then gateway, then destinations, like the demo. Each engine has one trunk segment to its gateway, as in the demo's `seg:orch-egress`. Outside the selected-agent view, gateway-to-destination lines are **combined per destination**: one line, verdict = the best of its contributors, with a count badge ("3 agents"). Selecting an agent replaces this with that agent's own lines, including tool rows and inherited and implicit lines. This keeps the count in the hundreds and readable.
+The direction is always left to right: callers, then gateway, then destinations, like the demo. Each engine has one trunk segment to its gateway, as in the demo's `seg:orch-egress`. ~~Outside the selected-agent view, gateway-to-destination lines are **combined per destination**: one line, verdict = the best of its contributors, with a count badge ("3 agents"). Selecting an agent replaces this with that agent's own lines, including tool rows and inherited and implicit lines. This keeps the count in the hundreds and readable.~~ **Superseded 2026-10-12** ([§5.4](#54-redesign-2026-10-12-lines-only-for-selected-agents-the-object-picker)): combined lines and their "N agents" badges are gone. Every line belongs to one agent and only the selected agents' lines are drawn; with none selected the map is nodes only.
 
 ## 5. Filters and interaction
 
@@ -144,18 +144,18 @@ The direction is always left to right: callers, then gateway, then destinations,
   - `Behind a gateway`: shows allowed connections to remote destinations.
   - `No gateway`: these agents have no policy at all; traffic goes straight out. Each node offers "Stage: bind to <egress gateway>" (a `bind_gateway` intent, as in GatewaysStep). It is disabled when `bindable` is false, with the `Redeploy` help.
 - **Gateway** dropdown (only when there's more than one gateway in that direction).
-- **Destination types:** A2A, Agent Runtime, MCP, APIs (the same categories as `DEST_TYPES` in BuilderStep), plus "Hide destinations with no grants" (default on; groups them into an `endpoint_group` node "+22 API endpoints with no grants", which expands on click).
+- ~~**Destination types:** A2A, Agent Runtime, MCP, APIs (the same categories as `DEST_TYPES` in BuilderStep), plus "Hide destinations with no grants" (default on; groups them into an `endpoint_group` node "+22 API endpoints with no grants", which expands on click).~~ **Superseded 2026-10-12:** the type checkboxes are gone; the object picker's group checkboxes replace them (§5.4). "Hide destinations with no grants" (default on; an `endpoint_group` node "+22 API endpoints with no grants", which expands on click) is one of the picker's quick toggles; "no grants" now means no grant from any shown caller, whatever is selected.
 - **Show Google API endpoints** (default off). Endpoints whose URL host is `*.googleapis.com` (any port) are often a platform allowlist, each API registered as host, host.mtls and host:443 and granted project-wide; one by one they crowd out the real destinations. Off, they're one `google_apis` node, "Google APIs (N)", in the API endpoints section, and lines into them are merged per source and kind (granted, default deny) with the best verdict and a count ("16 APIs"); the selected-agent view gets one inherited line and one default-deny line into it. The checkbox is the group's only state: clicking the group, or a search or "Show on map" match inside it, ticks it; unticking collapses it. A selected Google API endpoint stays on its own. Other endpoints are never grouped this way (`view.ts`, `labels.ts`).
 - **Endpoint labels** (`labels.ts`): the card title is the host (plus the port when the URL spells one out, since host and host:443 are separate entries) when the display name is empty, equals the host or ends with it ("acme-prod cloudtrace.googleapis.com" → "cloudtrace.googleapis.com"), else the display name. Long hosts are shortened from the middle, eliding the shared domain first (`iamcredentials.mtls…apis.com:443`), in a mono title on a wider card. The full display name and URL are on hover and in the details panel; the table view uses the same labels, in full, with a "Google API" tag.
-- **Search:** matches node labels and ids (endpoints also their display name and URL), centers on and briefly highlights the matching node, expanding the Google APIs group and then the "no grants" group when they hide it.
+- ~~**Search:** matches node labels and ids (endpoints also their display name and URL), centers on and briefly highlights the matching node, expanding the Google APIs group and then the "no grants" group when they hide it.~~ **Superseded 2026-10-12:** the object picker's text filter (§5.4) keeps this: it matches name, id and URL, and Enter on a single match does "Only this" and Apply, expanding the Google APIs group and then the "no grants" group when they hide it.
 - **Show:** `Today` | `With staged changes` (default when the cart isn't empty) | `Changes only`.
-- **Toggles:** "Inherited grants" (project-wide / public / registry-wide on the selected agent), "Implicit denies".
+- **Toggles:** "Inherited grants" (project-wide / public / registry-wide on the selected agent), ~~"Implicit denies"~~ (superseded 2026-10-12 by Show: Allows / Denies, §5.4).
 - The **legend** doubles as a verdict filter (click to hide or show `allowed`, `partial`, `would_deny`, and so on).
-- Buttons: Fit, Reset layout, Table view.
+- Buttons: Fit, ~~Reset layout~~ Reset view (2026-10-12, §5.4), Table view.
 
 ### 5.2 Showing "block" under default deny
 - **Implicit blocked lines are never drawn for everyone.** With N agents and M destinations that's N×M lines, and it says nothing beyond "default deny".
-- **Selected agent:** with "Implicit denies" on, thin red dashed lines with an ✕ badge go from that agent to each visible destination it can't reach. They're capped at 60, then "+N more" appears on the column. With no agent selected, each gateway-backed engine shows "denied by default: 18 destinations".
+- **Selected agent:** with Show: Denies on (2026-10-12; was "Implicit denies"), thin red dashed lines with an ✕ badge go from that agent to each visible destination it can't reach. They're capped at 60 per agent, then "+N more". With no agent selected, each gateway-backed engine shows "2 allowed" and "denied by default: 18".
 - **Dry run:** the same lines use the `would_deny` style (amber dashed line with a red ✕ outline, labelled "Would be denied: passes today (dry run)"). The gateway node gets an amber "Dry run: nothing is blocked" chip. Partial grants in dry run show the denied tools as "would deny".
 - **Model Armor:** a shield on the gateway node (with the template id and a hover summary from `Template.summary`). Every line through that gateway gets a small shield marker at the gateway end. Model Armor doesn't change allow or deny; it screens content. If the CONTENT_AUTHZ policy is `DRY_RUN`, the shield is outlined ("screening, not blocking").
 - **Conditional grants:**
@@ -166,9 +166,21 @@ The direction is always left to right: callers, then gateway, then destinations,
 - **No gateway:** grants held by an unbound agent are `dormant` (gray dotted, "not enforced: no gateway").
 
 ### 5.3 Clicks
-- **Click a node:** selects it. For an engine or pseudo caller, this switches to the selected-agent view; double-click or "Clear" leaves it. The side panel shows node details: identity type, gateways, bindable, counts, and actions (bind or unbind, "Build a policy for this agent", which calls `openBuilder` with the source).
+- **Click a node:** selects it. For an engine or pseudo caller, this ~~switches to the selected-agent view; double-click or "Clear" leaves it~~ toggles its selection (2026-10-12: its lines are drawn or hidden, and several agents can be selected); "Clear" or Esc deselects them all. The side panel shows node details: identity type, gateways, bindable, counts, and actions (bind or unbind, "Build a policy for this agent", which calls `openBuilder` with the source).
 - **Click a line:** the policy detail panel (section 9).
 - **Drag nodes, pan, wheel or pinch zoom:** with `minZoom 0.2`, `maxZoom 2`, `zoomOnDoubleClick` off (as in the demo). (Implemented with `minZoom 0.08`, so Fit shows the whole us-west1 scale map.)
+
+### 5.4 Redesign (2026-10-12): lines only for selected agents, the object picker
+
+Decided 2026-10-12; supersedes the combined lines (§4.5), the destination-type checkboxes, search and "Implicit denies" (§5.1), and "Reset layout" (§7).
+- **Lines only for selected agents.** With no agent selected the map shows nodes only, both directions, with a hint ("Select an agent (click it, or use the picker) to see what it can reach."). Agents keep their summary chips ("2 allowed · Denied by default: 11"). When exactly one agent is in view it's selected automatically (once per set of agents in view, so deselecting it sticks).
+- **Per agent, never combined.** `graph.ts` builds every caller's own lines (`caller` on every line): its trunk (or its direct lane and its own No gateway → Anywhere line), then one line per destination with its own verdict (allowed, partial, conditional, inherited, blocked or would_deny, dormant) and the pseudo callers' lines. `view.ts` draws the selected callers' lines only. With several agents selected, each agent's lines are moved a few px apart at the shared ends, labels and tooltips name the agent, badges are staggered, and hovering an agent (or its line) dims the others' lines.
+- **Show: Allows / Denies** (Agent-to-Anywhere, while an agent is selected): Allows = allowed, partial, conditional, inherited and not-enforced grants; Denies = the default-deny lines (blocked, would_deny, unchecked). Lanes always show. Default-deny lines are capped at 60 per agent ("+N more"). Client-to-Agent has no denies, so no control.
+- **The object picker** ("Objects: 3 of 42") replaces search and the type checkboxes: text filter (name, id, URL), Select all / Clear, groups by type with counts and a group checkbox, multi-select checkboxes, "Only this" on hover or focus, quick toggles (Hide destinations with no grants, Show Google API endpoints), Cancel / Apply on a draft. Checked = on the map. Checking an agent row also selects it; group checkboxes, Select all and the affiliation shortcut only show or hide. A checked agent's row has a "Lines" toggle (select or deselect without hiding). Clicking an agent on the canvas toggles its selection. A hidden destination (or gateway) that a selected agent has a line to is drawn faded, "(hidden by filter)". All agents / Behind a gateway / No gateway pre-set the agents' (and gateways') checks; the button lights when the checks match one. Saved per project, region and direction (`studio.map.picker.v1:…`, next to the pins).
+- **Reset view** collapses the expanded groups, clears pins, resets the picker (everything visible, nothing selected, then auto-select), and fits the layout's bounds. Direction, Allows / Denies and Inherited grants stay.
+- **Table view** lists the selected agents' lines; with none selected, every shown agent's own grants (and the pseudo callers'), so it stays a full alternative for screen readers.
+- **Changes only** with nothing selected draws the lines of every agent the cart changes.
+- **Fixed with it:** the custom node type for "+N … with no grants" was named `group`, one of React Flow's built-in types, so its wrapper got React Flow's group-node styles (150px wide, 10px padding, a dark 1px border, a translucent fill, and a selection shadow): a stray rectangle behind the card. It's `nogrants` now, every node wrapper is reset (no padding, border, fill or shadow), and focus and selection are a ring on the card itself.
 
 ## 6. Direction-specific views
 
@@ -202,15 +214,15 @@ A CLIENT_TO_AGENT gateway **doesn't check caller identity**. It screens content 
 4. Without a selected agent, MCP nodes are compact (a "6 tools" chip). They expand to tool rows when selected or when an agent is selected; node height comes from a `nodeHeight()` like the demo's.
 
 **Scale target:** 50 engines, 100 destinations, 500 bindings, below 16 ms per pan frame on a laptop.
-- Combined lines plus the selected-agent view (section 4.5).
+- ~~Combined lines plus the selected-agent view (section 4.5).~~ Superseded 2026-10-12: lines only for the selected agents (§5.4); the layout orders nodes by every shown caller's own grants, so selecting doesn't move them.
 - `onlyRenderVisibleElements`, memoized node and line components (as in the demo), and `buildPolicyGraph` inside `useMemo` keyed on the data objects and the cart.
 - Particles (`animateMotion`) only on lines in the current selection, and none under `prefers-reduced-motion`.
-- Too many lines: when the combined count exceeds 400, a banner suggests narrowing the filters.
+- Too many lines: when the drawn lines exceed 400, a banner suggests selecting fewer agents (or unticking Denies).
 
 **Saved positions: yes, localStorage, only for nodes you drag.**
 - Key: `studio.map.v1:<project>:<region>:<direction>` → `{[nodeId]: {x, y}}`, written with `save()` from `lib/util.ts` and debounced on `onNodeDragStop`.
 - Auto layout places every node that hasn't been pinned. Pinned nodes keep their place across Sync and filter changes. Ids no longer in the graph are dropped on load. A `v1` layout-version bump clears everything.
-- "Reset layout" clears the key. A pinned node shows a pin icon; "Unpin" sends that one node back to auto layout.
+- "Reset view" (was "Reset layout") clears the key. A pinned node shows a pin icon; "Unpin" sends that one node back to auto layout.
 - Zoom and pan aren't saved: it fits on open and on direction or filter change, using the demo's `Fitter` (it re-fits after layout animation and on resize).
 - Moves between lanes (bind or unbind staged) glide, using the demo's `useAnimatedPositions`.
 
@@ -327,6 +339,7 @@ New, under `frontend/src/map/`:
 - `MapTable.tsx`: the table view.
 - `usePositions.ts`: localStorage pins.
 - `labels.ts`: endpoint labels (host title, middle ellipsis) and Google API detection; tested in `google.test.ts` with the Google APIs group.
+- `picker.ts`, `ObjectPicker.tsx` (2026-10-12, §5.4): the object picker's pure logic (rows, filter, groups, Only this, Apply, the affiliation shortcut, auto-select, Reset view, Show on map focus, saved state) and its popover; tested in `picker.test.ts`.
 
 Also new: `components/AccessChooser.tsx` and `lib/checks.ts` (pulled out of BuilderStep).
 
@@ -376,7 +389,7 @@ Total for v1 (phases 0–6): about 13–17 days.
 4. Is the optional backend `engine-access` (Agent Runtime IAM) wanted, so the ingress view can name real callers?
 5. ~~Change access~~: **decided 2026-10-12: a single `modify` intent** (section 9.1).
 6. Inherited grants: should "Limit to this agent instead" be offered by default, or is that too much of a change to suggest?
-7. Implicit-deny cap: are 60 lines on the selected agent and summary counts elsewhere right for your largest project?
+7. Implicit-deny cap: are 60 lines per selected agent and summary counts elsewhere right for your largest project?
 8. Grants above the registry (project, folder, organization) aren't read, as in `dryrun.py`. Is a note on the map enough?
 9. Tests: is adding vitest (and optionally Playwright) to the frontend acceptable?
 10. Should the observed-traffic overlay (phase 7) be part of v1, given it reuses `/gateway-logs` with no backend work?

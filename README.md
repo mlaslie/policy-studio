@@ -117,30 +117,42 @@ picked): no extra backend call, and nothing is written from it. See [docs/VISUAL
 **What it shows.** Agent-to-Anywhere (the default) reads left to right: your Agent Runtime agents grouped by egress
 gateway (and a "No gateway" group), the gateways, then the destinations (Agent Registry entries: A2A agents, Agent
 Runtime agents, MCP servers, API endpoints, and a registry-wide node when there are registry-wide grants). Every line
-comes from a `roles/iap.egressor` binding, matched the same way as the dry-run check in the backend. Lines are
-combined per gateway and destination ("3 agents"); select an agent to see its own lines, including grants it
-inherits from a project-wide, public, group or registry-wide binding. Those bindings are drawn once from pseudo
-callers ("All agents in this project", "Public", "Other principals"). Click a line for the policy behind it: one card
-per binding, with the member, the resource, the condition (plain English and CEL) and, for MCP servers, which tools
-it allows.
+comes from a `roles/iap.egressor` binding, matched the same way as the dry-run check in the backend. Lines are drawn
+only for the agents you select: with none selected the map shows nodes only, each agent with a summary ("2 allowed ·
+Denied by default: 11"). Click an agent (or check it in the picker) to draw its lines: its trunk to its gateway, then
+one line to each destination with its own verdict, including the grants it inherits from a project-wide, public,
+group or registry-wide binding. With several agents selected each one's lines stay its own (never combined), a few
+pixels apart where they meet, labelled with the agent; hover an agent or one of its lines to bring its path forward.
+When exactly one agent is in view it's selected for you. Project-wide, public and other bindings also have pseudo
+callers ("All agents in this project", "Public", "Other principals") you can select the same way. Click a line for
+the policy behind it: one card per binding, with the member, the resource, the condition (plain English and CEL)
+and, for MCP servers, which tools it allows.
 
-**Filters.** Direction (Agent-to-Anywhere or Client-to-Agent); All agents, Behind a gateway or No gateway; one gateway
-(when there's more than one); destination types; "Hide destinations with no grants"; "Show Google API endpoints"; search; Today, With staged
-changes or Changes only. With an agent selected: Inherited grants and Implicit denies. Each legend entry hides or
-shows that kind of line. Table view lists the same lines as a table. Past 400 lines a banner suggests narrowing the
-filters. Nodes you drag keep their place (saved in the browser per project, region and direction; Reset layout
-forgets them).
+**Filters.** Direction (Agent-to-Anywhere or Client-to-Agent); one gateway (when there's more than one); Today, With
+staged changes or Changes only. The **Objects** picker ("Objects: 3 of 42") lists every agent, gateway and destination
+by type (Agent Runtime agents, other callers, gateways, A2A agents, MCP servers, API endpoints, Google APIs), with a
+filter on name, id and URL, Select all / Clear, a checkbox per group, and "Only this" on each row; checked objects
+are on the map, and checking an agent also selects it. Its quick toggles are "Hide destinations with no grants" and
+"Show Google API endpoints". Changes apply on Apply (Enter); Cancel or Esc drops them; Enter in the filter with a
+single match shows only that object. A destination the picker hides still shows, faded and marked "(hidden by
+filter)", while a selected agent has a line to it. All agents, Behind a gateway and No gateway are shortcuts that
+check those agents in the picker. With agents selected (Agent-to-Anywhere): Show Allows / Denies, and Inherited
+grants. Each legend entry hides or shows that kind of line. Table view lists the selected agents' lines (with none
+selected, every agent's own grants). Past 400 lines a banner suggests selecting fewer agents. Nodes you drag keep
+their place; the picker is remembered too (both saved in the browser per project, region and direction). Reset view
+collapses the expanded groups, forgets dragged positions, shows every object with no agent selected, and fits.
 
 **Google APIs.** Endpoints on `*.googleapis.com` (a platform allowlist is often each API registered as host, host.mtls
 and host:443) are collapsed by default into one "Google APIs (N)" node, with their lines merged per caller and a count
-("16 APIs"). Click it, tick "Show Google API endpoints", or search for one of them to show them one by one; untick to
-collapse. Endpoint cards are titled by host (a display name that only repeats the host is dropped), shortened from the
+("16 APIs"). Click it, tick "Show Google API endpoints" in the picker, or pick one of them with "Only this" to show
+them one by one; untick to collapse. Endpoint cards are titled by host (a display name that only repeats the host is dropped), shortened from the
 middle so the service name and port show (`iamcredentials.mtls…apis.com:443`); hover or the details panel shows the
 full display name and URL. The table view always lists each endpoint, tagged "Google API".
 
-**Blocked lines.** Default deny isn't drawn for everyone (that would be one line per agent and destination). Each
-agent behind a gateway shows a count ("Denied by default: 18"); select it to draw its default-deny lines (red,
-dashed, with a ✕), at most 60. When the gateway is in dry run they're amber "would be denied: passes today" lines and
+**Blocked lines.** Default deny is drawn only for selected agents (otherwise it would be one line per agent and
+destination). Each agent behind a gateway shows a count ("Denied by default: 18"); select it to draw its default-deny
+lines (red, dashed, with a ✕), at most 60 per agent ("+N more"); untick Show: Denies to hide them. When the gateway is
+in dry run they're amber "would be denied: passes today" lines and
 the gateway says "Dry run: nothing is blocked". Grants held by an agent with no egress gateway are drawn as "not
 enforced" (gray, dotted): nothing checks them. Color is never the only cue: dash patterns, badges and labels tell the
 kinds apart.
@@ -148,7 +160,7 @@ kinds apart.
 **Client-to-Agent, honestly.** A Client-to-Agent gateway doesn't check caller identity: it screens content with Model
 Armor. Who may call an agent is decided by the agent's Agent Runtime IAM, which Policy Studio doesn't read, so callers
 are shown as "Any allowed caller" (plus the Gemini Enterprise app from Context, if set) and lines are screened,
-unscreened or direct. An IAP policy configured on an ingress gateway is shown as configured, not as an identity check.
+unscreened or direct, drawn (as in Agent-to-Anywhere) only for the agents you select; there are no denies to show. An IAP policy configured on an ingress gateway is shown as configured, not as an identity check.
 Clicking an ingress line shows the gateway and its Model Armor template, and says there's no allow policy to show.
 
 **Actions only stage.** Revoke, Change access (one `modify`), Allow…, Limit to this agent, Bind, Unbind, and Model Armor

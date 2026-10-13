@@ -1,6 +1,6 @@
 // Saved node positions (docs/VISUALIZATION_PLAN.md §7): only nodes you drag (or move with the arrow keys) are pinned,
 // per project, region and direction, in localStorage. Auto layout places everything else. Pinned nodes keep their
-// place across Sync and filter changes; ids no longer in the graph are dropped on load; Reset layout clears the key.
+// place across Sync and filter changes; ids no longer in the graph are dropped on load; Reset view clears the key.
 // Zoom and pan aren't saved. Every storage access is wrapped: private windows and disabled storage just don't pin.
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Direction } from "./graph";
@@ -15,7 +15,8 @@ export type PinStore = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 export const posKey = (project: string, region: string, direction: Direction) => `studio.map.v1:${project}:${region}:${direction}`;
 const SAVE_MS = 400;
 
-const storage = (): PinStore | null => {
+/** localStorage, or null where it can't be reached (shared with the picker's saved state). */
+export const storage = (): PinStore | null => {
   try {
     return typeof localStorage === "undefined" ? null : localStorage;
   } catch {
@@ -111,7 +112,7 @@ export function usePositions(key: string, known: (id: string) => boolean, ready:
     },
     [write],
   );
-  /** Reset layout: every node back to auto layout, the saved key cleared. */
+  /** Reset view: every node back to auto layout, the saved key cleared. */
   const reset = useCallback(() => write({}, false), [write]);
   return { pins, pin, unpin, reset };
 }

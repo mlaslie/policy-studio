@@ -19,11 +19,11 @@ const dest = (name: string) => [...inv.agents, ...inv.mcp_servers, ...inv.endpoi
 const hd = eng("Helpdesk Agent");
 const hr = eng("HR Assistant");
 const tickets = dest("Tickets MCP");
-const graph = (focus?: string, w = w0) => buildPolicyGraph({ inventory: w.inventory, gateways: w.gateways, modelArmor: w.modelArmor, direction: "egress", focus });
-const line = (ls: PEdge[] | null, caller: string, target: string) => ls!.find((l) => l.caller === caller && l.target === target)!;
+const graph = (w = w0) => buildPolicyGraph({ inventory: w.inventory, gateways: w.gateways, modelArmor: w.modelArmor, direction: "egress" });
+const line = (ls: PEdge[], caller: string, target: string) => ls.find((l) => l.caller === caller && l.target === target)!;
 
 describe("panel actions: revoke and change access", () => {
-  const r = line(graph(hd.name).focusLines, hd.name, tickets.name).reasons[0];
+  const r = line(graph().edges, hd.name, tickets.name).reasons[0];
 
   it("Revoke carries the binding's exact condition", () => {
     const i = revokeFor(r, byP);
@@ -44,7 +44,7 @@ describe("panel actions: revoke and change access", () => {
   });
 
   it("an unconditional grant: revoke without a condition, modify from mode all", () => {
-    const kb = line(graph(hd.name).focusLines, hd.name, dest("Knowledge Base Agent").name).reasons.find((x) => x.binding.member === hd.principal)!;
+    const kb = line(graph().edges, hd.name, dest("Knowledge Base Agent").name).reasons.find((x) => x.binding.member === hd.principal)!;
     expect(revokeFor(kb, byP).access).toEqual({ mode: "all" });
     expect(modifyFor(kb, byP, { mode: "read_only_hint" }).access_from).toEqual({ mode: "all" });
   });
@@ -52,7 +52,7 @@ describe("panel actions: revoke and change access", () => {
 
 describe("Limit to this agent instead", () => {
   const vertex = dest("Vertex AI API");
-  const r = line(graph(hd.name).focusLines, hd.name, vertex.name).reasons.find((x) => x.via === "project_agents")!;
+  const r = line(graph().edges, hd.name, vertex.name).reasons.find((x) => x.via === "project_agents")!;
 
   it("is a grant for this agent with the same access plus the revoke of the group binding", () => {
     const [grant, revoke] = limitToAgent(r, hd, byP);
@@ -64,8 +64,8 @@ describe("Limit to this agent instead", () => {
   it("applied: this agent keeps the access, the others lose it", () => {
     const sim = simulate({ inventory: inv, gateways: w0.gateways, modelArmor: w0.modelArmor }, limitToAgent(r, hd, byP));
     const w = { ...w0, inventory: sim.inventory, gateways: sim.gateways };
-    expect(line(graph(hd.name, w).focusLines, hd.name, vertex.name)).toMatchObject({ verdict: "allowed", inherited: false });
-    expect(line(graph(hr.name, w).focusLines, hr.name, vertex.name)).toMatchObject({ implicit: true });
+    expect(line(graph(w).edges, hd.name, vertex.name)).toMatchObject({ verdict: "allowed", inherited: false });
+    expect(line(graph(w).edges, hr.name, vertex.name)).toMatchObject({ implicit: true });
   });
 
   it("keeps a condition: a read-only group grant stays read-only for the agent", () => {
@@ -119,13 +119,16 @@ describe("Client-to-Agent line actions (§6.3)", () => {
     expect(info.ma?.template?.summary?.length).toBeGreaterThan(0);
   });
 
-  it("a client's line into a lane lists every agent in it", () => {
-    const info = ingressInfo(lineId(`i:${CLIENT.any}|${INGRESS.name}`), inv, w0.gateways, maResp());
-    expect(info.bound.map((b) => b.engine.display_name).sort()).toEqual(["HR Assistant", "Helpdesk Agent"]);
+  it("a client's line into an agent's lane: that agent; a lane-wide line (no agent) lists every agent in it", () => {
+    const own = lineId(`i:${CLIENT.any}|${INGRESS.name}|${hd.name}`);
+    expect(ingressInfo(own, inv, w0.gateways, maResp()).bound.map((b) => b.engine.display_name)).toEqual(["Helpdesk Agent"]);
+    const lane = { ...own, id: "lane", caller: undefined };
+    expect(ingressInfo(lane, inv, w0.gateways, maResp()).bound.map((b) => b.engine.display_name).sort()).toEqual(["HR Assistant", "Helpdesk Agent"]);
   });
 
   it("no ingress gateway: Bind for each agent (the unbindable one with its reason), no Model Armor action", () => {
-    const info = ingressInfo(lineId(`i:${CLIENT.any}|${NOGW.ingress}`), inv, w0.gateways, maResp());
+    const lane = { ...lineId(`i:${CLIENT.any}|${NOGW.ingress}|${travel.name}`), id: "lane", caller: undefined };
+    const info = ingressInfo(lane, inv, w0.gateways, maResp());
     expect(info.gateway).toBeNull();
     expect(info.maAction).toBeNull();
     expect(info.unbound.map((u) => [u.engine.name, u.why === null])).toEqual([
@@ -140,7 +143,8 @@ describe("Client-to-Agent line actions (§6.3)", () => {
   it("no Model Armor extension in the region (us-central1): Set up Model Armor instead of Turn on", () => {
     const w = buildWorld({ ...CTX, region: "us-central1" });
     const gw = w.gateways.find((g) => g.type === "ingress")!;
-    const info = ingressInfo(lineId(`i:${CLIENT.any}|${gw.name}`, w), w.inventory, w.gateways, maResp(w));
+    const helpdesk = w.inventory.engines.find((e) => e.display_name === "Helpdesk Agent")!;
+    const info = ingressInfo(lineId(`i:${CLIENT.any}|${gw.name}|${helpdesk.name}`, w), w.inventory, w.gateways, maResp(w));
     expect(info.maAction).toEqual({ kind: "setup" });
     expect(info.iap).toBeNull();
   });
@@ -191,7 +195,7 @@ describe("Show on map focus", () => {
     const g = w0.audit().grants.find((x) => x.member === hd.principal && x.resource === tickets.name)!;
     const f = focusForGrant(g, inv);
     expect(f).toEqual({ direction: "egress", node: hd.name, target: tickets.name });
-    const v = viewOf(graph(hd.name), DEFAULT_FILTERS, hd.name);
+    const v = viewOf(graph(), DEFAULT_FILTERS, [hd.name]);
     expect(findFocusEdge(v.edges, f)).toMatchObject({ id: `a:${hd.name}|${tickets.name}`, caller: hd.name });
   });
 
@@ -199,13 +203,13 @@ describe("Show on map focus", () => {
     const g = w0.audit().grants.find((x) => x.member === "allAuthenticatedUsers")!;
     const f = focusForGrant(g, inv);
     expect(f.node).toBe(PSEUDO.public);
-    const v = viewOf(graph(), DEFAULT_FILTERS, f.node!);
+    const v = viewOf(graph(), DEFAULT_FILTERS, [f.node!]);
     expect(findFocusEdge(v.edges, f)?.id).toBe(`p:${PSEUDO.public}|${g.resource}`);
   });
 
   it("a default-deny line is found when there's no grant (the granted line first)", () => {
     const hrd = dest("HR Directory MCP").name;
-    const v = viewOf(graph(hd.name), DEFAULT_FILTERS, hd.name);
+    const v = viewOf(graph(), DEFAULT_FILTERS, [hd.name]);
     expect(findFocusEdge(v.edges, { node: hd.name, target: hrd })).toMatchObject({ implicit: true });
   });
 

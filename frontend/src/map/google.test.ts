@@ -1,5 +1,5 @@
 // Google API endpoints on the policy map: one collapsed "Google APIs (N)" node, its lines, the "Show Google API
-// endpoints" checkbox, search into the group, the table, and endpoint labels (labels.ts).
+// endpoints" checkbox, the picker into the group, the table, and endpoint labels (labels.ts).
 import { describe, expect, it } from "vitest";
 import { PLATFORM_PREFIX, buildWorld } from "../api/mockData";
 import type { Ctx } from "../api/types";
@@ -79,7 +79,7 @@ describe("labels", () => {
 describe("the Google APIs group", () => {
   it("is collapsed by default: one node with every shown Google API endpoint, other endpoints untouched", () => {
     expect(DEFAULT_FILTERS.googleApis).toBe(false);
-    const v = viewOf(g, filters(), null);
+    const v = viewOf(g, filters(), []);
     const grp = v.nodes.find((n) => n.id === GOOGLE_GROUP)!;
     expect(google.length).toBe(38);
     expect(grp).toMatchObject({ kind: "google_apis", label: "Google APIs (38)", section: "api", column: "dests" });
@@ -93,8 +93,9 @@ describe("the Google APIs group", () => {
     expect(grp.sub).toBe("16 with grants · click to show them");
   });
 
-  it("merges its lines per source: the combined verdict and the count", () => {
-    const v = viewOf(g, filters(), null);
+  it("merges a selected caller's lines into it: the best verdict and the count", () => {
+    expect(viewOf(g, filters(), []).edges).toEqual([]);
+    const v = viewOf(g, filters(), [PSEUDO.project]);
     const into = v.edges.filter((e) => e.target === GOOGLE_GROUP);
     expect(into).toHaveLength(1);
     expect(into[0]).toMatchObject({ source: PSEUDO.project, verdict: "allowed", label: "16 APIs" });
@@ -104,24 +105,24 @@ describe("the Google APIs group", () => {
   });
 
   it("the checkbox shows them one by one; clicking the group ticks it", () => {
-    const grp = viewOf(g, filters(), null).nodes.find((n) => n.id === GOOGLE_GROUP)!;
+    const grp = viewOf(g, filters(), []).nodes.find((n) => n.id === GOOGLE_GROUP)!;
     expect(expandGroup(grp, filters())).toEqual({ googleApis: true });
-    const v = viewOf(g, filters(expandGroup(grp, filters())), null);
+    const v = viewOf(g, filters(expandGroup(grp, filters())), [PSEUDO.project]);
     expect(v.nodes.some((n) => n.id === GOOGLE_GROUP)).toBe(false);
     expect(v.edges.filter((e) => e.source === PSEUDO.project)).toHaveLength(16);
     // a "no grants" group still expands its section
     expect(expandGroup({ kind: "endpoint_group", section: "api" }, filters({ expanded: ["mcp"] }))).toEqual({ expanded: ["mcp", "api"] });
   });
 
-  it("follows the APIs type filter", () => {
-    const v = viewOf(g, filters({ types: { ...DEFAULT_FILTERS.types, api: false } }), null);
-    expect(v.nodes.some((n) => n.id === GOOGLE_GROUP || n.kind === "endpoint")).toBe(false);
+  it("follows the picker: Google API endpoints unchecked, no group", () => {
+    const v = viewOf(g, filters({ off: google.map((e) => e.name) }), []);
+    expect(v.nodes.some((n) => n.id === GOOGLE_GROUP || (n.kind === "endpoint" && n.googleApi))).toBe(false);
   });
 
   it("selected agent: one inherited line and one default-deny line into the group, with counts", () => {
     const hd = eng("Helpdesk Agent");
-    const gf = buildPolicyGraph(input({ focus: hd.name }));
-    const v = viewOf(gf, filters(), hd.name);
+    const gf = buildPolicyGraph(input());
+    const v = viewOf(gf, filters(), [hd.name]);
     const into = v.edges.filter((e) => e.target === GOOGLE_GROUP);
     expect(into).toHaveLength(2);
     const granted = into.find((e) => !e.implicit)!;
@@ -129,20 +130,25 @@ describe("the Google APIs group", () => {
     expect(granted).toMatchObject({ verdict: "allowed", inherited: true, caller: hd.name, label: "16 APIs" });
     // 38 Google APIs: 16 granted project-wide, 1 unreadable (no line guessed), 21 denied by default (dry run)
     expect(denied).toMatchObject({ verdict: "would_deny", caller: hd.name, label: "21 APIs" });
-    expect(gf.focusLines!.filter((l) => l.implicit && google.some((x) => x.name === l.target))).toHaveLength(21);
-    // without implicit denies, only the granted line
-    expect(viewOf(gf, filters({ implicit: false }), hd.name).edges.filter((e) => e.target === GOOGLE_GROUP)).toHaveLength(1);
+    expect(gf.edges.filter((l) => l.caller === hd.name && l.implicit && google.some((x) => x.name === l.target))).toHaveLength(21);
+    // without Denies, only the granted line
+    expect(viewOf(gf, filters({ denies: false }), [hd.name]).edges.filter((e) => e.target === GOOGLE_GROUP)).toHaveLength(1);
+    // two agents: one line each, never merged across agents
+    const hr = eng("HR Assistant");
+    const two = viewOf(gf, filters({ denies: false }), [hd.name, hr.name]).edges.filter((e) => e.target === GOOGLE_GROUP);
+    expect(two.map((e) => e.caller).sort()).toEqual([hd.name, hr.name].sort());
   });
 
   it("the table lists every endpoint behind a merged line", () => {
-    const rows = tableRows(viewOf(g, filters(), null)).filter((r) => r.source === PSEUDO.project);
+    expect(tableRows(viewOf(g, filters(), [PSEUDO.project])).filter((r) => r.source === PSEUDO.project)).toHaveLength(16);
+    const rows = tableRows(viewOf(g, filters(), [])).filter((r) => r.source === PSEUDO.project);
     expect(rows).toHaveLength(16);
     expect(new Set(rows.map((r) => r.target)).size).toBe(16);
     expect(rows.every((r) => g.nodes.find((n) => n.id === r.target)?.googleApi)).toBe(true);
   });
 
   it("is laid out like a destination (in the API endpoints section)", () => {
-    const v = viewOf(g, filters(), null);
+    const v = viewOf(g, filters(), []);
     const l = layoutView(v);
     expect(l.pos[GOOGLE_GROUP]).toBeDefined();
     expect(l.headers.some((h) => h.label === "API endpoints")).toBe(true);
@@ -164,33 +170,34 @@ describe("the Google APIs group", () => {
   });
 });
 
-describe("search inside the group", () => {
+describe("revealing an entry inside the group (the picker's Only this, Show on map)", () => {
   it("finds an individual entry and expands the group to show it", () => {
     const q = "iamcredentials";
     const matches = g.nodes.filter((n) => n.search.includes(q));
     expect(matches.length).toBeGreaterThanOrEqual(3);
     const target = matches.find((n) => n.label === "iamcredentials.mtls.googleapis.com:443")!;
-    const v = viewOf(g, filters(), null);
+    const v = viewOf(g, filters(), []);
     expect(v.nodes.find((n) => n.id === GOOGLE_GROUP)?.search).toContain(q);
-    expect(revealPatch(g, filters(), null, target.id)).toEqual({ googleApis: true });
-    expect(viewOf(g, filters({ googleApis: true }), null).nodes.some((n) => n.id === target.id)).toBe(true);
+    expect(revealPatch(g, filters(), [], target.id)).toEqual({ googleApis: true });
+    expect(viewOf(g, filters({ googleApis: true }), []).nodes.some((n) => n.id === target.id)).toBe(true);
   });
 
   it("an entry with no grants: the group, then its \"no grants\" group", () => {
     const iam = ep("IAM Credentials API").name; // no grants
-    const patch = revealPatch(g, filters(), null, iam)!;
+    const patch = revealPatch(g, filters(), [], iam)!;
     expect(patch).toEqual({ googleApis: true, expanded: ["api"] });
-    expect(viewOf(g, filters(patch), null).nodes.some((n) => n.id === iam)).toBe(true);
+    expect(viewOf(g, filters(patch), []).nodes.some((n) => n.id === iam)).toBe(true);
   });
 
-  it("nothing to expand when it's shown, null when another filter hides it", () => {
-    expect(revealPatch(g, filters(), null, ep("Weather API").name)).toEqual({});
-    expect(revealPatch(g, filters({ types: { ...DEFAULT_FILTERS.types, api: false } }), null, ep("Weather API").name)).toBeNull();
+  it("nothing to expand when it's shown; checked again when the picker hides it", () => {
+    const weather = ep("Weather API").name;
+    expect(revealPatch(g, filters(), [], weather)).toEqual({});
+    expect(revealPatch(g, filters({ off: [weather, "x"] }), [], weather)).toEqual({ off: ["x"] });
   });
 
   it("a selected Google API endpoint stays on its own", () => {
     const id = ep(`${PLATFORM_PREFIX} sts.googleapis.com`).name;
-    const v = viewOf(g, filters(), id);
+    const v = viewOf(g, filters(), [], { active: id });
     expect(v.nodes.some((n) => n.id === id)).toBe(true);
     expect(v.nodes.find((n) => n.id === GOOGLE_GROUP)?.grouped).not.toContain(id);
   });

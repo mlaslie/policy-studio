@@ -1,14 +1,14 @@
 // The staged-change view (docs/VISUALIZATION_PLAN.md §8): the graph built from today's state and from the state after
 // the cart (simulate.ts), compared line by line. Pure.
 //
-// Lines are paired by id, except that an agent's default-deny line (x:<agent>|<dest>) pairs with its granted line
-// (a:<agent>|<dest>), and its trunk to a gateway with its direct line (a bind or unbind, in either direction): a grant
+// Every line is one caller's. Lines are paired by id, except that an agent's default-deny line (x:<agent>|<dest>) pairs
+// with its granted line (a:<agent>|<dest>), and its trunk to a gateway with its direct line (a bind or unbind, in
+// either direction; Client-to-Agent: each client's line into the agent's lane too): a grant
 // turns the red ✕ into a pending add, a revoke turns the green line into a pending remove ("blocked by default" after),
 // a bind or unbind is a pending change that moves the agent's lane. The merged graph
 // holds every line as it will be, plus the removed lines as they are today, each marked with its cart intents.
 import type { Engine, Intent, Inventory } from "../api/types";
 import type { Chip, PEdge, PNode, PolicyGraph, Verdict } from "./graph";
-import { NOGW } from "./ids";
 import { VERDICT_LABEL } from "./toFlow";
 
 export interface EdgeChange {
@@ -19,7 +19,6 @@ export interface EdgeChange {
 }
 export interface GraphDiff {
   edges: EdgeChange[];
-  focus: EdgeChange[];
   /** Node id → what changes on it (lane, enforcement mode, Model Armor). */
   nodes: Map<string, string[]>;
   /** Gateway id → Model Armor turned on or off by the cart (the pending shield). */
@@ -27,18 +26,19 @@ export interface GraphDiff {
 }
 
 /** The pairing key: default-deny and granted lines of one agent and destination are the same line; so are an agent's
- *  trunk and its direct line, and (Client-to-Agent) its line from a gateway and from "No ingress gateway". */
+ *  trunk and its direct line, and (Client-to-Agent) its line from a gateway and from "No ingress gateway", and each
+ *  client's line into either. */
 export function pairKey(e: PEdge): string {
   if (e.id.startsWith("x:")) return `a:${e.id.slice(2)}`;
-  if (e.direction === "ingress" && e.caller) return `lane:${e.caller}`;
-  if (e.id.startsWith("trunk:") || (e.id.startsWith("direct:") && e.id !== "direct:nogw")) return `lane:${e.caller ?? e.source}`;
+  if (e.direction === "ingress" && e.caller) return e.source.startsWith("client:") ? `lane:${e.source}|${e.caller}` : `lane:${e.caller}`;
+  if (e.id.startsWith("trunk:") || e.id.startsWith("direct:")) return `lane:${e.caller ?? e.source}`;
   return e.id;
 }
 
 /** A line's grants in a comparable form: member, resource and condition expression. */
 const sig = (e: PEdge) =>
-  (e.parts ?? [e])
-    .flatMap((p) => p.reasons.map((r) => `${p.caller ?? ""}|${r.binding.member}|${r.resource}|${(r.binding.condition?.expression ?? "").replace(/\s+/g, " ").trim()}`))
+  e.reasons
+    .map((r) => `${e.caller ?? ""}|${r.binding.member}|${r.resource}|${(r.binding.condition?.expression ?? "").replace(/\s+/g, " ").trim()}`)
     .sort()
     .join("\n");
 const toolSig = (e: PEdge) => (e.tools ? `${[...e.tools.allowed].sort()}/${[...e.tools.denied].sort()}/${[...e.tools.unknown].sort()}` : "");
@@ -76,7 +76,7 @@ export function diffGraphs(before: PolicyGraph, after: PolicyGraph): GraphDiff {
     }
     if (t.length) nodes.set(n.id, t);
   }
-  return { edges: compare(before.edges, after.edges), focus: before.focusLines && after.focusLines ? compare(before.focusLines, after.focusLines) : [], nodes, shields };
+  return { edges: compare(before.edges, after.edges), nodes, shields };
 }
 
 const modeText = (m: PNode["mode"]) => (m === "ENFORCE" ? "Enforce" : m === "DRY_RUN" ? "Dry run" : "No IAP policy");
@@ -99,31 +99,25 @@ export function pendingText(e: PEdge): string {
 /** Principals behind a line: its grants' members and its callers' identities. */
 function principalsOf(e: PEdge | undefined, engines: Map<string, Engine>): Set<string> {
   const out = new Set<string>();
-  for (const p of e ? (e.parts ?? [e]) : []) {
-    for (const r of p.reasons) out.add(r.binding.member);
-    const eng = p.caller ? engines.get(p.caller) : undefined;
-    if (eng) out.add(eng.principal);
-  }
+  if (!e) return out;
+  for (const r of e.reasons) out.add(r.binding.member);
+  const eng = e.caller ? engines.get(e.caller) : undefined;
+  if (eng) out.add(eng.principal);
   return out;
 }
-function callersOf(e: PEdge | undefined): Set<string> {
-  return new Set((e ? (e.parts ?? [e]) : []).flatMap((p) => [p.caller, p.source, p.target].filter((x): x is string => !!x)));
-}
+const callersOf = (e: PEdge | undefined): Set<string> => new Set((e ? [e.caller, e.source, e.target] : []).filter((x): x is string => !!x));
 /** Resources whose bindings make up a line (a registry-wide grant counts on every destination it reaches). */
-const resourcesOf = (e: PEdge | undefined) => new Set((e ? (e.parts ?? [e]) : []).flatMap((p) => [p.target, ...p.reasons.map((r) => r.resource)]));
+const resourcesOf = (e: PEdge | undefined) => new Set(e ? [e.target, ...e.reasons.map((r) => r.resource)] : []);
 
 export function intentsFor(c: Pick<EdgeChange, "before" | "after">, cart: Intent[], engines: Map<string, Engine>, effects: Record<string, string[]>): string[] {
   const principals = new Set([...principalsOf(c.before, engines), ...principalsOf(c.after, engines)]);
   const nodes = new Set([...callersOf(c.before), ...callersOf(c.after)]);
   const resources = new Set([...resourcesOf(c.before), ...resourcesOf(c.after)]);
   const gws = new Set([c.before?.gateway, c.after?.gateway].filter(Boolean));
-  // a client's line into an ingress lane counts the agents in it: a bind or unbind on that lane changes it
-  const lane = (c.after ?? c.before)?.direction === "ingress" && !(c.after ?? c.before)?.caller ? new Set([...gws, ...[c.before?.target, c.after?.target].filter((x) => x === NOGW.ingress)]) : new Set<string | undefined>();
   return cart
     .filter((i) => {
       if (i.kind === "grant" || i.kind === "revoke" || i.kind === "modify") return !!i.source && !!i.destination && principals.has(i.source.principal) && resources.has(i.destination.name);
-      if (i.kind === "bind_gateway" || i.kind === "unbind_gateway")
-        return (!!i.engine && nodes.has(i.engine)) || (i.gateway?.direction === "ingress" && (lane.has(i.gateway.name) || lane.has(NOGW.ingress)));
+      if (i.kind === "bind_gateway" || i.kind === "unbind_gateway") return !!i.engine && nodes.has(i.engine) && (i.gateway?.direction ?? "egress") === (c.after ?? c.before)?.direction;
       if (i.kind === "set_enforcement") return (effects[i.id] ?? []).some((g) => gws.has(g) || nodes.has(g));
       // Model Armor screens the line as it will be: not one that leaves the gateway (an unbind staged with it)
       if (i.kind === "model_armor_on" || i.kind === "model_armor_off") return (effects[i.id] ?? []).includes((c.after ? c.after.gateway : c.before?.gateway) ?? "");
@@ -155,11 +149,10 @@ export function mergeStaged(before: PolicyGraph, after: PolicyGraph, d: GraphDif
     return out;
   };
   const edges = merge(after.edges, d.edges);
-  const focusLines = after.focusLines ? merge(after.focusLines, d.focus) : null;
 
   // nodes: as they will be, plus the ones only removed lines still need (marked removed)
   const afterIds = new Set(after.nodes.map((n) => n.id));
-  const needed = new Set([...edges, ...(focusLines ?? [])].flatMap((e) => [e.source, e.target]));
+  const needed = new Set(edges.flatMap((e) => [e.source, e.target]));
   const nodes: PNode[] = after.nodes.map((n) => {
     const t = d.nodes.get(n.id);
     if (!t) return n;
@@ -172,8 +165,9 @@ export function mergeStaged(before: PolicyGraph, after: PolicyGraph, d: GraphDif
   });
   for (const n of before.nodes)
     if (!afterIds.has(n.id) && needed.has(n.id)) nodes.push({ ...n, chips: [...n.chips, { text: "Removed (staged)", tone: "amber", pending: true }], pending: { text: ["Its last grant is staged for removal"], removed: true, intents: [] } });
-  return { ...after, nodes, edges, focusLines };
+  return { ...after, nodes, edges };
 }
 
-/** The number of pending lines (combined lines count once). */
-export const pendingCount = (g: PolicyGraph) => g.edges.filter((e) => e.pending && e.verdict !== "path").length;
+/** The number of pending lines, not counting default-deny lines that only change with the gateway's mode (a staged
+ *  enforce shows once, on the gateway). */
+export const pendingCount = (g: PolicyGraph) => g.edges.filter((e) => e.pending && e.verdict !== "path" && !(e.implicit && e.pending === "change")).length;

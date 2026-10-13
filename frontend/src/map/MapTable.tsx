@@ -1,5 +1,7 @@
-// The map as a table (VISUALIZATION_PLAN §10): the visible lines, one row per agent of a combined line. Built from the
-// same MapView as the canvas, so the filters apply; also the screen-reader alternative to the canvas.
+// The map as a table (VISUALIZATION_PLAN §10): the selected agents' lines, one row per agent and destination (and per
+// endpoint behind a line into the Google APIs group); with no agent selected, every shown agent's own lines (and the
+// pseudo callers'), so it stays a full alternative to the canvas for screen readers. Built from the same MapView as
+// the canvas, so the filters apply.
 import { useMemo, useState } from "react";
 import { NOGW, type PEdge, type PNode } from "./graph";
 import { PENDING_WORD, VERDICT_LABEL, VIA_LABEL, viaText } from "./toFlow";
@@ -16,20 +18,20 @@ const COLS: { key: Key; label: string }[] = [
   { key: "pending", label: "Staged" },
 ];
 
-/** A row of a combined line: the agent's own part, with the combined line's pending mark when it has none. */
-export function rowCells(e: PEdge, label: (id: string) => string, line?: PEdge): Record<Key, string> {
+/** A row: one caller's line. Client-to-Agent rows are a client's line into an agent's lane (client, gateway, agent). */
+export function rowCells(e: PEdge, label: (id: string) => string): Record<Key, string> {
   const ingress = e.direction === "ingress";
   // A pseudo caller (project-wide, public, other principals) isn't behind one gateway: each agent's own is used.
   const pseudo = e.source.startsWith("pseudo:");
   const conds = [...new Set(e.reasons.map((r) => r.binding.condition?.title || (r.binding.condition ? "Custom condition" : "None (full access)")))];
   return {
-    caller: ingress ? (e.caller ? "Clients" : label(e.source)) : label(e.caller ?? e.source),
-    gateway: e.gateway ? label(e.gateway) : pseudo ? "Each agent's own" : ingress && !e.caller ? label(e.target) : "No gateway",
-    dest: ingress && !e.caller ? "(all agents behind it)" : e.target === NOGW.egress ? "Anywhere" : label(e.target),
-    verdict: VERDICT_LABEL[e.verdict] + (e.label && e.label !== "?" && !e.parts ? ` (${e.label})` : ""),
+    caller: ingress ? label(e.source) : label(e.caller ?? e.source),
+    gateway: e.gateway ? label(e.gateway) : pseudo ? "Each agent's own" : "No gateway",
+    dest: ingress ? label(e.caller ?? e.target) : e.target === NOGW.egress ? "Anywhere" : label(e.target),
+    verdict: VERDICT_LABEL[e.verdict] + (e.label && e.label !== "?" ? ` (${e.label})` : ""),
     via: e.implicit ? "No grant" : pseudo ? [...new Set(e.reasons.map((r) => VIA_LABEL[r.via] ?? r.via))].join(", ") : (viaText(e) ?? (e.reasons.length ? "Direct grant" : "")),
     condition: e.implicit ? "" : conds.join("; "),
-    pending: (e.pending ?? line?.pending) ? `Will ${PENDING_WORD[(e.pending ?? line!.pending)!].replace(/^will /, "")}` : "",
+    pending: e.pending ? `Will ${PENDING_WORD[e.pending].replace(/^will /, "")}` : "",
   };
 }
 
@@ -39,15 +41,13 @@ export default function MapTable({ view, nodes, selected, onSelect }: { view: Ma
   // endpoint labels are the map's (labels.ts: the host when the display name only repeats it), shown in full here
   const label = useMemo(() => (id: string) => byId.get(id)?.label ?? id.split("/").pop() ?? id, [byId]);
   const rows = useMemo(() => {
-    // a row's combined line (for its pending mark): through the Google APIs group's merged lines too
-    const lineOf = new Map(view.edges.flatMap((l) => l.members ?? [l]).flatMap((l) => (l.parts ?? []).map((p) => [p.id, l] as const)));
-    const rs = tableRows(view).map((e, i) => ({ e, i, c: rowCells(e, label, lineOf.get(e.id)) }));
+    const rs = tableRows(view).map((e, i) => ({ e, i, c: rowCells(e, label) }));
     return rs.sort((a, b) => sort.dir * a.c[sort.key].localeCompare(b.c[sort.key]) || a.c.dest.localeCompare(b.c.dest) || a.i - b.i);
   }, [view, label, sort]);
   return (
     <div className="pmap-table-wrap">
       <table className="grants-table pmap-table">
-        <caption className="sr-only">Lines on the policy map ({rows.length})</caption>
+        <caption className="sr-only">{view.agents.length ? `Lines of the ${view.agents.length === 1 ? "selected agent" : `${view.agents.length} selected agents`}` : "Every agent's own grants"} ({rows.length})</caption>
         <thead>
           <tr>
             {COLS.map((c) => (

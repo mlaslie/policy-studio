@@ -57,7 +57,11 @@ function Pin({ id, data }: { id: string; data: MNode["data"] }) {
   );
 }
 
-const cls = (d: MNode["data"], ...more: (string | false | undefined)[]) => ["node", d.dim && "dim", d.hit && "hit", d.ring && `ring-${d.ring}`, d.node.pending && (d.node.pending.removed ? "pending-removed" : "pending"), ...more].filter(Boolean).join(" ");
+const cls = (d: MNode["data"], ...more: (string | false | undefined)[]) =>
+  ["node", d.dim && "dim", d.hit && "hit", d.picked && "picked", d.filtered && "filtered", d.ring && `ring-${d.ring}`, d.node.pending && (d.node.pending.removed ? "pending-removed" : "pending"), ...more].filter(Boolean).join(" ");
+
+/** A node the picker hides, drawn because a selected agent has a line to it. */
+const Filtered = ({ data }: { data: MNode["data"] }) => (data.filtered ? <span className="node-filtered">(hidden by filter)</span> : null);
 
 /** "Same agent" link between an Agent Runtime agent as a caller and as a registry entry. */
 function SameAs({ id, label }: { id?: string; label: string }) {
@@ -85,6 +89,7 @@ const EngineNode = memo(({ id, data }: NodeProps<MNode>) => {
     <div className={cls(data, "node-orch", !n.gateway && "unbound")}>
       <Handles />
       <Pin id={id} data={data} />
+      <Filtered data={data} />
       <div className="node-badge badge-runtime">
         <span className="dot" /> Agent Runtime
       </div>
@@ -117,6 +122,7 @@ const GatewayNode = memo(({ id, data }: NodeProps<MNode>) => {
     <div className={cls(data, "node-gateway", none ? "faded" : "attached", n.mode === "DRY_RUN" && n.sub?.startsWith("Egress") && "dry")}>
       <Handles />
       <Pin id={id} data={data} />
+      <Filtered data={data} />
       <div className="node-head">
         <span className="node-icon icon-gateway">
           <GatewayIcon size={22} />
@@ -154,6 +160,7 @@ const PseudoNode = memo(({ id, data }: NodeProps<MNode>) => {
     <div className={cls(data, "node-user", pub && "public")} title={n.members?.map((m) => m.label).join("\n")}>
       <Handles />
       <Pin id={id} data={data} />
+      <Filtered data={data} />
       <div className="node-head">
         <span className={`node-icon ${n.kind === "client" ? "icon-client" : "icon-person"}`}>
           <PersonIcon size={20} />
@@ -182,6 +189,7 @@ const DestNode = memo(({ id, data }: NodeProps<MNode>) => {
     <div className={cls(data, `node-dest node-${n.kind}`, n.unreadable && "unreadable")}>
       <Handles />
       <Pin id={id} data={data} />
+      <Filtered data={data} />
       <div className={`node-badge ${n.kind === "registry" ? "" : "badge-cloudrun"}`}>
         {n.kind === "a2a" && <CloudIcon size={12} />} {DEST_BADGE[n.kind]}
       </div>
@@ -230,6 +238,7 @@ const McpNode = memo(({ id, data }: NodeProps<MNode>) => {
     <div className={cls(data, "node-mcp", n.unreadable && "unreadable")}>
       <Handles />
       <Pin id={id} data={data} />
+      <Filtered data={data} />
       <div className="node-badge badge-cloudrun">
         <CloudIcon size={12} /> MCP
       </div>
@@ -284,6 +293,7 @@ const GroupNode = memo(({ id, data }: NodeProps<MNode>) => (
   <div className={cls(data, "node-group")} title="Show these destinations">
     <Handles />
     <Pin id={id} data={data} />
+    <Filtered data={data} />
     <div className="node-head">
       <span className="node-icon icon-registry">
         <ApiIcon size={18} />
@@ -303,6 +313,7 @@ const GoogleGroupNode = memo(({ id, data }: NodeProps<MNode>) => {
     <div className={cls(data, "node-dest node-endpoint node-google")} title={`Show the ${n.grouped?.length ?? 0} Google API endpoints one by one`}>
       <Handles />
       <Pin id={id} data={data} />
+      <Filtered data={data} />
       <div className="node-badge badge-cloudrun">API endpoints · collapsed</div>
       <div className="node-head">
         <span className="node-icon icon-api">
@@ -323,6 +334,7 @@ const SinkNode = memo(({ id, data }: NodeProps<MNode>) => (
   <div className={cls(data, "node-sink")}>
     <Handles />
     <Pin id={id} data={data} />
+    <Filtered data={data} />
     <div className="node-head">
       <span className="node-icon icon-sink">
         <CloudIcon size={20} />
@@ -341,13 +353,15 @@ const SectionNode = memo(({ data }: NodeProps<MNode>) => (
   </div>
 ));
 
+// Not "group": that's one of React Flow's built-in node types, and its wrapper (.react-flow__node-group) has built-in
+// styles (a 150px box with padding, a dark border and a selection shadow) that showed behind the card.
 export const nodeTypes = {
   engine: EngineNode,
   gateway: GatewayNode,
   pseudo: PseudoNode,
   dest: DestNode,
   mcp: McpNode,
-  group: GroupNode,
+  nogrants: GroupNode,
   google: GoogleGroupNode,
   sink: SinkNode,
   section: SectionNode,

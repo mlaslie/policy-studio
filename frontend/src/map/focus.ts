@@ -3,7 +3,8 @@
 import type { Direction, Gateway, Grant, Intent, Inventory } from "../api/types";
 import { pseudoOf } from "./ids";
 
-/** A node to select (an engine selects the agent's own lines) and, optionally, the destination of the line to open. */
+/** A node to select (an agent or pseudo caller is selected, so its lines draw) and, optionally, the destination of the
+ *  line to open. */
 export interface MapFocus {
   direction?: Direction;
   node?: string;
@@ -30,14 +31,14 @@ export const focusForGateway = (g: Pick<Gateway, "name" | "type">): MapFocus => 
 /** Kinds that have a "Show on map" link in Review and the cart. */
 export const ON_MAP = new Set<Intent["kind"]>(["grant", "revoke", "modify", "bind_gateway", "unbind_gateway", "set_enforcement", "model_armor_on", "model_armor_off"]);
 
-/** The line a focus names among the visible lines: the selected caller's line to the target (a granted line before
- *  a default-deny one), else any line into the target from that caller or its combined line. */
-export function findFocusEdge<E extends { id: string; source: string; target: string; caller?: string; implicit?: boolean; verdict: string; parts?: { caller?: string }[] }>(
+/** The line a focus names among the visible lines: the node's own line to the target (a granted line before a
+ *  default-deny one), else its line merged into a group that holds the target. */
+export function findFocusEdge<E extends { id: string; source: string; target: string; caller?: string; implicit?: boolean; verdict: string; members?: { target: string }[] }>(
   edges: E[],
   f: MapFocus,
 ): E | null {
   if (!f.target) return null;
-  const into = edges.filter((e) => e.target === f.target && e.verdict !== "path");
-  const own = into.filter((e) => e.caller === f.node || e.source === f.node || e.parts?.some((p) => p.caller === f.node));
+  const into = edges.filter((e) => (e.target === f.target || e.members?.some((m) => m.target === f.target)) && e.verdict !== "path");
+  const own = into.filter((e) => e.caller === f.node || e.source === f.node);
   return own.find((e) => !e.implicit) ?? own[0] ?? null;
 }

@@ -2,7 +2,9 @@
 // particles). One line type, styled by verdict (VISUALIZATION_PLAN §5.2): dash patterns, the ✕ / "?" badges, the
 // half-filled arrow for partial access and the Model Armor shield at the gateway end, so color is never the only cue.
 // Staged changes (§8) add a clock badge and a word: a pending add is dashed (animated unless reduced motion), a pending
-// remove keeps today's style under a red dashed overlay, a pending change is drawn as it will be.
+// remove keeps today's style under a red dashed overlay, a pending change is drawn as it will be. Every line is one
+// agent's: with several agents selected, each agent's lines are moved a few px at the shared ends (data.offS / offT) and
+// their labels and tooltips name the agent.
 import { BaseEdge, EdgeLabelRenderer, getBezierPath, type EdgeProps } from "@xyflow/react";
 import { memo } from "react";
 import { ClockIcon, CloseIcon, ShieldIcon } from "../components/Icons";
@@ -35,9 +37,10 @@ export function EdgeMarkers() {
   );
 }
 
-export function edgeTitle(e: PEdge): string {
+export function edgeTitle(e: PEdge, agent?: string): string {
   const via = viaText(e);
   return [
+    agent ?? "",
     VERDICT_LABEL[e.verdict],
     e.label && !/^\?$/.test(e.label) ? e.label : "",
     via ? `via ${via} grant` : "",
@@ -50,20 +53,26 @@ export function edgeTitle(e: PEdge): string {
     .join(" · ");
 }
 
-function PolicyEdgeImpl({ id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, data }: EdgeProps<MEdge>) {
+function PolicyEdgeImpl({ id, sourceX, sourceY: sy0, targetX, targetY: ty0, sourcePosition, targetPosition, data }: EdgeProps<MEdge>) {
   const e = data!.edge;
   const v = e.verdict;
+  const sourceY = sy0 + data!.offS;
+  const targetY = ty0 + data!.offT;
   const [path] = getBezierPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, curvature: 0.35 });
   // Points along an approximation of the bezier: badges ~78% along (so converging lines don't stack them), the
   // Model Armor shield just after the gateway.
   const mx = (sourceX + targetX) / 2;
   const bz = (t: number, a: number, b: number, c: number, d: number) => (1 - t) ** 3 * a + 3 * (1 - t) ** 2 * t * b + 3 * (1 - t) * t ** 2 * c + t ** 3 * d;
   const at = (t: number) => [bz(t, sourceX, mx, mx, targetX), bz(t, sourceY, sourceY, targetY, targetY)] as const;
-  const [bx, by] = at(0.78);
+  // several agents: each one's badges sit a little further back (and a default-deny line's a little more), so labels on
+  // parallel lines don't stack
+  const [bx, by] = at(data!.multi ? 0.78 - (Math.max(0, data!.agentIdx) % 4) * 0.12 - (e.implicit ? 0.05 : 0) : 0.78);
   const [sx, sy] = at(Math.min(0.3, 30 / Math.max(1, Math.hypot(targetX - sourceX, targetY - sourceY))));
   const marker = v === "partial" ? "url(#pm-arrow-partial)" : v === "blocked" || v === "would_deny" ? undefined : `url(#pm-arrow-${v})`;
   const via = viaText(e);
-  const text = [e.pending ? `staged: ${PENDING_WORD[e.pending]}` : "", e.label && e.label !== "?" ? e.label : "", via ?? ""].filter(Boolean).join(" · ");
+  // several agents: a granted line's label starts with its agent (default-deny lines keep just the ✕; the tooltip names it)
+  const who = data!.multi && data!.agent && !e.implicit && v !== "path" && e.source !== e.caller ? data!.agent : "";
+  const text = [who, e.pending ? `staged: ${PENDING_WORD[e.pending]}` : "", e.label && e.label !== "?" ? e.label : "", via ?? ""].filter(Boolean).join(" · ");
   const badge =
     v === "blocked" ? (
       <span className="edge-badge badge-denied">
@@ -76,7 +85,7 @@ function PolicyEdgeImpl({ id, sourceX, sourceY, targetX, targetY, sourcePosition
     ) : v === "conditional" ? (
       <span className="edge-badge badge-conditional">?</span>
     ) : null;
-  const title = edgeTitle(e);
+  const title = edgeTitle(e, data!.agent && e.caller !== e.source ? data!.agent : undefined);
   return (
     <>
       <path d={path} className="edge-halo" />
@@ -109,7 +118,7 @@ function PolicyEdgeImpl({ id, sourceX, sourceY, targetX, targetY, sourcePosition
       )}
       {(badge || text || e.pending) && (
         <EdgeLabelRenderer>
-          <div className={`edge-badge-wrap ${data!.dim ? "dim" : ""}`} style={{ transform: `translate(-50%, -50%) translate(${bx}px, ${by}px)` }} title={title}>
+          <div className={`edge-badge-wrap ${data!.dim ? "dim" : ""} ${data!.agentIdx >= 0 ? `ag${data!.agentIdx}` : ""}`} style={{ transform: `translate(-50%, -50%) translate(${bx}px, ${by}px)` }} title={title}>
             {e.pending && (
               <span className={`edge-badge badge-pending pending-${e.pending}`}>
                 <ClockIcon size={12} />

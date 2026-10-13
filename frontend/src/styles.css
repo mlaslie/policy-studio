@@ -3958,11 +3958,193 @@ body.resizing * {
   border-color: var(--blue);
   box-shadow: 0 0 0 1px var(--blue);
 }
-.pmap-types {
+/* ---------- the object picker ---------- */
+.pmap-picker-wrap {
+  position: relative;
+}
+.pmap-picker-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.pmap-picker-chev {
+  transform: rotate(90deg);
+  transition: transform 0.15s;
+}
+.pmap-picker-btn.on .pmap-picker-chev {
+  transform: rotate(-90deg);
+}
+.pmap-picker {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 40;
+  width: min(420px, calc(100vw - 32px));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-2);
+}
+.pmap-picker .pmap-search {
+  max-width: none;
+  flex: none;
+}
+.pmap-picker-quick {
   display: flex;
   flex-wrap: wrap;
+  gap: 4px 14px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.pmap-picker-bar {
+  display: flex;
   align-items: center;
-  gap: 6px 10px;
+  gap: 12px;
+}
+.pmap-picker-bar > :first-child {
+  flex: 1;
+}
+.pmap-picker-list {
+  max-height: min(52vh, 440px);
+  overflow: auto;
+  margin: 0 -12px;
+  padding: 0 12px;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+.pmap-pick-group + .pmap-pick-group {
+  border-top: 1px solid var(--border);
+}
+.pmap-pick-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 0 5px;
+  background: var(--surface);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+.pmap-pick-head label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  cursor: pointer;
+}
+.pmap-pick-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 0 4px 0 18px;
+  border-radius: 6px;
+}
+.pmap-pick-row:hover,
+.pmap-pick-row:focus-within {
+  background: var(--surface-3);
+}
+.pmap-pick-row label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  cursor: pointer;
+}
+.pmap-pick-row:not(.on) .pmap-pick-name {
+  color: var(--text-3);
+}
+.pmap-pick-name,
+.pmap-pick-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pmap-pick-name {
+  flex: 0 1 auto;
+}
+.pmap-pick-sub {
+  flex: 1 1 0;
+  min-width: 0;
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+.pmap-pick-lines,
+.pmap-pick-only {
+  flex: none;
+  font: inherit;
+  font-size: 11.5px;
+  line-height: 18px;
+  padding: 0 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-2);
+  cursor: pointer;
+}
+.pmap-pick-lines.on {
+  color: var(--blue);
+  background: var(--blue-weak);
+  border-color: color-mix(in srgb, var(--blue) 40%, transparent);
+}
+/* "Only this" shows on the row's hover or focus (and stays reachable by Tab) */
+.pmap-pick-only {
+  opacity: 0;
+}
+.pmap-pick-row:hover .pmap-pick-only,
+.pmap-pick-row:focus-within .pmap-pick-only {
+  opacity: 1;
+}
+.pmap-pick-lines:hover,
+.pmap-pick-only:hover {
+  border-color: var(--blue);
+  color: var(--blue);
+}
+.pmap-pick-empty {
+  padding: 10px 0;
+}
+.pmap-picker-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.pmap-show {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px 10px;
+  flex-wrap: wrap;
+}
+.pmap-sel-names {
+  min-width: 0;
+}
+.pmap-hint {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 5;
+  margin: 0;
+  padding: 6px 14px;
+  max-width: calc(100% - 32px);
+  font-size: 13px;
+  color: var(--text-2);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  box-shadow: var(--shadow-1);
+  pointer-events: none;
 }
 .pmap-check {
   display: inline-flex;
@@ -3992,6 +4174,7 @@ body.resizing * {
 .pmap-selbar {
   border-top: 1px solid var(--border);
   padding-top: 8px;
+  min-height: 39px;
 }
 .pmap-more {
   font-size: 12px;
@@ -4302,12 +4485,53 @@ body.resizing * {
   cursor: default;
   pointer-events: none;
 }
-.pmap .react-flow__node:focus-visible {
+/* The wrapper React Flow draws around each card stays invisible: no padding, border, background or shadow of its own
+   (React Flow's built-in node types style theirs, and its focus and selection rules target the wrapper). Focus and
+   selection are drawn as a ring on the card itself, so it lines up with it, for every node type, mouse or keyboard. */
+.pmap .react-flow__node {
+  padding: 0;
+  border: 0;
+  border-radius: 14px;
+  background: transparent;
+  box-shadow: none;
+  text-align: left;
+  font-size: inherit;
+  color: inherit;
+}
+.pmap .react-flow__node:focus,
+.pmap .react-flow__node:focus-visible,
+.pmap .react-flow__node.selected,
+.pmap .react-flow__node.selectable:hover {
   outline: none;
+  box-shadow: none;
+}
+.pmap .react-flow__node > .node.picked {
+  box-shadow: 0 0 0 2px var(--blue), var(--shadow-1);
 }
 .pmap .react-flow__node:focus-visible > .node,
 .pmap .react-flow__node.selected > .node {
   box-shadow: 0 0 0 3px var(--blue), var(--shadow-2);
+}
+/* keyboard focus: a gap in the surface color, then the ring, so it reads on a selected or colored card too */
+.pmap .react-flow__node:focus-visible > .node {
+  box-shadow: 0 0 0 2px var(--surface), 0 0 0 5px var(--blue), var(--shadow-2);
+}
+.pmap .node.filtered {
+  opacity: 0.5;
+  border-style: dashed;
+}
+.pmap .node-filtered {
+  position: absolute;
+  right: 10px;
+  bottom: -9px;
+  font-size: 11px;
+  line-height: 16px;
+  padding: 0 6px;
+  border-radius: 999px;
+  color: var(--text-2);
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  white-space: nowrap;
 }
 .pmap .react-flow__handle.hnd {
   width: 8px;

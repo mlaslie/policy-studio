@@ -6,7 +6,7 @@ import { buildWorld } from "../api/mockData";
 import type { Ctx, Intent } from "../api/types";
 import { READ_ONLY_EXPR, ROLE } from "../lib/policy";
 import { NOGW, buildPolicyGraph, type Direction, type PEdge } from "./graph";
-import { diffGraphs, mergeStaged, pairKey } from "./diff";
+import { diffGraphs, mergeStaged, pairKey, pendingCount } from "./diff";
 import { simulate, type MapState } from "./simulate";
 import { DEFAULT_FILTERS, viewOf } from "./view";
 
@@ -26,16 +26,16 @@ const hrd = dest("HR Directory MCP");
 const src = (e = hd) => ({ type: "engine" as const, principal: e.principal, label: e.display_name, engine: e.name });
 const dst = (d: { id: string; name: string; display_name: string }, kind: "mcp_server" | "agent" | "endpoint" = "mcp_server") => ({ kind, id: d.id, name: d.name, label: d.display_name });
 
-/** Before, after and the merged graph for a cart (optionally with an agent selected). */
-function staged(cart: Intent[], direction: Direction = "egress", focus?: string) {
+/** Before, after and the merged graph for a cart. */
+function staged(cart: Intent[], direction: Direction = "egress") {
   const sim = simulate(state, cart);
-  const input = { direction, focus, ctx: CTX };
+  const input = { direction, ctx: CTX };
   const before = buildPolicyGraph({ ...input, inventory: inv, gateways: w0.gateways, modelArmor: w0.modelArmor });
   const after = buildPolicyGraph({ ...input, inventory: sim.inventory, gateways: sim.gateways, modelArmor: sim.modelArmor });
   const d = diffGraphs(before, after);
   return { sim, before, after, d, merged: mergeStaged(before, after, d, cart, inv, sim.effects) };
 }
-const line = (ls: PEdge[] | null, caller: string, target: string) => ls?.find((l) => l.caller === caller && l.target === target);
+const line = (ls: PEdge[], caller: string, target: string) => ls.find((l) => l.caller === caller && l.target === target);
 
 describe("simulate", () => {
   it("never touches the state it's given", () => {
@@ -103,29 +103,27 @@ describe("simulate", () => {
 describe("diff: pending add, remove and change for each kind", () => {
   it("grant: the default-deny line becomes a pending add (drawn once)", () => {
     const g: Intent = { id: "g", kind: "grant", source: src(), destination: dst(hrd), access: { mode: "read_only_hint" } };
-    const { merged } = staged([g], "egress", hd.name);
-    const ls = merged.focusLines!.filter((l) => l.caller === hd.name && l.target === hrd.name);
+    const { merged } = staged([g]);
+    const ls = merged.edges.filter((l) => l.caller === hd.name && l.target === hrd.name);
     expect(ls).toHaveLength(1);
     expect(ls[0]).toMatchObject({ id: `a:${hd.name}|${hrd.name}`, pending: "add", before: "would_deny", verdict: "partial", intents: ["g"] });
-    // without a selected agent: the combined line through the gateway gains a part
-    const c = staged([g]).merged.edges.find((e) => e.id === `c:${EGRESS.name}|${hrd.name}`)!;
-    expect(c.pending).toBe("change");
-    expect(c.intents).toEqual(["g"]);
+    // HR Assistant's own line to it is untouched
+    expect(line(merged.edges, hr.name, hrd.name)?.pending).toBeUndefined();
   });
 
   it("revoke: a pending remove that will be denied by default (dry run: would be denied)", () => {
     const r: Intent = { id: "r", kind: "revoke", source: src(), destination: dst(tickets), access: { mode: "custom", expression: READ_ONLY_EXPR } };
-    const { merged, after } = staged([r], "egress", hd.name);
-    const l = line(merged.focusLines, hd.name, tickets.name)!;
+    const { merged, after } = staged([r]);
+    const l = line(merged.edges, hd.name, tickets.name)!;
     expect(l).toMatchObject({ pending: "remove", verdict: "partial", after: "would_deny", intents: ["r"] });
-    expect(line(after.focusLines, hd.name, tickets.name)?.implicit).toBe(true);
+    expect(line(after.edges, hd.name, tickets.name)?.implicit).toBe(true);
     // the default-deny line it becomes isn't drawn as well
-    expect(merged.focusLines!.filter((x) => x.target === tickets.name && x.caller === hd.name)).toHaveLength(1);
+    expect(merged.edges.filter((x) => x.target === tickets.name && x.caller === hd.name)).toHaveLength(1);
   });
 
   it("modify: one pending change, today's verdict kept for the text", () => {
     const m: Intent = { id: "m", kind: "modify", source: src(), destination: dst(tickets), access_from: { mode: "custom", expression: READ_ONLY_EXPR }, access: { mode: "tools", tools: ["get_ticket"] } };
-    const l = line(staged([m], "egress", hd.name).merged.focusLines, hd.name, tickets.name)!;
+    const l = line(staged([m]).merged.edges, hd.name, tickets.name)!;
     expect(l).toMatchObject({ pending: "change", before: "partial", beforeLabel: "read-only", verdict: "partial", intents: ["m"] });
     expect(l.label).not.toBe("read-only");
   });
@@ -138,8 +136,11 @@ describe("diff: pending add, remove and change for each kind", () => {
     const lane = merged.edges.find((e) => e.id === `trunk:${travel.name}`)!;
     expect(lane).toMatchObject({ pending: "change", before: "direct", verdict: "path", intents: ["b"] });
     const cal = dest("Calendar Agent").name;
-    expect(merged.edges.find((e) => e.id === `c:${NOGW.egress}|${cal}`)).toMatchObject({ pending: "remove", verdict: "dormant" });
-    expect(merged.edges.find((e) => e.id === `c:${EGRESS.name}|${cal}`)?.pending).toBe("add");
+    // its own line moves from No gateway (dormant) to the gateway; its straight-out lane goes
+    expect(line(merged.edges, travel.name, cal)).toMatchObject({ id: `a:${travel.name}|${cal}`, pending: "change", before: "dormant", source: EGRESS.name, intents: ["b"] });
+    expect(merged.edges.find((e) => e.id === `out:${travel.name}`)).toMatchObject({ pending: "remove", verdict: "direct" });
+    // and it gains default-deny lines (pending adds)
+    expect(merged.edges.some((e) => e.caller === travel.name && e.implicit && e.pending === "add")).toBe(true);
     expect(pairKey(merged.edges.find((e) => e.id === `trunk:${travel.name}`)!)).toBe(`lane:${travel.name}`);
   });
 
@@ -152,11 +153,13 @@ describe("diff: pending add, remove and change for each kind", () => {
 
   it("set_enforcement: would-deny lines become blocked; the gateway shows the staged mode", () => {
     const e: Intent = { id: "e", kind: "set_enforcement", gateway: { name: EGRESS.name, direction: "egress" }, extension: EGRESS.enforcement!.extension, mode: "ENFORCE", scope: "shared" };
-    const { merged } = staged([e], "egress", hd.name);
-    expect(line(merged.focusLines, hd.name, hrd.name)).toMatchObject({ pending: "change", before: "would_deny", verdict: "blocked", intents: ["e"] });
+    const { merged } = staged([e]);
+    expect(line(merged.edges, hd.name, hrd.name)).toMatchObject({ pending: "change", before: "would_deny", verdict: "blocked", intents: ["e"] });
     expect(merged.nodes.find((n) => n.id === EGRESS.name)!.pending?.text).toEqual(["Dry run → Enforce (staged)"]);
     // an allowed line only changes its mode: not marked
-    expect(line(merged.focusLines, hd.name, dest("Knowledge Base Agent").name)?.pending).toBeUndefined();
+    expect(line(merged.edges, hd.name, dest("Knowledge Base Agent").name)?.pending).toBeUndefined();
+    // the count shows it once (on the gateway), not once per default-deny line
+    expect(pendingCount(merged)).toBe(0);
   });
 
   it("Model Armor on (ingress): unscreened lines become screened; off shows on the gateway", () => {
@@ -190,7 +193,7 @@ describe("diff: Client-to-Agent (§6.3)", () => {
     const off: Intent = { id: "off", kind: "model_armor_off", gateway: { name: INGRESS.name, direction: "ingress" } };
     const merged = stagedFrom(screenedState(), [off]);
     expect(merged.edges.find((x) => x.id === `i:${INGRESS.name}|${hd.name}`)).toMatchObject({ pending: "change", before: "screened", verdict: "unscreened", intents: ["off"] });
-    expect(merged.edges.find((x) => x.id === `i:client:any|${INGRESS.name}`)).toMatchObject({ pending: "change", before: "screened", verdict: "unscreened", intents: ["off"] });
+    expect(merged.edges.find((x) => x.id === `i:client:any|${INGRESS.name}|${hd.name}`)).toMatchObject({ pending: "change", before: "screened", verdict: "unscreened", intents: ["off"] });
     const gw = merged.nodes.find((n) => n.id === INGRESS.name)!;
     expect(gw.modelArmor?.enabled).toBe(false);
     expect(gw.pending).toEqual({ text: ["Model Armor off (staged)"], intents: ["off"], shield: { to: "off", template: "corp-agent-shield" } });
@@ -200,24 +203,26 @@ describe("diff: Client-to-Agent (§6.3)", () => {
     const b: Intent = { id: "b", kind: "bind_gateway", engine: travel.name, gateway: { name: INGRESS.name, direction: "ingress" } };
     const { merged } = staged([b], "ingress");
     const mine = merged.edges.filter((e) => e.caller === travel.name);
-    expect(mine).toHaveLength(1);
-    expect(mine[0]).toMatchObject({ id: `i:${INGRESS.name}|${travel.name}`, pending: "change", before: "direct", verdict: "unscreened", intents: ["b"] });
+    // its line from the gateway, and the client's line into its lane: one pending change each
+    expect(mine).toHaveLength(2);
+    expect(mine.find((e) => e.source === INGRESS.name)).toMatchObject({ id: `i:${INGRESS.name}|${travel.name}`, pending: "change", before: "direct", verdict: "unscreened", intents: ["b"] });
+    expect(mine.find((e) => e.source === "client:any")).toMatchObject({ id: `i:client:any|${INGRESS.name}|${travel.name}`, pending: "change", before: "direct", verdict: "unscreened", intents: ["b"] });
     expect(merged.nodes.find((n) => n.id === travel.name)!.pending).toEqual({ text: ["Binding to corp-ingress staged"], intents: ["b"] });
-    // the client's line into the lane counts one more agent; the line into "No ingress gateway" one fewer
-    expect(merged.edges.find((e) => e.id === `i:client:any|${INGRESS.name}`)).toMatchObject({ pending: "change", label: "3 agents", beforeLabel: "2 agents", intents: ["b"] });
-    expect(merged.edges.find((e) => e.id === `i:client:any|${NOGW.ingress}`)).toMatchObject({ pending: "change", label: undefined, beforeLabel: "2 agents", intents: ["b"] });
+    // no other agent's lines change
+    expect(merged.edges.some((e) => e.pending && e.caller !== travel.name)).toBe(false);
   });
 
   it("unbind for ingress: the agent leaves the lane; screened today, direct after", () => {
     const u: Intent = { id: "u", kind: "unbind_gateway", engine: hd.name, gateway: { name: INGRESS.name, direction: "ingress" } };
     const merged = stagedFrom(screenedState(), [u]);
-    expect(merged.edges.filter((e) => e.caller === hd.name)).toEqual([expect.objectContaining({ id: `i:${NOGW.ingress}|${hd.name}`, pending: "change", before: "screened", verdict: "direct", intents: ["u"] })]);
+    expect(merged.edges.filter((e) => e.caller === hd.name && e.source === NOGW.ingress)).toEqual([expect.objectContaining({ id: `i:${NOGW.ingress}|${hd.name}`, pending: "change", before: "screened", verdict: "direct", intents: ["u"] })]);
+    expect(merged.edges.find((e) => e.caller === hd.name && e.source === "client:any")).toMatchObject({ target: NOGW.ingress, pending: "change", intents: ["u"] });
     expect(merged.nodes.find((n) => n.id === hd.name)!.pending?.text).toEqual(["Unbinding from corp-ingress staged"]);
     // with Model Armor off staged too, the unbind alone is behind the agent's line (it leaves the gateway)
     const off: Intent = { id: "off", kind: "model_armor_off", gateway: { name: INGRESS.name, direction: "ingress" } };
     const both = stagedFrom(screenedState(), [off, u]);
-    expect(both.edges.find((e) => e.caller === hd.name)?.intents).toEqual(["u"]);
-    expect(both.edges.find((e) => e.caller === hr.name)).toMatchObject({ pending: "change", verdict: "unscreened", intents: ["off"] });
+    expect(both.edges.filter((e) => e.caller === hd.name).map((e) => e.intents)).toEqual([["u"], ["u"]]);
+    expect(both.edges.find((e) => e.caller === hr.name && e.source === INGRESS.name)).toMatchObject({ pending: "change", verdict: "unscreened", intents: ["off"] });
     // an egress unbind of the same agent doesn't touch this view
     const ue: Intent = { id: "ue", kind: "unbind_gateway", engine: hd.name, gateway: { name: EGRESS.name, direction: "egress" } };
     expect(staged([ue], "ingress").merged.edges.some((e) => e.pending)).toBe(false);
@@ -225,11 +230,16 @@ describe("diff: Client-to-Agent (§6.3)", () => {
 });
 
 describe("diff: views", () => {
-  it("Changes only: just the pending lines, the trunks to them, and their nodes", () => {
+  it("Changes only: just the pending lines, the trunks to them, and their nodes (with no selection, of the agents they change)", () => {
     const g: Intent = { id: "g", kind: "grant", source: src(), destination: dst(hrd), access: { mode: "read_only_hint" } };
-    const v = viewOf(staged([g]).merged, DEFAULT_FILTERS, null, { changesOnly: true });
+    const merged = staged([g]).merged;
+    const v = viewOf(merged, DEFAULT_FILTERS, [], { changesOnly: true });
+    expect(v.agents).toEqual([hd.name]);
     expect(v.edges.filter((e) => e.verdict !== "path").every((e) => e.pending)).toBe(true);
     expect(v.edges.some((e) => e.id === `trunk:${hd.name}`)).toBe(true);
     expect(new Set(v.nodes.map((n) => n.id))).toEqual(new Set(v.edges.flatMap((e) => [e.source, e.target])));
+    // another agent selected: only its changes (none)
+    expect(viewOf(merged, DEFAULT_FILTERS, [hr.name], { changesOnly: true }).edges).toEqual([]);
+    expect(pendingCount(merged)).toBe(1);
   });
 });

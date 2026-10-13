@@ -2,9 +2,11 @@
 // gateways, Model Armor, context). Pure, no React (docs/VISUALIZATION_PLAN.md §4.3–4.5, §6).
 //
 // Egress lines follow §4.4: the caller's egress gateway and its mode, the roles/iap.egressor bindings on the
-// destination and on the registry (registry-wide), matched with evaluate.ts (the port of dryrun.py). Outside the
-// selected-agent view an agent's own grants are combined per (gateway, destination); group, public and registry-wide
-// grants are drawn once from their pseudo caller and only added to an agent's lines when it is selected.
+// destination and on the registry (registry-wide), matched with evaluate.ts (the port of dryrun.py). Every line
+// belongs to exactly one caller (`caller`): each agent's trunk to its gateway, then its own line to each destination
+// (its own grants, the group, public and registry-wide grants it inherits, and default deny), never combined across
+// agents. Group, public and registry-wide grants are also drawn once from their pseudo caller. The map draws only the
+// selected callers' lines (view.ts).
 import type { Access, Binding, ContextInfo, Ctx, EnforcementMode, Engine, Gateway, Inventory, ModelArmorResp } from "../api/types";
 import { ROLE, accessFromCondition } from "../lib/policy";
 import { ENGINE_PRINCIPAL_RE, EVERYONE, PROJECT_AGENTS_RE, conditionAllows, evaluateTools, isReadOnlyHint, memberMatches, parseTools } from "./evaluate";
@@ -92,6 +94,8 @@ export interface PNode {
    *  can't reach (default deny), both for the node's summary chips. */
   inheritedCount?: number;
   deniedCount?: number;
+  /** Engine (egress): destinations its own grants allow (the "N allowed" chip). */
+  allowedCount?: number;
   /** Pseudo callers: the members drawn from this node. */
   members?: { member: string; label: string; deleted?: boolean }[];
   /** endpoint_group / google_apis: the grouped destinations. */
@@ -123,10 +127,8 @@ export interface PEdge {
   modelArmorDryRun?: boolean;
   implicit?: boolean; // drawn for default deny, no binding
   inherited?: boolean; // via a principalSet, public, group or registry-wide grant (selected agent only)
-  /** The caller (engine or pseudo id) of a single-caller line. */
+  /** The caller (engine or pseudo id) the line belongs to: every line has one, except in hand-made fixtures. */
   caller?: string;
-  /** A combined line: the per-agent lines it stands for (count badge = parts.length). */
-  parts?: PEdge[];
   /** A line into the "Google APIs" group: the per-endpoint lines it stands for (view.ts). */
   members?: PEdge[];
   /** Short text on the line ("read-only", "3/6 tools", "?"). */
@@ -145,10 +147,8 @@ export interface PEdge {
 export interface PolicyGraph {
   direction: Direction;
   nodes: PNode[];
-  /** The lines with no agent selected: trunks, combined gateway → destination lines, pseudo-caller lines. */
+  /** Every caller's lines: trunks, each agent's own, inherited and default-deny lines, pseudo-caller lines. */
   edges: PEdge[];
-  /** The focused caller's own lines (inherited and implicit included), when `focus` names an engine. */
-  focusLines: PEdge[] | null;
   stats: { engines: number; destinations: number; bindings: number; gateways: number; unbound: number; unreadable: number };
   notes: string[];
 }
@@ -161,9 +161,7 @@ export interface GraphInput {
   /** The saved context: ge_app names the Gemini Enterprise client (ingress). */
   ctx?: Partial<Ctx> | null;
   direction: Direction;
-  /** Engine id whose own lines to compute (the selected-agent view). */
-  focus?: string | null;
-  /** Add group / public / registry-wide grants to the focused agent's lines (default true). */
+  /** Add group / public / registry-wide grants to each agent's lines (default true). */
   inherited?: boolean;
 }
 
@@ -186,7 +184,7 @@ export const SECTION_LABEL: Record<string, string> = {
   clients: "Clients",
 };
 
-/** Best first: a combined line takes the best of its contributors. */
+/** Best first: a line merged into the Google APIs group takes the best of its endpoints. */
 const RANK: Verdict[] = ["allowed", "partial", "conditional", "unchecked", "would_deny", "blocked", "dormant", "screened", "unscreened", "direct", "path"];
 export const bestVerdict = (vs: Verdict[]): Verdict => vs.reduce((a, b) => (RANK.indexOf(b) < RANK.indexOf(a) ? b : a));
 
@@ -392,11 +390,15 @@ function buildEgress(input: GraphInput): PolicyGraph {
     const ma = gw ? maOf(input, gw) : null;
     return { gateway: gw ?? undefined, mode: g?.enforcement?.mode ?? null, modelArmor: !!ma?.enabled, modelArmorDryRun: !!ma?.dryRun };
   };
+  // Each agent's lane: its trunk to its gateway, or straight out (No gateway → Anywhere) when it has none.
   for (const e of inv.engines) {
     const gw = engineGw.get(e.name) ?? null;
-    edges.push(gw ? { id: `trunk:${e.name}`, source: e.name, target: gw, direction: "egress", verdict: "path", reasons: [], caller: e.name, ...gwMeta(gw) } : { id: `direct:${e.name}`, source: e.name, target: NOGW.egress, direction: "egress", verdict: "direct", reasons: [], caller: e.name });
+    if (gw) edges.push({ id: `trunk:${e.name}`, source: e.name, target: gw, direction: "egress", verdict: "path", reasons: [], caller: e.name, ...gwMeta(gw) });
+    else {
+      edges.push({ id: `direct:${e.name}`, source: e.name, target: NOGW.egress, direction: "egress", verdict: "direct", reasons: [], caller: e.name });
+      edges.push({ id: `out:${e.name}`, source: NOGW.egress, target: PSEUDO.anywhere, direction: "egress", verdict: "direct", reasons: [], caller: e.name });
+    }
   }
-  if (unbound.length) edges.push({ id: "direct:nogw", source: NOGW.egress, target: PSEUDO.anywhere, direction: "egress", verdict: "direct", reasons: [] });
 
   /** One caller's line to one destination from the given bindings, or null. */
   const lineFor = (callerId: string, gw: string | null, d: Dest, ms: { reason: Reason; match: boolean | null }[], id: string, inherited: boolean): PEdge | null => {
@@ -420,30 +422,6 @@ function buildEgress(input: GraphInput): PolicyGraph {
     };
   };
 
-  // Each engine's own grants (member = its principal), combined per (gateway, destination).
-  const combined = new Map<string, PEdge[]>();
-  for (const d of dests) {
-    if (d.node.unreadable) continue;
-    const own = new Map<string, Reason[]>();
-    for (const r of reasonsOn.get(d.id) ?? []) {
-      const e = engineByPrincipal.get(r.binding.member);
-      if (e) own.set(e.name, [...(own.get(e.name) ?? []), r]);
-      else {
-        const p = pseudoNode(pseudoOf(r.binding.member, projectSet));
-        const m = ENGINE_PRINCIPAL_RE.exec(r.binding.member);
-        if (!p.members!.some((x) => x.member === r.binding.member)) p.members!.push({ member: r.binding.member, label: r.binding.member_label || r.binding.member, deleted: !!m });
-      }
-    }
-    for (const [eng, rs] of own) {
-      const gw = engineGw.get(eng) ?? null;
-      const line = lineFor(eng, gw, d, rs.map((reason) => ({ reason, match: true })), `a:${eng}|${d.id}`, false);
-      if (!line) continue;
-      const k = `${gw ?? NOGW.egress}|${d.id}`;
-      combined.set(k, [...(combined.get(k) ?? []), line]);
-    }
-  }
-  for (const [k, parts] of combined) edges.push(combineParts(`c:${k}`, parts));
-
   // Pseudo callers: one line per (pseudo, destination), drawn straight to it (not through one gateway).
   for (const d of dests) {
     if (d.node.unreadable) continue;
@@ -451,6 +429,8 @@ function buildEgress(input: GraphInput): PolicyGraph {
     for (const r of reasonsOn.get(d.id) ?? []) {
       if (engineByPrincipal.has(r.binding.member)) continue;
       const pid = pseudoOf(r.binding.member, projectSet);
+      const p = pseudoNode(pid);
+      if (!p.members!.some((x) => x.member === r.binding.member)) p.members!.push({ member: r.binding.member, label: r.binding.member_label || r.binding.member, deleted: !!ENGINE_PRINCIPAL_RE.exec(r.binding.member) });
       by.set(pid, [...(by.get(pid) ?? []), { ...r, via: viaOf(r.binding.member, null, d.kind === "registry") }]);
     }
     for (const [pid, rs] of by) {
@@ -468,7 +448,7 @@ function buildEgress(input: GraphInput): PolicyGraph {
     nodes.push(p);
   }
 
-  // ---------- per-engine summary: inherited reach and default-deny count ----------
+  // ---------- each agent's own lines, and its summary chips ----------
   const pairFor = (e: Engine, d: Dest, inherited: boolean): PEdge | null => {
     if (d.node.unreadable) return null;
     const gw = engineGw.get(e.name) ?? null;
@@ -481,69 +461,46 @@ function buildEgress(input: GraphInput): PolicyGraph {
     const inh = !ms.some((m) => m.reason.binding.member === e.principal && m.reason.resource === d.id);
     return lineFor(e.name, gw, d, ms, `a:${e.name}|${d.id}`, inh);
   };
+  const withInherited = input.inherited !== false;
   for (const n of nodes) {
     if (n.kind !== "engine") continue;
     const e = inv.engines.find((x) => x.name === n.id)!;
+    const gw = engineGw.get(e.name) ?? null;
+    const mode = gw ? (gwByName.get(gw)?.enforcement?.mode ?? null) : null;
+    let own = 0;
     let inh = 0;
     let denied = 0;
     for (const d of dests) {
       if (d.node.unreadable) continue;
-      const line = pairFor(e, d, true);
-      if (line?.inherited) inh++;
-      if (!line && n.gateway && d.node.sameAs !== e.name) denied++;
+      const line = pairFor(e, d, withInherited);
+      // the summary always counts inherited reach, whatever the lines show
+      const full = withInherited ? line : pairFor(e, d, true);
+      if (full?.inherited) inh++;
+      // no default-deny line to the agent's own registry entry (it doesn't call itself through the gateway)
+      const self = d.node.sameAs === e.name;
+      if (!full && gw && !self) denied++;
+      if (line) {
+        edges.push(line);
+        if (!line.inherited) own++;
+      } else if (gw && !self)
+        edges.push({ id: `x:${e.name}|${d.id}`, source: gw, target: d.id, direction: "egress", verdict: mode === "ENFORCE" ? "blocked" : mode === "DRY_RUN" ? "would_deny" : "unchecked", reasons: [], implicit: true, caller: e.name, ...gwMeta(gw) });
     }
     n.inheritedCount = inh;
-    n.deniedCount = n.gateway ? denied : 0;
+    n.deniedCount = gw ? denied : 0;
+    n.allowedCount = own;
+    if (gw) n.chips.push({ text: `${own} allowed`, tone: own ? "green" : "neutral", title: "Destinations its own grants allow (fully, some tools, or under a condition). Select the agent to see them." });
+    else if (own) n.chips.push({ text: `${own} ${own === 1 ? "grant" : "grants"} not enforced`, tone: "neutral", title: "Its grants are never checked: no egress gateway in the path." });
     if (inh) n.chips.push({ text: `+${inh} via group or registry-wide grants`, tone: "blue", title: "Reachable through a project-wide, public, group or registry-wide grant. Select the agent to see them." });
-    if (denied) {
-      const mode = n.gateway ? gwByName.get(n.gateway)?.enforcement?.mode : null;
+    if (denied)
       n.chips.push(mode === "DRY_RUN" ? { text: `Would be denied: ${denied}`, tone: "amber", title: "Destinations with no grant: denied by default once the gateway enforces (it's in dry run, so they pass today)." } : { text: `Denied by default: ${denied}`, tone: "red", title: "Destinations this agent holds no grant on." });
-    }
-    if (!n.gateway && edges.some((x) => x.parts?.some((p) => p.caller === n.id))) n.chips.push({ text: "Grants not enforced", tone: "neutral", title: "Its grants are never checked: no egress gateway in the path." });
-  }
-
-  // ---------- the focused agent's own lines ----------
-  let focusLines: PEdge[] | null = null;
-  const fe = input.focus ? inv.engines.find((e) => e.name === input.focus) : undefined;
-  if (fe) {
-    const gw = engineGw.get(fe.name) ?? null;
-    const mode = gw ? (gwByName.get(gw)?.enforcement?.mode ?? null) : null;
-    focusLines = edges.filter((x) => x.caller === fe.name && !x.parts);
-    if (!gw) focusLines.push(...edges.filter((x) => x.id === "direct:nogw"));
-    for (const d of dests) {
-      if (d.node.unreadable) continue;
-      const line = pairFor(fe, d, input.inherited !== false);
-      if (line) focusLines.push(line);
-      // no default-deny line to the agent's own registry entry (it doesn't call itself through the gateway)
-      else if (gw && d.node.sameAs !== fe.name)
-        focusLines.push({ id: `x:${fe.name}|${d.id}`, source: gw, target: d.id, direction: "egress", verdict: mode === "ENFORCE" ? "blocked" : mode === "DRY_RUN" ? "would_deny" : "unchecked", reasons: [], implicit: true, caller: fe.name, ...gwMeta(gw) });
-    }
   }
 
   return {
     direction: "egress",
     nodes,
     edges,
-    focusLines,
     stats: { engines: inv.engines.length, destinations: dests.length, bindings, gateways: egressGws.length, unbound: unbound.length, unreadable: Object.keys(inv.access_errors ?? {}).length },
     notes: [...new Set(notes)],
-  };
-}
-
-/** A combined gateway → destination line: verdict = the best of its parts, count badge = the number of agents. */
-export function combineParts(id: string, parts: PEdge[]): PEdge {
-  const sorted = [...parts].sort((a, b) => (a.caller ?? "").localeCompare(b.caller ?? ""));
-  const v = bestVerdict(sorted.map((p) => p.verdict));
-  const first = sorted[0];
-  return {
-    ...first,
-    id,
-    verdict: v,
-    reasons: sorted.flatMap((p) => p.reasons),
-    tools: sorted.length === 1 ? first.tools : undefined,
-    caller: sorted.length === 1 ? first.caller : undefined,
-    label: sorted.length > 1 ? `${sorted.length} agents` : first.label,
-    parts: sorted,
   };
 }
 
@@ -566,7 +523,6 @@ function buildIngress(input: GraphInput): PolicyGraph {
   nodes.push({ id: NOGW.ingress, kind: "no_gateway", label: "No ingress gateway", sub: "Calls reach the agent directly", column: "gateways", section: "gateways", chips: [{ text: "Not screened", tone: "neutral" }], gateway: null, search: "no ingress gateway" });
 
   const engines = [...inv.engines].sort((a, b) => Number(!a.gateways.ingress) - Number(!b.gateways.ingress) || a.display_name.localeCompare(b.display_name));
-  const usedGw = new Set<string>();
   let direct = 0;
   for (const e of engines) {
     const gw = e.gateways.ingress ?? null;
@@ -577,7 +533,6 @@ function buildIngress(input: GraphInput): PolicyGraph {
     nodes.push(engineNode(e, gw, "dests"));
     if (gw) {
       if (!gwByName.has(gw) && !nodes.some((x) => x.id === gw)) nodes.push({ id: gw, kind: "gateway", label: short(gw), sub: "Not in this region's gateway list", column: "gateways", section: "gateways", chips: [], gateway: gw, search: gw.toLowerCase() });
-      usedGw.add(gw);
       const ma = maOf(input, gw);
       const v: Verdict = ma?.enabled ? "screened" : "unscreened";
       edges.push({ id: `i:${gw}|${e.name}`, source: gw, target: e.name, direction: "ingress", verdict: v, reasons: [], gateway: gw, modelArmor: !!ma?.enabled, modelArmorDryRun: !!ma?.dryRun, caller: e.name });
@@ -586,19 +541,21 @@ function buildIngress(input: GraphInput): PolicyGraph {
       edges.push({ id: `i:${NOGW.ingress}|${e.name}`, source: NOGW.ingress, target: e.name, direction: "ingress", verdict: "direct", reasons: [], caller: e.name });
     }
   }
-  for (const c of clients) {
-    for (const gw of [...usedGw].sort()) {
-      const ma = maOf(input, gw);
-      const n = edges.filter((x) => x.source === gw).length;
-      edges.push({ id: `i:${c.id}|${gw}`, source: c.id, target: gw, direction: "ingress", verdict: ma?.enabled ? "screened" : "unscreened", reasons: [], gateway: gw, modelArmor: !!ma?.enabled, modelArmorDryRun: !!ma?.dryRun, label: n > 1 ? `${n} agents` : undefined });
-    }
-    if (direct) edges.push({ id: `i:${c.id}|${NOGW.ingress}`, source: c.id, target: NOGW.ingress, direction: "ingress", verdict: "direct", reasons: [], label: direct > 1 ? `${direct} agents` : undefined });
+  // Each agent's lines from every client into its lane (one per agent, never combined).
+  for (const e of engines) {
+    const gw = e.gateways.ingress ?? null;
+    const ma = gw ? maOf(input, gw) : null;
+    for (const c of clients)
+      edges.push(
+        gw
+          ? { id: `i:${c.id}|${gw}|${e.name}`, source: c.id, target: gw, direction: "ingress", verdict: ma?.enabled ? "screened" : "unscreened", reasons: [], gateway: gw, modelArmor: !!ma?.enabled, modelArmorDryRun: !!ma?.dryRun, caller: e.name }
+          : { id: `i:${c.id}|${NOGW.ingress}|${e.name}`, source: c.id, target: NOGW.ingress, direction: "ingress", verdict: "direct", reasons: [], caller: e.name },
+      );
   }
   return {
     direction: "ingress",
     nodes,
     edges,
-    focusLines: null,
     stats: { engines: inv.engines.length, destinations: inv.engines.length, bindings: 0, gateways: ingressGws.length, unbound: direct, unreadable: 0 },
     notes,
   };

@@ -93,28 +93,35 @@ function sectionTitle(section: string, byId: Map<string, PNode>): string {
   return SECTION_LABEL[section] ?? section;
 }
 
-export function layoutView(view: Pick<MapView, "nodes" | "edges">, opts: { expanded?: Set<string>; heights?: Record<string, number> } = {}): Layout {
-  const { nodes, edges } = view;
+/** `layoutEdges` (every shown caller's own grants, MapView) when given, so the selection doesn't move nodes; else
+ *  `edges`. */
+export function layoutView(view: Pick<MapView, "nodes" | "edges"> & { layoutEdges?: PEdge[] }, opts: { expanded?: Set<string>; heights?: Record<string, number> } = {}): Layout {
+  const { nodes } = view;
+  const edges = view.layoutEdges ?? view.edges;
   const byId = new Map(nodes.map((n) => [n.id, n]));
   const h = (n: PNode) => opts.heights?.[n.id] ?? nodeHeight(n, opts.expanded?.has(n.id));
   const gws = nodes.filter((n) => n.column === "gateways").sort((a, b) => Number(a.kind === "no_gateway") - Number(b.kind === "no_gateway") || a.label.localeCompare(b.label) || a.id.localeCompare(b.id));
   const gwOrder = new Map(gws.map((g, i) => [g.id, i]));
 
-  // Logical links (caller ↔ destination), through combined lines' parts, for the barycenter passes.
+  // Logical links (caller ↔ destination), through each line's caller (and the lines merged into the Google APIs
+  // group), for the barycenter passes.
   const callerIds = new Set(nodes.filter((n) => colOf(n) === "callers").map((n) => n.id));
   const destIds = new Set(nodes.filter((n) => colOf(n) === "dests").map((n) => n.id));
   const links: [string, string][] = [];
   const gwCallers = new Map<string, string[]>();
   for (const e of edges) {
     if (callerIds.has(e.source) && gwOrder.has(e.target)) gwCallers.set(e.target, [...(gwCallers.get(e.target) ?? []), e.source]);
-    for (const p of (e.members ?? [e]).flatMap((m) => m.parts ?? [m])) {
+    for (const p of e.members ?? [e]) {
       const c = callerIds.has(p.source) ? p.source : p.caller && callerIds.has(p.caller) ? p.caller : null;
       if (c && destIds.has(e.target)) links.push([c, e.target]);
       // ingress: clients reach the agents through the gateway lanes
       if (!c && destIds.has(e.target) && gwOrder.has(e.source)) for (const cc of callerIds) links.push([cc, e.target]);
     }
   }
-  const nbrs = (id: string, side: 0 | 1) => links.filter((l) => l[side] === id).map((l) => l[1 - side]);
+  const adj: [Map<string, string[]>, Map<string, string[]>] = [new Map(), new Map()];
+  for (const l of links)
+    for (const side of [0, 1] as const) adj[side].set(l[side], [...(adj[side].get(l[side]) ?? []), l[1 - side]]);
+  const nbrs = (id: string, side: 0 | 1) => adj[side].get(id) ?? [];
 
   // Group a column's nodes by section, in section order.
   const sectionsOf = (col: Col) => {
@@ -288,5 +295,5 @@ export function freeSpot(drop: Omit<Box, "pinned">, others: Box[], gap: number):
   return { x: at.x, y: at.y };
 }
 
-/** Edges that belong to a node (incident, or a combined line one of whose parts is that caller's). */
-export const touches = (e: PEdge, id: string): boolean => e.source === id || e.target === id || e.caller === id || !!e.parts?.some((p) => p.caller === id) || !!e.members?.some((m) => touches(m, id));
+/** Edges that belong to a node (incident, or that caller's line). */
+export const touches = (e: PEdge, id: string): boolean => e.source === id || e.target === id || e.caller === id || !!e.members?.some((m) => touches(m, id));
