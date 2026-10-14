@@ -4,6 +4,7 @@ import type { Edge, Node } from "@xyflow/react";
 import type { PEdge, PNode, PNodeKind, Verdict } from "./graph";
 import { touches, type Layout } from "./layout";
 import type { MapView } from "./view";
+import type { SettlingMarks } from "./settling";
 
 export type ToolState = "allowed" | "denied" | "unknown";
 export interface MapNodeData extends Record<string, unknown> {
@@ -26,6 +27,8 @@ export interface MapNodeData extends Record<string, unknown> {
   /** Section title nodes only. */
   title?: string;
   width?: number;
+  /** Changed by an apply that may still be settling (map/settling.ts): the clock marker's tooltip. */
+  settling?: string;
 }
 export interface MapEdgeData extends Record<string, unknown> {
   edge: PEdge;
@@ -43,6 +46,8 @@ export interface MapEdgeData extends Record<string, unknown> {
   /** Parallel lines of several agents: px moved at each end (0 at the agent's own node). */
   offS: number;
   offT: number;
+  /** Changed by an apply that may still be settling (map/settling.ts): the clock marker's tooltip. */
+  settling?: string;
 }
 export type MNode = Node<MapNodeData>;
 export type MEdge = Edge<MapEdgeData>;
@@ -158,7 +163,9 @@ export function toFlow(
   expanded: Set<string>,
   reducedMotion = false,
   pinned: Set<string> = new Set(),
+  settling?: SettlingMarks,
 ): { nodes: MNode[]; edges: MEdge[] } {
+  const settled = (text: string | undefined) => (text ? `, ${text}` : "");
   const label = new Map(view.nodes.map((n) => [n.id, n.label]));
   const agents = new Set(view.agents);
   // With agents selected, nodes off their lines are dimmed (still clickable, to add one); a line or node in the panel
@@ -202,9 +209,10 @@ export function toFlow(
       ring: one ? intoBy.get(n.id)?.verdict : undefined,
       pinned: pinned.has(n.id),
       picked: agents.has(n.id),
+      settling: settling?.nodes.get(n.id),
     },
     selected: sel.node === n.id,
-    ariaLabel: nodeAria(n, lines.get(n.id) ?? 0, pinned.has(n.id), agents.has(n.id)),
+    ariaLabel: nodeAria(n, lines.get(n.id) ?? 0, pinned.has(n.id), agents.has(n.id)) + settled(settling?.nodes.get(n.id)),
     draggable: true,
   }));
   for (const h of layout.headers)
@@ -233,7 +241,7 @@ export function toFlow(
       type: "policy",
       className: [dim && "dim", sel.edge === e.id && "sel", e.implicit && "implicit", e.pending && `pending-${e.pending}`, idx >= 0 && `ag${idx}`].filter(Boolean).join(" "),
       selected: sel.edge === e.id,
-      ariaLabel: edgeAria(e, (id) => label.get(id) ?? id),
+      ariaLabel: edgeAria(e, (id) => label.get(id) ?? id) + settled(settling?.edges.get(e.id)),
       data: {
         edge: e,
         dim,
@@ -245,6 +253,7 @@ export function toFlow(
         multi,
         offS: e.source === e.caller ? 0 : off,
         offT: e.target === e.caller ? 0 : off,
+        settling: settling?.edges.get(e.id),
       },
     };
   });

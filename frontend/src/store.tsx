@@ -5,6 +5,7 @@ import { api } from "./api/client";
 import type { ApplyConfirm, AuditResp, AuthInfo, ContextInfo, Ctx, GatewaysResp, Intent, Inventory, ModelArmorResp } from "./api/types";
 import { sameChange, toList, type ApplyRun } from "./lib/apply";
 import { load, save } from "./lib/util";
+import { addSettling, loadSettling, pruneSettling, saveSettling, sessionStore, settleEntry, type SettleEntry } from "./lib/settling";
 import { intentKey, newId } from "./lib/policy";
 import type { MapFocus } from "./map/focus";
 
@@ -84,6 +85,11 @@ type Studio = {
   startApply: (intents: Intent[], confirm: ApplyConfirm) => Promise<void>;
   cancelApply: () => void;
   dismissRun: () => void;
+  /** Open Apply on a run's result: the current run, or one from the history. */
+  showRun: (id: string) => void;
+  /** Applies whose changes may not be enforced yet (lib/settling.ts): the top bar's chip and the map's clocks. Kept in
+   *  sessionStorage like the history; an entry leaves once its max time passes. */
+  settling: SettleEntry[];
   /** Put inverse intents into the cart and open Apply on them. */
   stageUndo: (intents: Intent[]) => void;
   /** "Show on map": what the map focuses on when it opens (it clears it once applied). */
@@ -146,6 +152,7 @@ export function StudioProvider({ children }: { children: ReactNode }) {
       return [];
     }
   });
+  const [settling, setSettling] = useState<SettleEntry[]>(() => loadSettling(sessionStore(), Date.now()));
   const [maSetupOpen, setMaSetupOpen] = useState(false);
   const [mapFocus, setMapFocus] = useState<Studio["mapFocus"]>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -159,6 +166,15 @@ export function StudioProvider({ children }: { children: ReactNode }) {
       /* storage disabled */
     }
   }, [history]);
+
+  // Saved like the history; each entry leaves once its max time passes (one timer, for the next one to go).
+  useEffect(() => {
+    saveSettling(sessionStore(), settling);
+    if (!settling.length) return;
+    const next = Math.min(...settling.map((e) => e.latest));
+    const t = setTimeout(() => setSettling((l) => pruneSettling(l, Date.now())), Math.max(0, next - Date.now()) + 50);
+    return () => clearTimeout(t);
+  }, [settling]);
 
   const refreshAuth = useCallback(async (refresh = false) => {
     await into(setAuth, api.auth(ctxRef.current, refresh));
@@ -359,6 +375,8 @@ export function StudioProvider({ children }: { children: ReactNode }) {
       put(final);
       abortRef.current = null;
       setHistory((h) => [final, ...h].slice(0, 20));
+      const settle = settleEntry(final);
+      if (settle) setSettling((l) => addSettling(l, settle, Date.now()));
       const changed = final.items.filter((i) => i.state === "verified" || i.state === "done");
       const finished = new Set(final.items.filter((i) => i.state === "verified" || i.state === "skipped").map((i) => i.intent.id));
       if (finished.size) setCart((c) => c.filter((x) => !finished.has(x.id)));
@@ -372,6 +390,16 @@ export function StudioProvider({ children }: { children: ReactNode }) {
   );
   const cancelApply = useCallback(() => abortRef.current?.abort(), []);
   const dismissRun = useCallback(() => setRun(null), []);
+  const historyRef = useRef(history);
+  historyRef.current = history;
+  const showRun = useCallback(
+    (id: string) => {
+      // A run still in progress stays on screen (its events keep updating it); otherwise the run from the history.
+      setRun((r) => (r && (!r.done || r.id === id) ? r : (historyRef.current.find((h) => h.id === id) ?? r)));
+      goto("apply");
+    },
+    [goto],
+  );
   const stageUndo = useCallback(
     (intents: Intent[]) => {
       // An undo that is already in the cart (e.g. "enforce" staged from Gateways) isn't staged twice: Apply focuses
@@ -422,10 +450,10 @@ export function StudioProvider({ children }: { children: ReactNode }) {
       cart, addIntents, updateIntent, removeIntent, duplicateIntent, clearCart,
       step, goto, draft, openBuilder, reviewFocus, openReview,
       learnOpen, setLearnOpen, glossaryTerm, showTerm, toasts, toast,
-      auth, refreshAuth, applyFocus, openApply, run, history, startApply, cancelApply, dismissRun, stageUndo,
+      auth, refreshAuth, applyFocus, openApply, run, history, startApply, cancelApply, dismissRun, showRun, settling, stageUndo,
       maSetupOpen, openMaSetup, setMaSetupOpen, mapFocus, openMap, clearMapFocus,
     }),
-    [mapFocus, openMap, clearMapFocus, maSetupOpen, openMaSetup, auth, refreshAuth, applyFocus, openApply, run, history, startApply, cancelApply, dismissRun, stageUndo, ctx, setCtx, ctxInfo, gateways, modelArmor, inventory, audit, syncing, syncedAt, sync, cart, addIntents, updateIntent, removeIntent, duplicateIntent, clearCart, step, goto, draft, openBuilder, reviewFocus, openReview, learnOpen, setLearnOpen, glossaryTerm, showTerm, toasts, toast],
+    [mapFocus, openMap, clearMapFocus, maSetupOpen, openMaSetup, auth, refreshAuth, applyFocus, openApply, run, history, startApply, cancelApply, dismissRun, showRun, settling, stageUndo, ctx, setCtx, ctxInfo, gateways, modelArmor, inventory, audit, syncing, syncedAt, sync, cart, addIntents, updateIntent, removeIntent, duplicateIntent, clearCart, step, goto, draft, openBuilder, reviewFocus, openReview, learnOpen, setLearnOpen, glossaryTerm, showTerm, toasts, toast],
   );
   return <Ctx_.Provider value={value}>{children}</Ctx_.Provider>;
 }

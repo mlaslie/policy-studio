@@ -7,7 +7,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { ReadyBanner } from "../components/Timing";
 import { KIND_LABEL, KIND_ORDER } from "./policy";
 import { TYPICAL } from "./apply";
-import { BASIS_LABEL, TIMING, clock, effectText, isMeasured, readyPhase, readyWindow, stageTip, storedText, timeLeft, timingNote, type Kind } from "./timing";
+import { BASIS_LABEL, TIMING, clock, effectText, isMeasured, readyPhase, readyWindow, setupTimingNote, stageTip, storedText, timeLeft, timingNote, type Kind } from "./timing";
 
 const MIN = 60_000;
 const T0 = Date.UTC(2026, 9, 13, 20, 12, 46);
@@ -156,5 +156,24 @@ describe("results banner", () => {
   it("shows nothing when no item was verified", () => {
     vi.setSystemTime(T0);
     expect(renderToStaticMarkup(<ReadyBanner kinds={[]} finishedAt={T0} />)).toBe("");
+  });
+});
+
+describe("Model Armor setup note", () => {
+  it("is built from the kinds being staged", () => {
+    expect(setupTimingNote(["model_armor_template", "model_armor_extension", "iam_project_grant", "model_armor_on"])).toBe(
+      "After Apply this takes several minutes to take effect: the template, extension and policy need a few minutes each, and service-agent roles up to about 7. Test once the Apply page says it's ready.",
+    );
+    expect(setupTimingNote(["model_armor_extension", "iam_project_grant", "iam_project_grant", "model_armor_on"])).toBe(
+      "After Apply this takes several minutes to take effect: the extension and policy need a few minutes each, and service-agent roles up to about 7. Test once the Apply page says it's ready.",
+    );
+    expect(setupTimingNote(["model_armor_on"])).toBe("After Apply this takes several minutes to take effect: the policy needs a few minutes. Test once the Apply page says it's ready.");
+    expect(setupTimingNote(["iam_project_grant"])).toBe("After Apply this takes several minutes to take effect: service-agent roles need up to about 7. Test once the Apply page says it's ready.");
+  });
+
+  it("follows the table and says nothing when nothing is staged", () => {
+    expect(setupTimingNote([])).toBe("");
+    expect(setupTimingNote(["grant"])).toBe("");
+    expect(setupTimingNote(["iam_project_grant"])).toContain(`up to about ${TIMING.iam_project_grant.max}`);
   });
 });

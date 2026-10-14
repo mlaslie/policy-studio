@@ -1,10 +1,11 @@
-// Shell: top bar (with the policy cart), stepper, current step, collapsible/resizable Learn rail, toasts.
+// Shell: top bar (with the policy cart and the settling chip), stepper, current step, collapsible/resizable Learn rail, toasts.
 import { Suspense, lazy, useEffect, useState, type CSSProperties } from "react";
 import { STEPS, stepN, useStudio, type StepKey } from "./store";
 import { IS_MOCK } from "./api/client";
 import { ago } from "./lib/util";
 import { mapBadge } from "./lib/mapBadge";
 import { CartButton } from "./panels/Cart";
+import { SettlingChip } from "./components/Settling";
 import { LearnPanel, useRailWidth } from "./panels/Learn";
 import { Tip } from "./components/Tooltip";
 import { ContextIcon, LockIcon, RefreshIcon, ShieldIcon, CheckIcon, WarnIcon } from "./components/Icons";
@@ -73,6 +74,7 @@ function TopBar() {
           <span className="sync-ago">{syncing ? "" : `synced ${ago(syncedAt, now)}`}</span>
         </button>
         </Tip>
+        <SettlingChip />
         <CartButton />
       </div>
     </header>

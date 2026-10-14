@@ -4,7 +4,8 @@
 // Staged changes (§8) add a clock badge and a word: a pending add is dashed (animated unless reduced motion), a pending
 // remove keeps today's style under a red dashed overlay, a pending change is drawn as it will be. Every line is one
 // agent's: with several agents selected, each agent's lines are moved a few px at the shared ends (data.offS / offT) and
-// their labels and tooltips name the agent.
+// their labels and tooltips name the agent. A line an apply changed that may still be settling (map/settling.ts) gets a
+// blue clock badge, with when it was applied and until when the old policy may still hold.
 import { BaseEdge, EdgeLabelRenderer, getBezierPath, type EdgeProps } from "@xyflow/react";
 import { memo } from "react";
 import { ClockIcon, CloseIcon, ShieldIcon } from "../components/Icons";
@@ -85,7 +86,7 @@ function PolicyEdgeImpl({ id, sourceX, sourceY: sy0, targetX, targetY: ty0, sour
     ) : v === "conditional" ? (
       <span className="edge-badge badge-conditional">?</span>
     ) : null;
-  const title = edgeTitle(e, data!.agent && e.caller !== e.source ? data!.agent : undefined);
+  const title = [edgeTitle(e, data!.agent && e.caller !== e.source ? data!.agent : undefined), data!.settling].filter(Boolean).join(" · ");
   return (
     <>
       <path d={path} className="edge-halo" />
@@ -116,11 +117,16 @@ function PolicyEdgeImpl({ id, sourceX, sourceY: sy0, targetX, targetY: ty0, sour
           ))}
         </g>
       )}
-      {(badge || text || e.pending) && (
+      {(badge || text || e.pending || data!.settling) && (
         <EdgeLabelRenderer>
           <div className={`edge-badge-wrap ${data!.dim ? "dim" : ""} ${data!.agentIdx >= 0 ? `ag${data!.agentIdx}` : ""}`} style={{ transform: `translate(-50%, -50%) translate(${bx}px, ${by}px)` }} title={title}>
             {e.pending && (
               <span className={`edge-badge badge-pending pending-${e.pending}`}>
+                <ClockIcon size={12} />
+              </span>
+            )}
+            {data!.settling && (
+              <span className="edge-badge badge-settling" title={data!.settling}>
                 <ClockIcon size={12} />
               </span>
             )}

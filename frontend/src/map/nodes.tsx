@@ -155,6 +155,15 @@ function HiddenNote({ n }: { n: MNode["data"]["node"] }) {
   );
 }
 
+/** Changed by an apply that may still be settling (map/settling.ts): a clock with when it was applied. Not a button; the
+ *  node's accessible name carries the same text. */
+const Settling = ({ text }: { text?: string }) =>
+  text ? (
+    <span className="node-settling" title={text} aria-hidden="true">
+      <ClockIcon size={12} />
+    </span>
+  ) : null;
+
 /** "Same agent" link between an Agent Runtime agent as a caller and as a registry entry. */
 function SameAs({ id, label }: { id?: string; label: string }) {
   const { jump } = useContext(MapActions);
@@ -181,6 +190,7 @@ const EngineNode = memo(({ id, data }: NodeProps<MNode>) => {
     <div className={cls(data, "node-orch", !n.gateway && "unbound")} style={box(n.kind)}>
       <Handles />
       <Corner>
+        <Settling text={data.settling} />
         <Pin id={id} data={data} />
         <SameAs id={n.sameAs} label="registry entry" />
       </Corner>
@@ -211,6 +221,7 @@ const GatewayNode = memo(({ id, data }: NodeProps<MNode>) => {
     <div className={cls(data, "node-gateway", none ? "faded" : "attached", n.mode === "DRY_RUN" && n.sub?.startsWith("Egress") && "dry")} style={box(n.kind)}>
       <Handles />
       <Corner>
+        <Settling text={data.settling} />
         <Pin id={id} data={data} />
       </Corner>
       <div className="node-head">

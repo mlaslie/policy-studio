@@ -11,8 +11,9 @@ import type { Intent, MaLevel, ModelArmorResp, TemplateFilters } from "../api/ty
 import { Badge, Callout, Term } from "../components/ui";
 import { Tip } from "../components/Tooltip";
 import { useApplyGate } from "../components/Mode";
-import { ArrowIcon, CheckIcon, CloseIcon, InfoIcon, PlayIcon, PlusIcon, SparkIcon } from "../components/Icons";
+import { ArrowIcon, CheckIcon, ClockIcon, CloseIcon, InfoIcon, PlayIcon, PlusIcon, SparkIcon } from "../components/Icons";
 import { newId, shortName } from "../lib/policy";
+import { setupTimingNote } from "../lib/timing";
 
 export const MA_ROLES = ["roles/modelarmor.calloutUser", "roles/modelarmor.user", "roles/serviceusage.serviceUsageConsumer"];
 const ROLE_HELP: Record<string, string> = {
@@ -210,6 +211,8 @@ export function ModelArmorSetup({ data }: { data: ModelArmorResp }) {
   const stagedIds = [stagedTmpl, stagedExt, ...agents.map((x) => x.staged), ...gws.map((x) => x.staged)].filter((x): x is Intent => !!x).map((x) => x.id);
   const anyStaged = stagedIds.length > 0;
   const review = () => (canApply ? openApply(stagedIds) : goto("review"));
+  // How long the steps being staged take to take effect after Apply (lib/timing.ts), above the button and in its tooltip.
+  const timing = setupTimingNote(pending.map((i) => i.kind));
 
   const chips: { label: string; state: ChipState }[] = [
     { label: "Template", state: tmplState },
@@ -490,7 +493,12 @@ export function ModelArmorSetup({ data }: { data: ModelArmorResp }) {
       </div>
 
       <footer className="setup-foot">
-        <Tip tip={pending.length ? `Add the ${pending.length} remaining step(s) to the cart in order: template, extension, permissions, turn on. Nothing changes in Google Cloud until you apply.` : "Every step is already in place or staged."}>
+        {timing && (
+          <p className="timing-note small setup-timing">
+            <ClockIcon size={13} /> <span>{timing}</span>
+          </p>
+        )}
+        <Tip tip={pending.length ? `Add the ${pending.length} remaining step(s) to the cart in order: template, extension, permissions, turn on. Nothing changes in Google Cloud until you apply. ${timing}`.trim() : "Every step is already in place or staged."}>
           <button className="btn btn-primary" disabled={!pending.length} onClick={() => addIntents(pending)}>
             <PlusIcon size={16} /> Stage all steps{pending.length ? ` (${pending.length})` : ""}
           </button>

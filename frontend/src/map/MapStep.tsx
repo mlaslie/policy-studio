@@ -38,6 +38,7 @@ import { simulate } from "./simulate";
 import { diffGraphs, mergeStaged, pairKey, pendingCount } from "./diff";
 import { placeNodes, posKey, storage, usePositions } from "./usePositions";
 import { findFocusEdge, type MapFocus } from "./focus";
+import { settlingMarks } from "./settling";
 import {
   DEFAULT_TOOLS,
   PICKER_KEYS,
@@ -192,7 +193,7 @@ function resolveEdge(edges: PEdge[], e: PEdge): PEdge | null {
 }
 
 function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
-  const { modelArmor, ctxInfo, ctx, cart, mapFocus, clearMapFocus } = useStudio();
+  const { modelArmor, ctxInfo, ctx, cart, mapFocus, clearMapFocus, settling } = useStudio();
   const rf = useReactFlow();
   const [direction, setDirection] = useState<Direction>(DEFAULT_DIRECTION);
   const [tools, setTools] = useState<Tools>(DEFAULT_TOOLS);
@@ -287,7 +288,14 @@ function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
   // (and the "no grants" groups), so ids that left the project are dropped on load.
   const { pins, pin, unpin, reset } = usePositions(posKey(ctx.project, ctx.region, direction), (id) => known.has(id) || id.startsWith("group:"), true);
   const pinned = useMemo(() => new Set(Object.keys(pins)), [pins]);
-  const flow = useMemo(() => toFlow(view, layout, { node: active, edge: selEdge?.id ?? null, hit }, expanded, reduced, pinned), [view, layout, active, selEdge, hit, expanded, reduced, pinned]);
+  // Lines and nodes changed by an apply that may still be settling: a clock until its max time passes (the store drops
+  // the entry then).
+  const mine = useMemo(() => settling.filter((s) => s.project === ctx.project), [settling, ctx.project]);
+  const marks = useMemo(() => settlingMarks(view.edges, view.nodes, mine, inv.project_agents_principal ?? null), [view, mine, inv.project_agents_principal]);
+  const flow = useMemo(
+    () => toFlow(view, layout, { node: active, edge: selEdge?.id ?? null, hit }, expanded, reduced, pinned, marks),
+    [view, layout, active, selEdge, hit, expanded, reduced, pinned, marks],
+  );
 
   // Nodes are controlled so they can be dragged: a pinned node takes its saved place, the rest the auto layout, moved
   // down their column off any pinned node they'd sit under (resolveOverlaps). Sizes: measured by React Flow where known
@@ -900,6 +908,14 @@ function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
                   <ClockIcon size={10} />
                 </span>
                 Staged: dashed = added, red overlay = removed
+              </span>
+            )}
+            {(marks.edges.size > 0 || marks.nodes.size > 0) && (
+              <span className="legend-item static">
+                <span className="legend-icon li-settling">
+                  <ClockIcon size={10} />
+                </span>
+                Applied: may still be settling
               </span>
             )}
             <span className="legend-item static muted">Lines only for selected agents, one per agent</span>

@@ -133,3 +133,28 @@ export function stageTip(k: Kind): string {
   if (k === "unbind_gateway") return "When it's applied, the agent redeploys (about 5 minutes); calls stop going through the gateway once that finishes, and calls in flight during the switch can fail.";
   return timingSentence(k);
 }
+
+/** What each Model Armor setup kind is called in the setup's timing note. */
+const SETUP_NOUN: Partial<Record<Kind, string>> = {
+  model_armor_template: "template",
+  model_armor_extension: "extension",
+  model_armor_on: "policy",
+  iam_project_grant: "service-agent roles",
+};
+const and = (xs: string[]) => (xs.length < 2 ? xs.join("") : `${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`);
+
+/** The Model Armor setup's note above "Stage all steps", from the kinds being staged: "After Apply this takes several
+ *  minutes to take effect: the extension and policy need a few minutes each, and service-agent roles up to about 7.
+ *  Test once the Apply page says it's ready." IAM roles give their documented max; the rest "a few minutes". */
+export function setupTimingNote(kinds: Kind[]): string {
+  const ks = [...new Set(kinds)].filter((k) => SETUP_NOUN[k]);
+  if (!ks.length) return "";
+  const few = ks.filter((k) => TIMING[k].basis !== "documented").map((k) => SETUP_NOUN[k]!);
+  const iam = ks.filter((k) => TIMING[k].basis === "documented");
+  const clauses = [
+    ...(few.length ? [`the ${and(few)} ${few.length > 1 ? "need a few minutes each" : "needs a few minutes"}`] : []),
+    ...(iam.length ? [`${and(iam.map((k) => SETUP_NOUN[k]!))} ${few.length ? "" : "need "}up to about ${Math.max(...iam.map((k) => TIMING[k].max))}`] : []),
+  ];
+  const max = Math.max(...ks.map((k) => TIMING[k].max));
+  return `After Apply this takes ${max >= 5 ? "several" : "a few"} minutes to take effect: ${clauses.join(", and ")}. Test once the Apply page says it's ready.`;
+}
