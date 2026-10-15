@@ -655,6 +655,14 @@ Full results are in [P0_FINDINGS.md](P0_FINDINGS.md); its §8 lists the §2 fact
 7. **VPC-SC:** the account has org-level Access Context Manager rights. Demo it in a dedicated project with a scoped access policy, dry run first. The API isn't enabled yet.
 8. **Demo cost:** without a load balancer, the standing cost is the VM, the PSC endpoint and the DNS zones.
 
+## 12c. Private ingress removed from scope (user, 2026-10-15)
+
+Policy Studio won't support private ingress: VPC clients reaching agents through a PSC endpoint or private DNS for `aiplatform.googleapis.com`.
+- **Dropped:** phase **P6** (ingress PSC endpoint and DNS zone), the ingress parts of §3–§7, and the ingress audit findings.
+- **Remaining scope:** **private egress** (agent → MCP server or API in a VPC) plus the VPC-SC option.
+- **Not affected:** discovery still reads PSC endpoints and DNS zones, because egress to private Cloud Run uses them.
+- **Background:** P0 showed private clients do reach the ingress gateway, but Model Armor enforcement there was inconsistent (P0_FINDINGS §T3). That stays recorded as product feedback.
+
 ## 12a. Decisions (user, 2026-10-15)
 
 1. **P0 live test** runs in the **same project, in a separate region** (not one of the demo's regions), with its own throwaway gateways and resources, torn down afterwards.
