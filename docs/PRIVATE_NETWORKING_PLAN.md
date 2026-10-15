@@ -1,10 +1,122 @@
 # Policy Studio: private networking (plan)
 
-Status: **plan only, nothing built.** Written 2026-10-15 from the official docs, the REST discovery documents (networkservices v1 rev 20261004, aiplatform v1 rev 20261007, agentregistry v1 rev 20261003) and read-only calls against one test project. Scope: Policy Studio (`backend/policy_studio`, `frontend/src`), designed so the networking code can move into a package the Agent Gateway demo also uses ([§8](#8-reusable-code-with-the-agent-gateway-demo)). Every write still goes through the cart, then Review, then Apply, through `gcp/writer.py`.
+**Status:** plan only, nothing built. **Scope narrowed 2026-10-15** (user decision): Policy Studio *detects* private networking. It doesn't build it.
 
-Placeholders used throughout: gateway/agent project `acme-prod` (number `123456789012`), Shared VPC host `my-vpc-project`, VPC `corp-vpc`, region `us-east4`, private domain `corp.example.com.`.
+The original, much larger plan (create attachments, DNS zones, PSC endpoints and connectivity templates; migrate gateways; detect private destinations) is kept below as **Appendix A** for reference. It is superseded. Live-test results are in [P0_FINDINGS.md](P0_FINDINGS.md). A step-by-step console guide for building private egress by hand exists as a separate PDF.
+
+Placeholders: project `acme-prod` (number `123456789012`), VPC `corp-vpc`, region `us-east4`.
 
 ---
+
+## 1. Goal
+
+Policy Studio is about **who can call what**. Private networking matters to that question in two places only, and both are explicit settings Google exposes, so nothing is guessed:
+
+1. **Agent Runtime agents with their own private networking** (Agent Runtime PSC interface, `pscInterfaceConfig`).
+   - An agent like this reaches a VPC **without going through the gateway**, so no registry check, no IAP grant and no gateway logs apply to those calls.
+   - Its grants in Policy Studio are therefore meaningless for its VPC traffic.
+2. **Egress gateways with private networking** (`agentConnectivityTemplate`, or the older inline `networkConfig`). The gateway can reach into a VPC; Policy Studio shows which VPC, which private domains it can resolve, and the egress mode.
+
+**Out of scope:**
+- creating or deleting network attachments, PSC endpoints, DNS zones or connectivity templates;
+- gateway migration (in place or blue/green);
+- private ingress;
+- **per-destination private/public detection**: too many variables, including DNS zones in other projects, forwarding to on-prem, and Cloud Run ingress settings.
+
+Policy Studio may *show* the gcloud or Terraform for the network pieces as guidance, but never applies them.
+
+## 2. What is read
+
+| Resource | Field(s) | API |
+|---|---|---|
+| Agent Runtime agent | `spec.deploymentSpec.pscInterfaceConfig.networkAttachment`, `pscInterfaceConfig.dnsPeeringConfigs[]` (domain, targetProject, targetNetwork), plus the existing `agentGatewayConfig` and `identityType` | `GET aiplatform v1 .../reasoningEngines` (already listed by Inventory) |
+| Agent Gateway | `agentConnectivityTemplate` (project **number** form), `networkConfig.egress.networkAttachment`, `networkConfig.dnsPeeringConfig` | `GET networkservices v1 .../agentGateways` (already listed) |
+| Agent connectivity template | `egressNetworkConfig.networkAttachment`, `.dnsPeeringConfig.domains[]`, `.targetNetwork`, `.vpcEgress`, `.tlsConfig` (presence only), `accessPath` | `GET networkservices v1 .../agentConnectivityTemplates/{name}` (new read) |
+| Network attachment (optional, for the label) | `subnetworks[0]` → VPC name, `connectionPreference`, `connectionEndpoints[]` count | `GET compute v1 .../networkAttachments/{name}` (new read; the field is enough if this is denied) |
+
+New permissions to check in `/auth` (read only):
+- `networkservices.agentConnectivityTemplates.get` / `list`;
+- `compute.networkAttachments.get` (optional).
+
+A missing permission degrades to "private networking: can't read details", never an error.
+
+## 3. Model (API.md additions)
+
+```ts
+Engine += { psc_interface: null | { network_attachment: string, vpc?: string, dns_domains: string[] } }
+Gateway += { private_egress: null | {
+  source: "template" | "inline",
+  template?: string,              // full name
+  network_attachment: string,
+  vpc?: string,                   // from the attachment's subnet, when readable
+  dns_domains: string[],          // e.g. ["run.app.", "corp.internal."]
+  vpc_egress?: "PRIVATE_RANGES_ONLY" | "ALL_TRAFFIC",
+  custom_trust?: boolean,         // tlsConfig present
+  error?: string } }              // couldn't read the template / attachment
+```
+
+## 4. Audit findings
+
+| Id | Finding | Severity | Fix offered |
+|---|---|---|---|
+| N1 | Agent has its own private networking (PSC interface) and **no** egress gateway: its VPC calls bypass all checks | high | Redeploy guidance (no PSC interface, Agent Identity, bound to the gateway) |
+| N2 | Agent has a PSC interface **and** a gateway binding: broken (P0: no Google API access) | high | Redeploy guidance |
+| N3 | Gateway uses inline `networkConfig` instead of a connectivity template (older form; VPC-SC and custom trust need a template) | info | Guidance (two-step update, from P0) |
+| N4 | Gateway references a template Policy Studio can't read | medium | Permission hint |
+| N5 | Template egress mode `ALL_TRAFFIC` (all agent traffic goes into the VPC; needs NAT; used for VPC-SC) | info | None (awareness) |
+
+## 5. Preflight
+
+Block `bind_gateway` for an engine with `psc_interface`. Message: "This agent has its own private networking (PSC interface). Google rejects or breaks agents with both; redeploy it without the PSC interface." This extends the existing `bindable=false` handling.
+
+## 6. UI
+
+- **Gateways step:** a "Private egress" row on the gateway card. It shows the VPC, the domains as chips, the egress mode, and template vs inline. When the gateway has none, the row reads "Public egress only".
+- **Policy map:** a small "Private egress · corp-vpc" chip on the gateway node, with the tooltip listing the domains. On agent nodes with a PSC interface, a red "Own VPC access (bypasses gateway)" chip.
+- **Inventory:** a "Private networking" column on engines.
+- **Audit:** N1–N5.
+- **Learn panel / glossary:** short entries for "PSC interface", "connectivity template" and "private egress", reusing the plain-English explanations.
+- **Mock world:**
+  - one gateway with a template (domains `run.app.`, `corp.internal.`);
+  - one with inline `networkConfig`;
+  - one agent with a PSC interface and no gateway;
+  - one with both.
+
+## 7. Registry entries for private destinations (kept from the earlier decision)
+
+The user decided Policy Studio should create Agent Registry entries. That applies to any destination, private or not.
+
+- **New intent:** `registry_service`, with create/delete, read-back and undo. Body:
+  - `displayName`;
+  - `interfaces[{url, protocolBinding}]`, with several URLs per entry (e.g. both `run.app` forms);
+  - `endpointSpec` or `mcpServerSpec`.
+- **Writer allowlist:** `agentregistry v1 .../services` POST and DELETE.
+- **Where it shows:** Builder "Add a destination" and Inventory "Register…". Every Apply flow has a preview.
+
+## 8. Optional later
+
+"Seen in traffic" label for destinations: when gateway logs show a private upstream `httpRequest.serverIp` (10/8, 172.16/12, 192.168/16) for a destination, mark it "private (seen in traffic)". This is the only per-destination signal that's 100% reliable, and it's cheap because `/gateway-logs` is already read.
+
+## 9. Reuse with the demo
+
+The scope is small, so there's no shared package for now. The parsing lives in one dependency-free module, `backend/policy_studio/gcp/networking.py` (pure functions: engine/gateway/template JSON → the §3 model, plus the N1–N5 rules), which the demo can copy or import later. For a "private egress" story, the demo gets its own bootstrap sample (built by hand or from the PDF guide), and Policy Studio then discovers it.
+
+## 10. Phases
+
+| Phase | Content | Size |
+|---|---|---|
+| N-1 | Discovery (§2–§3), `/auth` permissions, mock world, API.md | S (1–1.5 d) |
+| N-2 | Audit N1–N5, preflight block, UI (Gateways, map, Inventory, Learn) and tests | S–M (1.5–2 d) |
+| N-3 | `registry_service` intent (create/delete, render, preview, undo) | M (2 d) |
+| N-4 (optional) | "Seen in traffic" destination label | S (0.5 d) |
+
+N-1 plus N-2 is the 3–4 days discussed. N-3 is the separate registry write path.
+
+---
+
+# Appendix A: original detailed plan (superseded 2026-10-15)
+
+Kept for reference: the research, verified facts (§2 there), resource inventory, create/delete flows and the P0-driven decisions. Phases P1–P8 are **not** planned.
 
 ## 1. Goal and scope
 
