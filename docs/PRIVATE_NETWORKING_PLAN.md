@@ -630,6 +630,16 @@ Total: about **25–30 days**. P0–P3 alone (≈ 9–10 days) delivers discover
 
 ---
 
+## 12a. Decisions (user, 2026-10-15)
+
+1. **P0 live test** runs in the **same project, in a separate region** (not one of the demo's regions), with its own throwaway gateways and resources, torn down afterwards.
+2. **Blue/green gateway migration:** Policy Studio may **apply** it, with the usual preflight, typed confirm, read-back and undo.
+3. **Scope for v1:** VPC private egress and ingress, plus an **option to add and demo VPC-SC**. **Backlog** (possible later): Shared VPC and host-project role grants; private CA / TrustConfig.
+4. **Network resources:** as recommended. Policy Studio creates the attachment, DNS zone, connectivity template and PSC endpoint. VPC, subnet and firewall stay advise-only.
+5. **Registry writes:** yes. Policy Studio creates Agent Registry entries for private destinations (new `registry_service` kind).
+6. **Demo private destination:** **Cloud Run reached through a PSC endpoint for Google APIs** (the `run.app` override), with no custom domain.
+7. Not yet answered: Q7 (ingress override scope: default to a narrow zone) and Q9 (package home: default to `packages/agentgw-core` in this repo).
+
 ## 12. Open questions for the user
 
 1. Is a **blue/green gateway migration** (new gateway name, rebind every engine, revisions archived) acceptable for the demo's and users' existing egress gateways, or should Policy Studio only generate the commands for it (advise) and never Apply it?
