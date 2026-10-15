@@ -14,6 +14,7 @@ import { fmtDate, plural } from "../lib/util";
 import { ShowOnMap } from "../components/ShowOnMap";
 import { focusForGateway } from "../map/focus";
 import { TIMING, effectText, stageTip } from "../lib/timing";
+import { EGRESS_MODE, PSC_BIND_REASON, pscChips, privateEgressSummary } from "../lib/networking";
 
 export function ProviderChip({ p }: { p: Gateway["authz_policies"][number] }) {
   const label = p.provider === "iap" ? "IAP" : p.provider === "model_armor" ? "Model Armor" : "Other";
@@ -53,7 +54,7 @@ function BindPicker({ gw, onDone }: { gw: Gateway; onDone: () => void }) {
           {choices.map((e) => (
             <option key={e.name} value={e.name} disabled={!e.bindable} title={e.bindable ? undefined : e.bindable_reason ?? "Can't be bound"}>
               {e.display_name}
-              {!e.bindable ? ` (can't be bound: ${e.identity_type !== "AGENT_IDENTITY" ? "no Agent Identity" : "created before 2026-04-29"})` : e.gateways[gw.type] ? ` (now on ${shortName(e.gateways[gw.type]!)})` : ""}
+              {!e.bindable ? ` (can't be bound: ${e.psc_interface ? "PSC interface" : e.identity_type !== "AGENT_IDENTITY" ? "no Agent Identity" : "created before 2026-04-29"})` : e.gateways[gw.type] ? ` (now on ${shortName(e.gateways[gw.type]!)})` : ""}
             </option>
           ))}
         </select>
@@ -85,7 +86,8 @@ function BindPicker({ gw, onDone }: { gw: Gateway; onDone: () => void }) {
                 </span>
               </Tip>
             ))}
-          <RedeployHelp />
+          {choices.some((e) => !e.bindable && e.psc_interface) && <RedeployHelp reason={PSC_BIND_REASON} />}
+          {choices.some((e) => !e.bindable && !e.psc_interface) && <RedeployHelp />}
         </div>
       )}
       {other && <p className="small warn-text"><WarnIcon size={13} /> It is currently bound to {shortName(other)}; this moves it.</p>}
@@ -472,6 +474,50 @@ function Enforcement({ gw }: { gw: Gateway }) {
   );
 }
 
+/** "Private egress" row of a gateway card: VPC, private domains, egress mode, template vs inline (detection only). */
+export function PrivateEgressRow({ gw }: { gw: Gateway }) {
+  const pe = gw.private_egress;
+  if (!pe && gw.type !== "egress") return null;
+  return (
+    <div className="gw-section gw-private" data-testid="private-egress">
+      <h4>
+        <Term k="private-egress">Private egress</Term>
+      </h4>
+      {!pe ? (
+        <p className="muted small">Public egress only.</p>
+      ) : (
+        <>
+          <div className="row wrap" title={privateEgressSummary(pe)}>
+            <Badge tone="blue">{pe.vpc ? `VPC ${pe.vpc}` : "VPC unknown"}</Badge>
+            {pe.source === "template" ? (
+              <Badge tone="neutral" title={pe.template ?? ""}>
+                <Term k="connectivity-template">Template</Term> {shortName(pe.template ?? "")}
+              </Badge>
+            ) : (
+              <Badge tone="amber" title="The older inline form (networkConfig). VPC Service Controls and custom trust need a connectivity template.">
+                Inline networkConfig
+              </Badge>
+            )}
+            {pe.vpc_egress && <Badge tone={pe.vpc_egress === "ALL_TRAFFIC" ? "amber" : "neutral"}>{EGRESS_MODE[pe.vpc_egress] ?? pe.vpc_egress}</Badge>}
+            {pe.custom_trust && <Badge tone="neutral">Custom trust</Badge>}
+          </div>
+          {pe.dns_domains.length > 0 && (
+            <div className="domain-chips">
+              {pe.dns_domains.map((d) => (
+                <span key={d} className="domain-chip mono tiny">
+                  {d}
+                </span>
+              ))}
+            </div>
+          )}
+          {pe.error && <p className="small warn-text">Private networking: {pe.error}.</p>}
+          {pe.network_attachment && <div className="mono tiny muted wrap">{pe.network_attachment}</div>}
+        </>
+      )}
+    </div>
+  );
+}
+
 function GatewayCard({ gw }: { gw: Gateway }) {
   const { addIntents, cart } = useStudio();
   const { engineByName } = useLookup();
@@ -530,6 +576,8 @@ function GatewayCard({ gw }: { gw: Gateway }) {
         ))}
       </div>
 
+      <PrivateEgressRow gw={gw} />
+
       <div className="gw-section">
         <h4>Agents bound to it ({bound.length})</h4>
         {bound.length ? (
@@ -540,7 +588,14 @@ function GatewayCard({ gw }: { gw: Gateway }) {
                 <li key={b.engine}>
                   <RobotIcon size={16} />
                   <div className="grow">
-                    <div>{b.display_name}</div>
+                    <div>
+                      {b.display_name}{" "}
+                      {e && pscChips(e).slice(1).map((c) => (
+                        <Badge key={c.text} tone="red" title={c.tip}>
+                          {c.text}
+                        </Badge>
+                      ))}
+                    </div>
                     <div className="mono tiny muted">{shortName(b.engine)}{e ? ` · created ${fmtDate(e.create_time)}` : ""}</div>
                   </div>
                   {staged(b.engine) ? (

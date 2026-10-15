@@ -9,11 +9,15 @@
 // Registry), a custom-CEL grant, a group grant, an endpoint whose IAP policy can't be read, and two agents bound for
 // ingress. A platform allowlist of Google APIs (PLATFORM_HOSTS: each API registered as host, host.mtls and host:443,
 // named "acme-prod <host>", all granted to every agent in the project) shows the map's "Google APIs" group, next to
-// two endpoints that aren't Google APIs. Region us-west1 is the scale scenario (mockScale.ts): about 50 agents and 500 grants, two egress gateways
+// two endpoints that aren't Google APIs.
+// Private networking (detection only): corp-egress reaches corp-vpc through a connectivity template (us-central1:
+// the older inline networkConfig, N3; europe-west1: a template Policy Studio can't read, N4; us-west1: west-egress
+// sends ALL_TRAFFIC into the VPC, N5); simple-agent-with-psc has its own PSC interface and no gateway (N1); Ops
+// Copilot has a PSC interface and an egress binding (N2, broken). Region us-west1 is the scale scenario (mockScale.ts): about 50 agents and 500 grants, two egress gateways
 // (one in dry run), and corp-ingress with Model Armor on (screened Client-to-Agent lines).
 import type { AuditResp, Binding, ContextInfo, Ctx, EnforcementMode, Finding, Gateway, Grant, Inventory, MaSetup, McpTool, ModelArmorResp, ServiceAgent, Template, TemplateFilters } from "./types";
 import { READ_ONLY_EXPR, ROLE, toolsExpr } from "../lib/policy";
-import { NO_IDENTITY_REASON, REDEPLOY_SNIPPET } from "../components/Redeploy";
+import { PSC_BIND_REASON, auditRules } from "../lib/networking";
 import { SCALE_REGION, addScale, scaleFactor } from "./mockScale";
 
 export const MOCK_NUMBER = "482915730164";
@@ -143,6 +147,7 @@ export function buildWorld(ctx: Ctx) {
   const egress = `projects/${GP}/locations/${R}/agentGateways/corp-egress`;
   const ingress = `${loc}/agentGateways/corp-ingress`;
   const eng = (id: string) => `projects/${MOCK_NUMBER}/locations/${R}/reasoningEngines/${id}`;
+  const pscAttachment = `projects/${P}/regions/${R}/networkAttachments/psc-agents`;
 
   const engines: Inventory["engines"] = [
     {
@@ -176,7 +181,8 @@ export function buildWorld(ctx: Ctx) {
       bindable: true,
     },
     {
-      // Deployed with a service account instead of Agent Identity: it can never be bound to Agent Gateway.
+      // Its own PSC interface into corp-vpc and a service account instead of Agent Identity: it can never be bound
+      // to Agent Gateway, and its VPC calls skip the gateway (N1).
       name: eng("5555555555555555555"),
       id: "5555555555555555555",
       display_name: "simple-agent-with-psc",
@@ -185,10 +191,24 @@ export function buildWorld(ctx: Ctx) {
       gateways: {},
       create_time: "2026-09-12T08:20:00Z",
       bindable: false,
-      bindable_reason: NO_IDENTITY_REASON,
+      bindable_reason: PSC_BIND_REASON,
+      psc_interface: { network_attachment: pscAttachment, vpc: "corp-vpc", dns_domains: ["corp.internal."] },
+    },
+    {
+      // A PSC interface and an egress binding (added by a later update): broken, can't reach Google APIs (N2).
+      name: eng("7203391846117376"),
+      id: "7203391846117376",
+      display_name: "Ops Copilot",
+      principal: principalOf(R, "7203391846117376"),
+      identity_type: "AGENT_IDENTITY",
+      gateways: { egress },
+      create_time: "2026-09-02T11:48:30Z",
+      bindable: false,
+      bindable_reason: PSC_BIND_REASON,
+      psc_interface: { network_attachment: pscAttachment, vpc: "corp-vpc", dns_domains: [] },
     },
   ];
-  const [helpdesk, hr, travel, psc] = engines;
+  const [helpdesk, hr, travel, , ops] = engines;
 
   const gateways: Gateway[] = [
     {
@@ -205,8 +225,22 @@ export function buildWorld(ctx: Ctx) {
       bound_engines: [
         { engine: helpdesk.name, display_name: helpdesk.display_name, direction: "egress" },
         { engine: hr.name, display_name: hr.display_name, direction: "egress" },
+        { engine: ops.name, display_name: ops.display_name, direction: "egress" },
       ],
       create_time: "2026-05-04T10:12:00Z",
+      private_egress: noMA
+        ? { source: "inline", network_attachment: `projects/${GP}/regions/${R}/networkAttachments/gateway-egress`, vpc: "corp-vpc", dns_domains: ["run.app."] }
+        : R === "europe-west1"
+          ? { source: "template", template: `projects/${GP}/locations/${R}/agentConnectivityTemplates/corp-private`, network_attachment: "", dns_domains: [], error: "can't read details: HTTP 403: Permission 'networkservices.agentConnectivityTemplates.get' denied" }
+          : {
+              source: "template",
+              template: `projects/${GP}/locations/${R}/agentConnectivityTemplates/corp-private`,
+              network_attachment: `projects/${GP}/regions/${R}/networkAttachments/gateway-egress`,
+              vpc: "corp-vpc",
+              dns_domains: ["run.app.", "corp.internal."],
+              vpc_egress: "PRIVATE_RANGES_ONLY",
+              custom_trust: false,
+            },
     },
     {
       name: ingress,
@@ -220,6 +254,7 @@ export function buildWorld(ctx: Ctx) {
         { engine: hr.name, display_name: hr.display_name, direction: "ingress" },
       ],
       create_time: "2026-05-04T10:31:00Z",
+      private_egress: null,
     },
   ];
 
@@ -520,13 +555,9 @@ export function buildWorld(ctx: Ctx) {
       resource: travel.name,
       fix: { id: "fix-bind-travel", kind: "bind_gateway", gateway: { name: egress, direction: "egress" }, engine: travel.name, engine_label: travel.display_name },
     },
-    {
-      severity: "medium",
-      title: `Unprotected egress: ${psc.display_name}`,
-      detail: `${psc.display_name} is not bound to an egress gateway, and it can't be: ${NO_IDENTITY_REASON} Until it is redeployed its outbound traffic isn't governed by Agent Gateway.`,
-      resource: psc.name,
-      redeploy: REDEPLOY_SNIPPET,
-    },
+    // Private networking N1–N5 (lib/networking.ts, the port of gcp/networking.py). simple-agent-with-psc's PSC
+    // interface replaces its "Unprotected egress" finding, as on the backend.
+    ...auditRules(inventory.engines, gateways),
     {
       severity: "high",
       title: "Any signed-in Google account can call Calendar Agent",
@@ -588,6 +619,8 @@ export function buildWorld(ctx: Ctx) {
       { permission: "iap.webServices.getIamPolicy", granted: true, needed_for: "Read who can reach each registry entry" },
       { permission: "aiplatform.reasoningEngines.list", granted: true, needed_for: "List Agent Runtime agents and their identities" },
       { permission: "modelarmor.templates.list", granted: R !== "europe-west1", needed_for: "Read Model Armor templates (Model Armor step)", fix: `gcloud projects add-iam-policy-binding ${P} --member=user:alex.admin@example.com --role=roles/modelarmor.viewer` },
+      { permission: "networkservices.agentConnectivityTemplates.get", granted: R !== "europe-west1", needed_for: "Read a gateway's connectivity template (private egress: VPC, domains, egress mode)", fix: `gcloud projects add-iam-policy-binding ${P} --member=user:alex.admin@example.com --role=roles/networkservices.viewer` },
+      { permission: "compute.networkAttachments.get", granted: true, needed_for: "Name the VPC behind private networking (optional)" },
       { permission: "iap.webServices.setIamPolicy", granted: false, needed_for: "Apply grants (P3; not needed to generate commands)", fix: `gcloud projects add-iam-policy-binding ${P} --member=user:alex.admin@example.com --role=roles/iap.admin` },
       { permission: "aiplatform.reasoningEngines.update", granted: null, needed_for: "Bind agents to gateways (P3; not checked)" },
     ],

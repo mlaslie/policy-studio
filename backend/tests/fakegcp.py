@@ -60,11 +60,56 @@ POLICIES = [
 
 DEP_SA = "service-9090@gcp-sa-dep.iam.gserviceaccount.com"         # egress gateway's service extensions SA
 RE_SA = f"service-{N}@gcp-sa-aiplatform-re.iam.gserviceaccount.com"  # Agent Runtime service agent (ingress)
+# Private networking: corp-out reaches corp-vpc through a connectivity template (referenced by project NUMBER).
+CT = f"projects/{P}/locations/{R}/agentConnectivityTemplates/corp-tmpl"
+ATT = f"projects/{P}/regions/{R}/networkAttachments/corp-att"
+CONNECTIVITY_TEMPLATES = {
+    "corp-tmpl": {"name": CT, "accessPath": "AGENT_TO_ANYWHERE", "deploymentModel": "CENTRALIZED",
+                  "egressNetworkConfig": {"networkAttachment": ATT, "vpcEgress": "PRIVATE_RANGES_ONLY",
+                                          "dnsPeeringConfig": {"domains": ["run.app.", "corp.internal."],
+                                                               "targetNetwork": f"projects/{P}/global/networks/corp-vpc"}}},
+    "vpcsc-tmpl": {"name": f"projects/{P}/locations/{R}/agentConnectivityTemplates/vpcsc-tmpl",
+                   "accessPath": "AGENT_TO_ANYWHERE", "egressNetworkConfig": {
+                       "networkAttachment": ATT, "vpcEgress": "ALL_TRAFFIC", "tlsConfig": {"trustConfig": "x"},
+                       "dnsPeeringConfig": {"domains": ["corp.internal."]}}},
+}
+NETWORK_ATTACHMENTS = {
+    "corp-att": {"name": "corp-att", "network": f"https://www.googleapis.com/compute/v1/projects/{P}/global/networks/corp-vpc",
+                 "subnetworks": [f"https://www.googleapis.com/compute/v1/projects/{P}/regions/{R}/subnetworks/att"],
+                 "connectionPreference": "ACCEPT_AUTOMATIC", "connectionEndpoints": [{"status": "ACCEPTED"}]},
+    "psci-att": {"name": "psci-att", "network": f"https://www.googleapis.com/compute/v1/projects/{P}/global/networks/lab-vpc"},
+}
 GATEWAYS = [
     {"name": EG, "createTime": "2026-08-01T00:00:00Z", "googleManaged": {"governedAccessPath": "AGENT_TO_ANYWHERE"},
      "agentGatewayCard": {"serviceExtensionsServiceAccount": DEP_SA},
+     "agentConnectivityTemplate": f"projects/{N}/locations/{R}/agentConnectivityTemplates/corp-tmpl",
      "registries": [f"//agentregistry.googleapis.com/projects/{P}/locations/{R}"]},
     {"name": IG, "createTime": "2026-08-01T00:00:00Z", "googleManaged": {"governedAccessPath": "CLIENT_TO_AGENT"}},
+]
+
+# networking=True adds these: a PSC-interface agent without a gateway (N1), one with both (N2), a gateway with inline
+# networkConfig (N3) and one whose template sends ALL_TRAFFIC (N5). N4 = fail={"agentConnectivityTemplates": 403}.
+E4, E5 = (f"projects/{N}/locations/{R}/reasoningEngines/{i}" for i in ("444", "555"))
+PSCI = {"networkAttachment": f"projects/{P}/regions/{R}/networkAttachments/psci-att"}
+NET_ENGINES = [
+    {"name": E4, "displayName": "Lab Agent", "createTime": "2026-10-01T10:00:00Z",
+     "spec": {"effectiveIdentity": principal("444").removeprefix("principal://"), "identityType": "AGENT_IDENTITY",
+              "deploymentSpec": {"pscInterfaceConfig": {**PSCI, "dnsPeeringConfigs": [
+                  {"domain": "corp.internal.", "targetProject": P, "targetNetwork": "lab-vpc"}]}}}},
+    {"name": E5, "displayName": "Hybrid Agent", "createTime": "2026-10-01T10:00:00Z",
+     "spec": {"effectiveIdentity": principal("555").removeprefix("principal://"), "identityType": "AGENT_IDENTITY",
+              "deploymentSpec": {"pscInterfaceConfig": PSCI,
+                                 "agentGatewayConfig": {"agentToAnywhereConfig": {"agentGateway": EG}}}}},
+]
+NET_GATEWAYS = [
+    {"name": f"projects/{P}/locations/{R}/agentGateways/corp-out-inline", "createTime": "2026-08-01T00:00:00Z",
+     "googleManaged": {"governedAccessPath": "AGENT_TO_ANYWHERE"},
+     "networkConfig": {"egress": {"networkAttachment": ATT},
+                       "dnsPeeringConfig": {"domains": ["run.app."], "targetProject": P,
+                                            "targetNetwork": f"projects/{P}/global/networks/corp-vpc"}}},
+    {"name": f"projects/{P}/locations/{R}/agentGateways/corp-out-sc", "createTime": "2026-08-01T00:00:00Z",
+     "googleManaged": {"governedAccessPath": "AGENT_TO_ANYWHERE"},
+     "agentConnectivityTemplate": f"projects/{N}/locations/{R}/agentConnectivityTemplates/vpcsc-tmpl"},
 ]
 
 TEMPLATE = {"name": f"projects/{P}/locations/{R}/templates/strict",
@@ -116,13 +161,14 @@ class FakeRest:
     """Answers the read-only URLs policy_studio issues; records every call.
 
     `model_armor=False` simulates a region where Model Armor isn't set up: no Model Armor extension, no template,
-    no CONTENT_AUTHZ policy.
+    no CONTENT_AUTHZ policy. `networking=True` adds the private-networking agents and gateways (NET_*).
     """
 
-    def __init__(self, fail: dict[str, int] | None = None, model_armor: bool = True):
+    def __init__(self, fail: dict[str, int] | None = None, model_armor: bool = True, networking: bool = False):
         self.calls: list[tuple[str, str]] = []
         self.fail = fail or {}
         self.model_armor = model_armor
+        self.networking = networking
         self.log_entries: list[dict] = []          # Cloud Logging entries:list answers (newest first)
         self.platform_entries: list[dict] = []     # answers to the caller query (engines' own platform calls)
         self.log_requests: list[dict] = []
@@ -139,6 +185,14 @@ class FakeRest:
             return {"projectNumber": N}
         if "/templates/strict" in url:
             return copy.deepcopy(TEMPLATE)
+        if "/agentConnectivityTemplates/" in url and f"/projects/{P}/" in url:   # read by project id only
+            t = CONNECTIVITY_TEMPLATES.get(url.rsplit("/", 1)[-1])
+            if t:
+                return copy.deepcopy(t)
+        if "compute.googleapis.com" in url and "/networkAttachments/" in url and f"/projects/{P}/" in url:
+            a = NETWORK_ATTACHMENTS.get(url.rsplit("/", 1)[-1])
+            if a:
+                return copy.deepcopy(a)
         if ok404:
             return None
         raise GcpError(404, "not found", url)
@@ -154,6 +208,9 @@ class FakeRest:
                                                                "iap.googleapis.com")]}
         if f"/projects/{P}/" not in url and f"/projects/{N}/" not in url:
             return []
+        if self.networking:
+            data["reasoningEngines"] = ENGINES + NET_ENGINES
+            data["agentGateways"] = GATEWAYS + NET_GATEWAYS
         if not self.model_armor:
             data["authzExtensions"] = [x for x in EXTENSIONS if x["service"] == "iap.googleapis.com"]
             data["authzPolicies"] = [x for x in POLICIES if x["policyProfile"] != "CONTENT_AUTHZ"]

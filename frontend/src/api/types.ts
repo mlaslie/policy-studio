@@ -59,6 +59,22 @@ export type GatewayEnforcement = {
   /** Why it can't be changed here (no IAP policy, extension unreadable, ...). */
   reason?: string | null;
 };
+/** The gateway's way into a VPC (detection only): a connectivity template, or the older inline networkConfig. */
+export type PrivateEgress = {
+  source: "template" | "inline";
+  /** Full template name (project id form when the number is known). */
+  template?: string;
+  network_attachment: string;
+  /** From the attachment's network (or the DNS targetNetwork), when readable. */
+  vpc?: string | null;
+  /** Private domains the gateway resolves in the VPC, e.g. ["run.app.", "corp.internal."]. */
+  dns_domains: string[];
+  vpc_egress?: "PRIVATE_RANGES_ONLY" | "ALL_TRAFFIC" | null;
+  /** Template tlsConfig present (own CA). */
+  custom_trust?: boolean | null;
+  /** "can't read details: ..." when the template couldn't be read. */
+  error?: string | null;
+};
 export type Gateway = {
   name: string;
   id: string;
@@ -69,6 +85,8 @@ export type Gateway = {
   bound_engines: BoundEngine[];
   create_time: string;
   enforcement?: GatewayEnforcement;
+  /** null / absent = public egress only. */
+  private_egress?: PrivateEgress | null;
   error?: string;
 };
 export type GatewaysResp = { gateways: Gateway[]; notes: string[] };
@@ -132,10 +150,13 @@ export type Engine = {
   gateways: { egress?: string; ingress?: string };
   create_time: string;
   bindable: boolean;
-  /** Why it can't be bound: no Agent Identity, or created before 2026-04-29. */
+  /** Why it can't be bound: a PSC interface, no Agent Identity, or created before 2026-04-29. */
   bindable_reason?: string | null;
+  /** Agent Runtime's own private networking (pscInterfaceConfig): VPC calls that skip the gateway. */
+  psc_interface?: PscInterface | null;
   error?: string;
 };
+export type PscInterface = { network_attachment: string; vpc?: string | null; dns_domains: string[] };
 export type Skill = { id: string; name: string; description: string };
 export type RegAgent = {
   name: string;
@@ -184,7 +205,19 @@ export type Grant = Binding & {
   resource_label: string;
 };
 export type Severity = "high" | "medium" | "info";
-export type Finding = { severity: Severity; title: string; detail: string; resource?: string; fix?: Intent | null; /** How to redeploy with Agent Identity (Python). */ redeploy?: string | null };
+export type Finding = {
+  severity: Severity;
+  title: string;
+  detail: string;
+  resource?: string;
+  fix?: Intent | null;
+  /** How to redeploy with Agent Identity (Python). */
+  redeploy?: string | null;
+  /** Audit rule id, for rules that have one (N1–N5: private networking). */
+  rule?: string | null;
+  /** Shell guidance Policy Studio doesn't apply (N3: move to a connectivity template). */
+  guidance?: string | null;
+};
 export type AuditResp = { grants: Grant[]; findings: Finding[]; synced_at: string };
 
 export type IntentKind =

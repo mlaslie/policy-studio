@@ -96,6 +96,7 @@ describe("Client-to-Agent line actions (§6.3)", () => {
   const lineId = (id: string, w = w0) => ing(w).edges.find((e) => e.id === id)!;
   const travel = eng("Travel Planner");
   const psc = eng("simple-agent-with-psc");
+  const ops = eng("Ops Copilot");
 
   it("an unscreened line: Model Armor on, Unbind for its agent, the IAP policy as configured", () => {
     const info = ingressInfo(lineId(`i:${INGRESS.name}|${hd.name}`), inv, w0.gateways, maResp());
@@ -134,6 +135,7 @@ describe("Client-to-Agent line actions (§6.3)", () => {
     expect(info.unbound.map((u) => [u.engine.name, u.why === null])).toEqual([
       [travel.name, true],
       [psc.name, false],
+      [ops.name, false],
     ]);
     expect(bindFor(travel, INGRESS, "ingress")).toMatchObject({ kind: "bind_gateway", engine: travel.name, gateway: { name: INGRESS.name, direction: "ingress" } });
     // one agent's own direct line: just that agent

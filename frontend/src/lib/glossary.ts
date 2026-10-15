@@ -92,6 +92,21 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
     short: "A server that exposes tools to agents using the Model Context Protocol.",
     long: "An MCP server offers named tools (list_tickets, create_ticket, …). Grants on MCP servers can be narrowed to some of those tools with an IAM condition.",
   },
+  "psc-interface": {
+    term: "PSC interface (agent)",
+    short: "An agent's own private network connection into a VPC. Those calls skip the gateway.",
+    long: "Agent Runtime can give an agent its own Private Service Connect interface (pscInterfaceConfig) into a VPC. Calls through it don't go through the gateway, so no registry check, no IAP grant and no gateway logs apply to them: the agent's grants mean nothing for its VPC traffic. Google rejects an agent with both a PSC interface and a gateway binding (one added by a later update can't reach Google APIs), so an agent like this can't be bound. To govern it, redeploy it without the PSC interface and reach the VPC through the gateway's private egress.",
+  },
+  "connectivity-template": {
+    term: "Connectivity template",
+    short: "A reusable network setup that lets an egress gateway reach into a VPC.",
+    long: "An agent connectivity template names a network attachment in your VPC, the private DNS domains the gateway resolves there (e.g. run.app., corp.internal.) and the egress mode: private ranges only, or all traffic (used with VPC Service Controls; needs Cloud NAT for the internet). A gateway references it by project number. The older form puts the same settings inline on the gateway (networkConfig); VPC Service Controls and custom trust need a template. Policy Studio shows them; it doesn't create them.",
+  },
+  "private-egress": {
+    term: "Private egress",
+    short: "The egress gateway can reach destinations inside a VPC, still checked by IAP.",
+    long: "With a connectivity template (or inline networkConfig) the egress gateway reaches private destinations in a VPC, such as internal Cloud Run services or on-prem APIs. Unlike an agent's own PSC interface, these calls still go through the gateway: registry, roles/iap.egressor grants and gateway logs all apply. Without it, the gateway has public egress only.",
+  },
   runtime: {
     term: "Agent Runtime engine",
     short: "A deployed agent on Vertex AI Agent Runtime (a 'reasoning engine').",

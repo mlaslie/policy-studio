@@ -1,0 +1,150 @@
+{
+  "_comment": "Shared by backend/tests/test_networking.py (gcp/networking.audit_rules) and frontend/src/lib/networking.test.ts (auditRules): both must give `expected` exactly (rule, severity, resource, title, detail, redeploy, guidance).",
+  "engines": [
+    {
+      "name": "projects/123456789012/locations/us-east4/reasoningEngines/1",
+      "display_name": "Lab Agent",
+      "gateways": {},
+      "psc_interface": {
+        "network_attachment": "projects/acme-prod/regions/us-east4/networkAttachments/psc-agents",
+        "vpc": "corp-vpc",
+        "dns_domains": []
+      }
+    },
+    {
+      "name": "projects/123456789012/locations/us-east4/reasoningEngines/2",
+      "display_name": "",
+      "gateways": {
+        "egress": "projects/acme-prod/locations/us-east4/agentGateways/corp-egress"
+      },
+      "psc_interface": {
+        "network_attachment": "projects/acme-prod/regions/us-east4/networkAttachments/psc-agents",
+        "dns_domains": [
+          "corp.internal."
+        ]
+      }
+    },
+    {
+      "name": "projects/123456789012/locations/us-east4/reasoningEngines/3",
+      "display_name": "Plain",
+      "gateways": {
+        "egress": "projects/acme-prod/locations/us-east4/agentGateways/corp-egress"
+      },
+      "psc_interface": null
+    }
+  ],
+  "gateways": [
+    {
+      "name": "projects/acme-prod/locations/us-east4/agentGateways/corp-egress",
+      "id": "corp-egress",
+      "private_egress": {
+        "source": "template",
+        "template": "projects/acme-prod/locations/us-east4/agentConnectivityTemplates/corp-tmpl",
+        "network_attachment": "a",
+        "vpc": "corp-vpc",
+        "dns_domains": [
+          "run.app.",
+          "corp.internal."
+        ],
+        "vpc_egress": "PRIVATE_RANGES_ONLY"
+      }
+    },
+    {
+      "name": "projects/acme-prod/locations/us-central1/agentGateways/inline",
+      "id": "inline",
+      "private_egress": {
+        "source": "inline",
+        "network_attachment": "a",
+        "dns_domains": [
+          "run.app."
+        ],
+        "vpc": "corp-vpc"
+      }
+    },
+    {
+      "name": "projects/acme-prod/locations/us-central1/agentGateways/nov",
+      "id": "nov",
+      "private_egress": {
+        "source": "inline",
+        "network_attachment": "a",
+        "dns_domains": []
+      }
+    },
+    {
+      "name": "projects/acme-prod/locations/us-east4/agentGateways/err",
+      "id": "err",
+      "private_egress": {
+        "source": "template",
+        "template": "projects/acme-prod/locations/us-east4/agentConnectivityTemplates/t2",
+        "network_attachment": "",
+        "dns_domains": [],
+        "error": "can't read details: HTTP 403: denied"
+      }
+    },
+    {
+      "name": "projects/acme-prod/locations/us-east4/agentGateways/sc",
+      "id": "sc",
+      "private_egress": {
+        "source": "template",
+        "template": "x/t3",
+        "network_attachment": "a",
+        "dns_domains": [],
+        "vpc_egress": "ALL_TRAFFIC",
+        "vpc": "sc-vpc"
+      }
+    },
+    {
+      "name": "projects/acme-prod/locations/us-east4/agentGateways/pub",
+      "id": "pub",
+      "private_egress": null
+    }
+  ],
+  "expected": [
+    {
+      "rule": "N1",
+      "severity": "high",
+      "resource": "projects/123456789012/locations/us-east4/reasoningEngines/1",
+      "redeploy": "import vertexai\nfrom vertexai import types\n\nclient = vertexai.Client(project=\"PROJECT_ID\", location=\"REGION\")\nremote = client.agent_engines.create(\n    agent=app,                     # your ADK app / agent object\n    config={\n        \"identity_type\": types.IdentityType.AGENT_IDENTITY,   # required for Agent Gateway; can't be changed later\n        \"display_name\": \"my-agent\",\n        # No \"psc_interface_config\": its VPC calls would skip the gateway. Reach the VPC through the egress\n        # gateway's private egress (a connectivity template) instead.\n        \"agent_gateway_config\": {\"agent_to_anywhere_config\": {\n            \"agent_gateway\": \"projects/PROJECT_ID/locations/REGION/agentGateways/GATEWAY_ID\"}},\n        \"env_vars\": {\"GOOGLE_API_PREVENT_AGENT_TOKEN_SHARING_FOR_GCP_SERVICES\": \"false\"},  # needed behind a gateway\n        \"requirements\": [\"google-cloud-aiplatform[agent_engines,adk]\"],\n        # ... the rest of your existing deployment config\n    },\n)\n# Then grant the new identity roles/iap.egressor on the destinations it needs (Builder), and delete the old agent.",
+      "title": "Own VPC access, bypasses the gateway: Lab Agent",
+      "detail": "Lab Agent has its own private networking (a PSC interface into the VPC corp-vpc) and no egress gateway. Its calls into the VPC skip every check: no Agent Registry, no roles/iap.egressor grant and no gateway logs apply, so its grants in Policy Studio mean nothing for that traffic. Redeploy it without the PSC interface, with Agent Identity, bound to the egress gateway."
+    },
+    {
+      "rule": "N2",
+      "severity": "high",
+      "resource": "projects/123456789012/locations/us-east4/reasoningEngines/2",
+      "redeploy": "import vertexai\nfrom vertexai import types\n\nclient = vertexai.Client(project=\"PROJECT_ID\", location=\"REGION\")\nremote = client.agent_engines.create(\n    agent=app,                     # your ADK app / agent object\n    config={\n        \"identity_type\": types.IdentityType.AGENT_IDENTITY,   # required for Agent Gateway; can't be changed later\n        \"display_name\": \"my-agent\",\n        # No \"psc_interface_config\": its VPC calls would skip the gateway. Reach the VPC through the egress\n        # gateway's private egress (a connectivity template) instead.\n        \"agent_gateway_config\": {\"agent_to_anywhere_config\": {\n            \"agent_gateway\": \"projects/PROJECT_ID/locations/REGION/agentGateways/GATEWAY_ID\"}},\n        \"env_vars\": {\"GOOGLE_API_PREVENT_AGENT_TOKEN_SHARING_FOR_GCP_SERVICES\": \"false\"},  # needed behind a gateway\n        \"requirements\": [\"google-cloud-aiplatform[agent_engines,adk]\"],\n        # ... the rest of your existing deployment config\n    },\n)\n# Then grant the new identity roles/iap.egressor on the destinations it needs (Builder), and delete the old agent.",
+      "title": "Broken: PSC interface and gateway binding on 2",
+      "detail": "2 has a PSC interface and is bound to the egress gateway corp-egress. Google rejects that combination when an agent is created; it is only reachable by a later update, and an agent in this state can't reach Google APIs at all (sessions and model calls time out). Redeploy it without the PSC interface."
+    },
+    {
+      "rule": "N3",
+      "severity": "info",
+      "resource": "projects/acme-prod/locations/us-central1/agentGateways/inline",
+      "guidance": "# Two steps (a direct PATCH from no networking to a template fails today; from inline it works).\n# 1. A connectivity template with the same attachment and DNS. The template takes project IDs.\ncurl -X POST -H \"Authorization: Bearer $(gcloud auth print-access-token)\" -H \"Content-Type: application/json\" \\\n  \"https://networkservices.googleapis.com/v1/projects/PROJECT_ID/locations/REGION/agentConnectivityTemplates?agentConnectivityTemplateId=TEMPLATE_ID\" \\\n  -d '{\"accessPath\": \"AGENT_TO_ANYWHERE\", \"deploymentModel\": \"CENTRALIZED\",\n       \"egressNetworkConfig\": {\n         \"networkAttachment\": \"ATTACHMENT\",\n         \"dnsPeeringConfig\": {\"domains\": [DOMAINS], \"targetNetwork\": \"projects/PROJECT_ID/global/networks/VPC\"},\n         \"vpcEgress\": \"PRIVATE_RANGES_ONLY\"}}'\n# 2. Point the gateway at it and clear networkConfig (the mask needs both). The gateway takes the project NUMBER.\ncurl -X PATCH -H \"Authorization: Bearer $(gcloud auth print-access-token)\" -H \"Content-Type: application/json\" \\\n  \"https://networkservices.googleapis.com/v1/GATEWAY?updateMask=agentConnectivityTemplate,networkConfig,labels\" \\\n  -d '{\"agentConnectivityTemplate\": \"projects/PROJECT_NUMBER/locations/REGION/agentConnectivityTemplates/TEMPLATE_ID\",\n       \"labels\": {}}'   # send the gateway's current labels: a PATCH can drop them\n# About 3 minutes. Policy Studio doesn't apply this; check it on a gateway without bound agents first.",
+      "title": "Inline private egress on inline",
+      "detail": "Gateway inline reaches the VPC corp-vpc through an inline networkConfig, the older form. VPC Service Controls and custom trust (your own CA) need a connectivity template. Moving takes two updates and keeps the gateway and its bound agents."
+    },
+    {
+      "rule": "N3",
+      "severity": "info",
+      "resource": "projects/acme-prod/locations/us-central1/agentGateways/nov",
+      "guidance": "# Two steps (a direct PATCH from no networking to a template fails today; from inline it works).\n# 1. A connectivity template with the same attachment and DNS. The template takes project IDs.\ncurl -X POST -H \"Authorization: Bearer $(gcloud auth print-access-token)\" -H \"Content-Type: application/json\" \\\n  \"https://networkservices.googleapis.com/v1/projects/PROJECT_ID/locations/REGION/agentConnectivityTemplates?agentConnectivityTemplateId=TEMPLATE_ID\" \\\n  -d '{\"accessPath\": \"AGENT_TO_ANYWHERE\", \"deploymentModel\": \"CENTRALIZED\",\n       \"egressNetworkConfig\": {\n         \"networkAttachment\": \"ATTACHMENT\",\n         \"dnsPeeringConfig\": {\"domains\": [DOMAINS], \"targetNetwork\": \"projects/PROJECT_ID/global/networks/VPC\"},\n         \"vpcEgress\": \"PRIVATE_RANGES_ONLY\"}}'\n# 2. Point the gateway at it and clear networkConfig (the mask needs both). The gateway takes the project NUMBER.\ncurl -X PATCH -H \"Authorization: Bearer $(gcloud auth print-access-token)\" -H \"Content-Type: application/json\" \\\n  \"https://networkservices.googleapis.com/v1/GATEWAY?updateMask=agentConnectivityTemplate,networkConfig,labels\" \\\n  -d '{\"agentConnectivityTemplate\": \"projects/PROJECT_NUMBER/locations/REGION/agentConnectivityTemplates/TEMPLATE_ID\",\n       \"labels\": {}}'   # send the gateway's current labels: a PATCH can drop them\n# About 3 minutes. Policy Studio doesn't apply this; check it on a gateway without bound agents first.",
+      "title": "Inline private egress on nov",
+      "detail": "Gateway nov reaches a VPC through an inline networkConfig, the older form. VPC Service Controls and custom trust (your own CA) need a connectivity template. Moving takes two updates and keeps the gateway and its bound agents."
+    },
+    {
+      "rule": "N4",
+      "severity": "medium",
+      "resource": "projects/acme-prod/locations/us-east4/agentGateways/err",
+      "title": "Can't read the connectivity template of err",
+      "detail": "Gateway err uses the connectivity template t2, but Policy Studio can't read it, so its VPC, private domains and egress mode are unknown. Ask for networkservices.agentConnectivityTemplates.get (in roles/networkservices.viewer) on the gateway's project."
+    },
+    {
+      "rule": "N5",
+      "severity": "info",
+      "resource": "projects/acme-prod/locations/us-east4/agentGateways/sc",
+      "title": "All of sc's traffic goes into the VPC",
+      "detail": "The connectivity template of sc uses egress mode ALL_TRAFFIC: every call through the gateway, public destinations included, leaves through the VPC sc-vpc, which then needs Cloud NAT to reach the internet. This is the mode used with VPC Service Controls."
+    }
+  ]
+}

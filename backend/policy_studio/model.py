@@ -85,6 +85,18 @@ class BoundEngine(_M):
     direction: Literal["egress", "ingress"]
 
 
+class PrivateEgress(_M):
+    """The gateway's way into a VPC (connectivity template, or the older inline networkConfig). Detection only."""
+    source: Literal["template", "inline"]
+    template: Optional[str] = None     # full name, project id form when the number is known
+    network_attachment: str = ""
+    vpc: Optional[str] = None          # from the attachment's network (or the DNS targetNetwork), when readable
+    dns_domains: list[str] = Field(default_factory=list)
+    vpc_egress: Optional[Literal["PRIVATE_RANGES_ONLY", "ALL_TRAFFIC"]] = None
+    custom_trust: Optional[bool] = None   # template tlsConfig present
+    error: Optional[str] = None        # "can't read details: ..." (template unreadable)
+
+
 class Gateway(_M):
     name: str
     id: str
@@ -96,6 +108,7 @@ class Gateway(_M):
     bound_engines: list[BoundEngine] = Field(default_factory=list)
     create_time: str = ""
     enforcement: GatewayEnforcement = Field(default_factory=GatewayEnforcement)
+    private_egress: Optional[PrivateEgress] = None   # None = public egress only
     error: Optional[str] = None
 
 
@@ -110,6 +123,13 @@ class Template(_M):
 
 
 # ------------------------------------------------------------------ inventory
+class PscInterface(_M):
+    """Agent Runtime's own private networking (pscInterfaceConfig): VPC calls that skip the gateway."""
+    network_attachment: str = ""
+    vpc: Optional[str] = None
+    dns_domains: list[str] = Field(default_factory=list)
+
+
 class Engine(_M):
     name: str
     id: str
@@ -119,7 +139,8 @@ class Engine(_M):
     gateways: dict[str, str] = Field(default_factory=dict)      # {egress?, ingress?}
     create_time: str = ""
     bindable: bool = False
-    bindable_reason: Optional[str] = None   # why it can't be bound (no Agent Identity, or created before 2026-04-29)
+    bindable_reason: Optional[str] = None   # why it can't be bound (PSC interface, no Agent Identity, or too old)
+    psc_interface: Optional[PscInterface] = None
 
 
 class Skill(_M):
@@ -336,6 +357,8 @@ class Finding(_M):
     resource: Optional[str] = None
     fix: Optional[Intent] = None
     redeploy: Optional[str] = None     # how to redeploy with Agent Identity (Python), for engines that can't be bound
+    rule: Optional[str] = None         # audit rule id, for rules that have one (N1–N5: private networking)
+    guidance: Optional[str] = None     # shell guidance Policy Studio doesn't apply (N3: move to a template)
 
 
 # ------------------------------------------------------------------ requests / results

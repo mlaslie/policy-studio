@@ -45,6 +45,7 @@ GET responses are cached for 30 s per context. `?refresh=1` bypasses the cache; 
 
 - `principal_set`: every Agent Runtime agent (Agent Identity) in the project, the verified format `principalSet://agents.global.org-<ORG_ID>.system.id.goog/attribute.platformContainer/aiplatform/projects/<PROJECT_NUMBER>` (`null` if the org id can't be found). Use it as `source.principal` for `type: "project_agents"`.
 - Engine names use one format everywhere: `projects/<NUMBER>/locations/<R>/reasoningEngines/<ID>` (`Inventory.engines[].name`, `agents[].engine`, `Gateway.bound_engines[].engine`, `Intent.engine`). An engine's `principal` is exactly the IAM member string that appears in `Binding.member` (`principal://…` for Agent Identity, `serviceAccount:…` otherwise).
+- `permissions` also lists the private-networking reads (all read-only, `write: false`): `networkservices.agentConnectivityTemplates.get` and `.list` (`roles/networkservices.viewer`), and the optional `compute.networkAttachments.get` (`roles/compute.networkViewer`, only for the VPC name). `apis` includes `compute.googleapis.com` (optional). Without them, `Gateway.private_egress.error` says "can't read details" (audit N4) and `vpc` is left out; nothing fails.
 - `Inventory.access` has a key for **every** agent, MCP server and endpoint (`[]` when nobody has access) plus the registry itself (`projects/<P>/locations/<R>`). A key is omitted only when that IAM policy couldn't be read; the item then has `error` and `access_errors[name]` holds the reason.
 
 ## Types
@@ -57,7 +58,18 @@ Gateway = { name, id, project, type: "egress" | "ingress", governed_access_path,
             authz_policies: [{name, profile: "REQUEST_AUTHZ"|"CONTENT_AUTHZ", provider: "iap"|"model_armor"|"other",
                               extension, enforcement?: "ENFORCE"|"DRY_RUN"}],
             bound_engines: [{engine, display_name, direction: "egress"|"ingress"}], create_time,
-            enforcement: GatewayEnforcement }
+            enforcement: GatewayEnforcement, private_egress: PrivateEgress | null /* null = public egress only */ }
+PrivateEgress = { source: "template" | "inline",
+                  template?: string             /* full name; the gateway references it by project NUMBER, shown (and
+                                                   read) by project id when the number is the context's */,
+                  network_attachment: string, vpc?: string /* the attachment's network, else the DNS targetNetwork */,
+                  dns_domains: string[]         /* e.g. ["run.app.", "corp.internal."] */,
+                  vpc_egress?: "PRIVATE_RANGES_ONLY" | "ALL_TRAFFIC", custom_trust?: boolean /* template tlsConfig */,
+                  error?: string                /* "can't read details: <HTTP error>": template unreadable */ }
+  // Detection only (PRIVATE_NETWORKING_PLAN.md). Read from the gateway's agentConnectivityTemplate (GET
+  // networkservices v1 .../agentConnectivityTemplates/{name}) or its inline networkConfig; the network attachment
+  // (GET compute v1 .../networkAttachments/{name}) is optional and only names the VPC. A 403 / missing permission
+  // never fails the request.
 GatewayEnforcement = { mode: "ENFORCE" | "DRY_RUN" | null, extension /* the IAP authz extension */,
                        policy /* the REQUEST_AUTHZ policy that calls it */, failOpen: boolean,
                        shared_with: string[] /* other gateways (full names) whose IAP policy uses the same extension */,
@@ -86,8 +98,11 @@ Template = { name, id, filters: {
 Inventory = {
   engines: [{ name, id, display_name, principal, identity_type /* AGENT_IDENTITY|SERVICE_AGENT|SERVICE_ACCOUNT */,
               gateways: {egress?, ingress?}, create_time,
-              bindable: boolean /* identity_type AGENT_IDENTITY and created on/after 2026-04-29 */,
-              bindable_reason: string | null }],
+              bindable: boolean /* no PSC interface, identity_type AGENT_IDENTITY, created on/after 2026-04-29 */,
+              bindable_reason: string | null /* the PSC interface reason comes first */,
+              psc_interface: null | { network_attachment, vpc?: string /* from the attachment, when readable */,
+                                      dns_domains: string[] } /* spec.deploymentSpec.pscInterfaceConfig: the agent's
+                                      own way into a VPC, which skips the gateway */ }],
   agents:  [{ name, id, display_name, kind: "runtime"|"a2a", url?, skills: [{id, name, description}], engine?, error? }],
   mcp_servers: [{ name, id, display_name, url?, tools: [{name, description, read_only, destructive, annotations}], error? }],
   endpoints: [{ name, id, display_name, url, error? }],
@@ -100,7 +115,17 @@ Grant  = Binding & { resource, resource_kind: "agent"|"mcp_server"|"endpoint"|"r
   // "registry"). IAM matches the binding by its exact expression; a revoke without access removes only the
   // unconditional binding, and regenerating the expression from the mode (tools, read_only_hint) may not match.
 Finding = { severity: "high"|"medium"|"info", title, detail, resource?, fix?: Intent, fixes?: Intent[],
-            redeploy?: string /* Python: redeploy with Agent Identity, for engines that can't be bound (no fix) */ }
+            redeploy?: string /* Python: redeploy with Agent Identity, for engines that can't be bound (no fix) */,
+            rule?: string     /* audit rule id, for rules that have one: N1–N5 below */,
+            guidance?: string /* shell guidance Policy Studio doesn't apply (N3) */ }
+  // Private networking rules (gcp/networking.py; frontend port lib/networking.ts, shared fixture
+  // backend/tests/fixtures/networking_cases.json):
+  //   N1 high   agent with a PSC interface and no egress gateway: its VPC calls bypass every check (redeploy)
+  //   N2 high   agent with a PSC interface and an egress binding: broken, can't reach Google APIs (redeploy)
+  //   N3 info   gateway with inline networkConfig instead of a connectivity template (guidance: two-step update)
+  //   N4 medium gateway whose connectivity template can't be read (permission hint)
+  //   N5 info   connectivity template with vpcEgress ALL_TRAFFIC (awareness)
+  // A PSC-interface engine gets N1/N2 instead of the generic "Unprotected egress" finding.
   // fix intents for grant/revoke carry full source and destination objects with labels; bind fixes carry source too
 
 Intent = { id, kind: "grant"|"revoke"|"modify"|"bind_gateway"|"unbind_gateway"|"model_armor_on"|"model_armor_off"
@@ -207,7 +232,9 @@ RenderResult = { context /* resolved, incl. project_number */,
 PreflightItem = { intent_id, status: "ok"|"blocked"|"duplicate"|"invalid", reason?,
                   fix?: "ma_setup"|"redeploy"|"permission"|"already"|"", duplicate_of?,
                   warning? /* ok, but affects more than it names: a shared IAP extension */ }
-  // blocked: bind_gateway of an engine that can't be bound; model_armor_on with no Model Armor extension in the
+  // blocked: bind_gateway of an engine that can't be bound (an engine with a PSC interface: "<agent> can't be bound
+  // to Agent Gateway. This agent has its own private networking (PSC interface). Google rejects or breaks agents
+  // with both; redeploy it without the PSC interface."); model_armor_on with no Model Armor extension in the
   // region and none staged; a kind the caller can't write (apply mode, /auth writable); set_enforcement /
   // dedicate_extension on a gateway with no IAP REQUEST_AUTHZ policy; set_enforcement to the mode the extension is
   // already in (fix "already"); dedicate_extension to a name that exists, or whose policy targets other gateways too;

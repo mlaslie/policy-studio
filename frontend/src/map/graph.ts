@@ -18,6 +18,7 @@ import { ROLE, accessFromCondition } from "../lib/policy";
 import { ENGINE_PRINCIPAL_RE, EVERYONE, PROJECT_AGENTS_RE, conditionAllows, evaluateTools, isReadOnlyHint, memberMatches, parseTools } from "./evaluate";
 import { CLIENT, NOGW, PSEUDO, pseudoOf } from "./ids";
 import { endpointLabel, isGoogleApi } from "./labels";
+import { privateEgressChip, privateEgressSummary, pscChips } from "../lib/networking";
 
 export { CLIENT, NOGW, PSEUDO };
 
@@ -281,6 +282,8 @@ function gatewayNode(input: GraphInput, g: Gateway): PNode {
   }
   if (ma?.enabled) chips.push({ text: ma.dryRun ? "Model Armor (dry run)" : "Model Armor", tone: "orange", title: ma.template ? `Template ${ma.template}` : undefined });
   if (g.enforcement?.shared_with.length) chips.push({ text: "Shared extension", tone: "neutral", title: `The IAP extension also serves ${g.enforcement.shared_with.map(short).join(", ")}: they change together.` });
+  const pe = privateEgressChip(g.private_egress);
+  if (pe) chips.push({ text: pe, tone: g.private_egress?.error ? "amber" : "blue", title: privateEgressSummary(g.private_egress) });
   return {
     id: g.name,
     kind: "gateway",
@@ -300,7 +303,11 @@ function gatewayNode(input: GraphInput, g: Gateway): PNode {
 
 function engineNode(e: Engine, gw: string | null, column: Column, agentEntry?: string): PNode {
   const chips: Chip[] = [{ text: e.identity_type === "AGENT_IDENTITY" ? "Agent Identity" : "Service account", tone: e.identity_type === "AGENT_IDENTITY" ? "neutral" : "amber" }];
-  if (!gw && !e.bindable) chips.push({ text: "Can't be bound", tone: "amber", title: e.bindable_reason ?? undefined });
+  // Egress map (callers): an agent with its own PSC interface gets the red "bypasses gateway" chip (and "Broken" when
+  // it is also bound), which says why it can't be bound; elsewhere the generic chip.
+  const psc = column === "callers" ? pscChips(e) : [];
+  if (psc.length) chips.push(...psc.map((c) => ({ text: c.text, tone: "red" as const, title: [c.tip, !gw && e.bindable_reason].filter(Boolean).join("\n") })));
+  else if (!gw && !e.bindable) chips.push({ text: "Can't be bound", tone: "amber", title: e.bindable_reason ?? undefined });
   return {
     id: e.name,
     kind: "engine",

@@ -317,7 +317,7 @@ function bindOutputs(ctx: Ctx, w: World, i: Intent, unbind: boolean): { outputs:
   const url = `https://${ctx.region}-aiplatform.googleapis.com/v1/${engName}?updateMask=spec.deploymentSpec.agentGatewayConfig`;
   const label = engine?.display_name ?? i.engine_label ?? shortName(engName);
   const warnings: string[] = [];
-  if (engine && !engine.bindable) warnings.push(`${label} was created before 2026-04-29 and can't be bound to a gateway. Redeploy it to get a bindable engine.`);
+  if (engine && !engine.bindable) warnings.push(`${label} can't be bound to a gateway. ${engine.bindable_reason ?? "It was created before 2026-04-29; redeploy it to get a bindable engine."}`);
   if (dir === "ingress" && !ctx.ge_app) warnings.push("Gemini Enterprise app ID is not set; registering the agent with your app uses GE_APP_ID.");
   const notes = ["The PATCH replaces the whole agentGatewayConfig, so the other direction is re-sent unchanged.", "The engine redeploys: it takes a few minutes before traffic uses the new path."];
   const curl = [

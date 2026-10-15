@@ -1,6 +1,6 @@
 # Policy Studio: private networking (plan)
 
-**Status:** plan only, nothing built. **Scope narrowed 2026-10-15** (user decision): Policy Studio *detects* private networking. It doesn't build it.
+**Status:** N-1 and N-2 built (detection, audit, preflight, UI; see §10). N-3 and N-4 not started. **Scope narrowed 2026-10-15** (user decision): Policy Studio *detects* private networking. It doesn't build it.
 
 The original, much larger plan (create attachments, DNS zones, PSC endpoints and connectivity templates; migrate gateways; detect private destinations) is kept below as **Appendix A** for reference. It is superseded. Live-test results are in [P0_FINDINGS.md](P0_FINDINGS.md). A step-by-step console guide for building private egress by hand exists as a separate PDF.
 
@@ -111,6 +111,17 @@ The scope is small, so there's no shared package for now. The parsing lives in o
 | N-4 (optional) | "Seen in traffic" destination label | S (0.5 d) |
 
 N-1 plus N-2 is the 3–4 days discussed. N-3 is the separate registry write path.
+
+**Status (2026-10-15):**
+
+| Phase | Status | Where |
+|---|---|---|
+| N-1 | **Built** | `gcp/networking.py` (pure parsers + rules); wired in `service.py` (template read by project id, optional attachment read, cached like the other reads; a 403 gives `error: "can't read details: …"`), `gcp/engines.py` (`psc_interface`; a PSC interface makes the engine unbindable, that reason first), `gcp/discovery.py` (3 read permissions, `compute.googleapis.com`); `docs/API.md`; mock world (`api/mockData.ts`, `mockScale.ts`) and `backend/tests/fakegcp.py`. |
+| N-2 | **Built** | `audit.py` N1–N5 (`Finding.rule`, `redeploy` for N1/N2, `guidance` for N3); preflight / render block of `bind_gateway` through `bindable=false`; Gateways "Private egress" row, map chips (gateway "Private egress · VPC", agent "Own VPC access (bypasses gateway)" and "Broken: PSC interface + gateway"), Inventory "Private networking", Learn and glossary. The frontend port of the rules (`lib/networking.ts`) and the backend read one fixture (`backend/tests/fixtures/networking_cases.json`). |
+| N-3 | Not started | |
+| N-4 | Not started | |
+
+Choices made while building: N2 means a PSC interface plus an **egress** binding (the combination P0 tested); the map's PSC chips show on the egress view only; the attachment's `network` field names the VPC (the subnet URL doesn't), falling back to the DNS `targetNetwork`; the N3 guidance sends `labels` in the update mask (P0: a PATCH can drop them).
 
 ---
 

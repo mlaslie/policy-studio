@@ -20,6 +20,7 @@ APIS = [
     "modelarmor.googleapis.com",
     "cloudresourcemanager.googleapis.com",
     "serviceusage.googleapis.com",
+    "compute.googleapis.com",          # optional: network attachments, for the VPC name of private networking
 ]
 
 # (permission, needed_for, role that grants it, write?)
@@ -43,6 +44,12 @@ PERMISSIONS: list[tuple[str, str, str, bool]] = [
      "roles/browser", False),
     ("logging.logEntries.list", "read gateway request logs (dry-run “would have been denied”)",
      "roles/logging.viewer", False),
+    ("networkservices.agentConnectivityTemplates.get", "read a gateway's connectivity template (private egress: VPC, "
+     "domains, egress mode)", "roles/networkservices.viewer", False),
+    ("networkservices.agentConnectivityTemplates.list", "list connectivity templates (private egress)",
+     "roles/networkservices.viewer", False),
+    ("compute.networkAttachments.get", "name the VPC behind private networking (optional)",
+     "roles/compute.networkViewer", False),
     # Writes (Apply, apply mode only). The Apply checks are in auth.py (WRITE_PERMISSIONS).
     ("iap.webServiceVersions.setIamPolicy", "apply grants / revokes", "roles/iap.admin", True),
     ("aiplatform.reasoningEngines.update", "bind / unbind agents to gateways",

@@ -754,7 +754,7 @@ function BindBox({ engine, gateways }: { engine: Engine; gateways: Gateway[] }) 
           <p className="small warn-text">
             <WarnIcon size={12} /> {why}
           </p>
-          <RedeployHelp />
+          <RedeployHelp reason={engine.bindable_reason} />
         </>
       )}
     </div>

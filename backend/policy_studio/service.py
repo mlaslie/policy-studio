@@ -10,8 +10,8 @@ from typing import Any, Callable
 from . import audit as audit_mod, dryrun
 from .english import make_binding
 from .gcp import discovery, engines as eng_mod, gateways as gw_mod, logs as logs_mod, model_armor as ma_mod, \
-    registry as reg_mod
-from .gcp.rest import Rest, client, err_text
+    networking as net_mod, registry as reg_mod
+from .gcp.rest import NETWORKSERVICES, Rest, client, err_text
 from .model import Context, Engine, Gateway, Inventory, Template
 
 TTL = 30.0
@@ -99,11 +99,75 @@ def context_view(ctx: Context, refresh: bool = False) -> dict[str, Any]:
 # ------------------------------------------------------------------ engines / gateways
 def region_engines(ctx: Context, refresh: bool = False) -> tuple[list[Engine], list[str]]:
     def build() -> tuple[list[Engine], list[str]]:
+        r = rest_for(ctx)
         try:
-            return eng_mod.list_engines(rest_for(ctx), ctx.project, ctx.region), []
+            engines = eng_mod.list_engines(r, ctx.project, ctx.region)
         except Exception as e:  # noqa: BLE001
             return [], [f"list Agent Runtime engines: {err_text(e)}"]
+        psc = [e for e in engines if e.psc_interface and e.psc_interface.network_attachment and not e.psc_interface.vpc]
+        atts = attachments(ctx, [e.psc_interface.network_attachment for e in psc], refresh)
+        for e in psc:
+            vpc = net_mod.vpc_of_attachment(atts.get(net_mod.resource_path(e.psc_interface.network_attachment)))
+            if vpc:
+                e.psc_interface.vpc = vpc
+        return engines, []
     return cache.get((ctx.key(), "engines"), build, refresh)
+
+
+def attachments(ctx: Context, names: list[str], refresh: bool = False) -> dict[str, dict]:
+    """{attachment path: network attachment} for the ones that could be read (optional: only for the VPC name, so a
+    403 or 404 just leaves it out)."""
+    def one(path: str) -> dict | None:
+        def build() -> dict | None:
+            try:
+                return rest_for(ctx).get(net_mod.attachment_url(path)) or None
+            except Exception:  # noqa: BLE001
+                return None
+        return cache.get((ctx.key(), "attachment", path), build, refresh)
+    paths = list(dict.fromkeys(net_mod.resource_path(n) for n in names if n))
+    if not paths:
+        return {}
+    with ThreadPoolExecutor(max_workers=min(8, len(paths))) as pool:
+        got = dict(zip(paths, pool.map(one, paths)))
+    return {k: v for k, v in got.items() if v}
+
+
+def private_egress(ctx: Context, raw: dict[str, Any], refresh: bool = False) -> dict[str, dict | None]:
+    """{gateway name: Gateway.private_egress}: each gateway's connectivity template (read by project id when the
+    gateway's number form matches a known project) or inline networkConfig, plus its attachment for the VPC name.
+    An unreadable template degrades to `error`, never a failed request."""
+    def build() -> dict[str, dict | None]:
+        r = rest_for(ctx)
+        c = resolve(ctx, r)
+        numbers = {n: p for n, p in ((c.project_number, ctx.project), (c.gateway_project_number, ctx.gw_project)) if n}
+        refs = {g["name"]: net_mod.resolve_project(net_mod.template_ref(g), numbers)
+                for g in raw["gateways"] if net_mod.template_ref(g)}
+        templates: dict[str, dict] = {}
+        errors: dict[str, str] = {}
+
+        def read(name: str) -> None:
+            try:
+                t = r.get(net_mod.template_url(name, NETWORKSERVICES))
+                if t:
+                    templates[name] = t
+                else:
+                    errors[name] = "empty response"
+            except Exception as e:  # noqa: BLE001
+                errors[name] = err_text(e)
+        names = list(dict.fromkeys(refs.values()))
+        if names:
+            with ThreadPoolExecutor(max_workers=min(8, len(names))) as pool:
+                list(pool.map(read, names))
+        atts = attachments(ctx, [net_mod.attachment_of(g, templates.get(refs.get(g["name"], "")))
+                                 for g in raw["gateways"]], refresh)
+        out: dict[str, dict | None] = {}
+        for g in raw["gateways"]:
+            ref = refs.get(g["name"], "")
+            att = net_mod.resource_path(net_mod.attachment_of(g, templates.get(ref)))
+            out[g["name"]] = net_mod.gateway_private_egress(g, templates.get(ref), errors.get(ref), atts.get(att),
+                                                            numbers)
+        return out
+    return cache.get((ctx.key(), "private_egress"), build, refresh)
 
 
 def gateway_raw(ctx: Context, refresh: bool = False) -> dict[str, Any]:
@@ -118,7 +182,7 @@ def gateways_view(ctx: Context, refresh: bool = False) -> dict[str, Any]:
             fr = pool.submit(gateway_raw, ctx, refresh)
             engines, eerr = fe.result()
             raw = fr.result()
-        gws = gw_mod.build(raw, engines)
+        gws = gw_mod.build(raw, engines, private_egress(ctx, raw, refresh))
         notes = list(gw_mod.NOTES)
         if not gws:
             notes.insert(0, f"No Agent Gateway in {ctx.region} for project {ctx.project}"

@@ -4,13 +4,15 @@ GET https://R-aiplatform.googleapis.com/v1/projects/P/locations/R/reasoningEngin
   spec.effectiveIdentity  agents.global.org-ORG.system.id.goog/resources/aiplatform/projects/N/locations/R/
                           reasoningEngines/ID  (Agent Identity)  |  a service account email (service agent)
   spec.deploymentSpec.agentGatewayConfig  {agentToAnywhereConfig: {agentGateway}, clientToAgentConfig: {agentGateway}}
-Engines created before 2026-04-29 can't be bound to a gateway.
+  spec.deploymentSpec.pscInterfaceConfig  {networkAttachment, dnsPeeringConfigs[]}  (networking.py)
+Engines created before 2026-04-29, or with a PSC interface, can't be bound to a gateway.
 """
 from __future__ import annotations
 
 import re
 
 from ..model import Engine
+from .networking import PSC_BIND_REASON, engine_psc_interface
 from .rest import Rest, aiplatform
 
 MASK = "spec.deploymentSpec.agentGatewayConfig"
@@ -18,6 +20,7 @@ KEYS = {"egress": "agentToAnywhereConfig", "ingress": "clientToAgentConfig"}
 BINDABLE_SINCE = "2026-04-29"
 REASON_IDENTITY = ("Created without Agent Identity: Agent Gateway needs identity_type=AGENT_IDENTITY, which can't be "
                    "changed. Redeploy the agent with Agent Identity.")
+REASON_PSC = PSC_BIND_REASON
 REASON_DATE = ("Created before 2026-04-29: engines that old can't be bound to Agent Gateway. Redeploy the agent (with "
                "Agent Identity).")
 REDEPLOY_SNIPPET = """import vertexai
@@ -36,8 +39,11 @@ remote = client.agent_engines.create(
 # Then bind the new engine to the gateway (Policy Studio, Gateways step) and move grants to its new identity."""
 
 
-def bind_blocker(identity: str, create_time: str) -> str | None:
-    """Why an engine can't be bound to Agent Gateway (None when it can)."""
+def bind_blocker(identity: str, create_time: str, psc_interface: bool = False) -> str | None:
+    """Why an engine can't be bound to Agent Gateway (None when it can). A PSC interface comes first: the agent needs
+    a redeploy without it whatever its identity."""
+    if psc_interface:
+        return REASON_PSC
     if identity != "AGENT_IDENTITY":
         return REASON_IDENTITY
     if not create_time or create_time[:10] < BINDABLE_SINCE:
@@ -80,10 +86,11 @@ def parse_engine(eng: dict) -> Engine:
     name = eng.get("name", "")
     ct = eng.get("createTime", "") or ""
     it = identity_type(eng)
-    reason = bind_blocker(it, ct)
+    psc = engine_psc_interface(eng)
+    reason = bind_blocker(it, ct, psc is not None)
     return Engine(name=name, id=name.rsplit("/", 1)[-1], display_name=eng.get("displayName") or name.rsplit("/", 1)[-1],
                   principal=principal_of(eng), identity_type=it, gateways=gateways_of(eng),
-                  create_time=ct, bindable=reason is None, bindable_reason=reason)
+                  create_time=ct, bindable=reason is None, bindable_reason=reason, psc_interface=psc)
 
 
 def list_engines(r: Rest, project: str, region: str) -> list[Engine]:

@@ -146,7 +146,7 @@ function ItemCard({ intent, idx, res, diff, fmt, setFmt }: { intent: Intent; idx
       {item?.error && (
         <Callout tone="danger" title="This item can't work as staged">
           {item.error}
-          {/Agent Identity|can't be bound/.test(item.error) && <RedeployHelp />}
+          {/Agent Identity|can't be bound/.test(item.error) && <RedeployHelp reason={item.error} />}
         </Callout>
       )}
       <WarningCallouts warnings={item?.warnings} />

@@ -12,7 +12,7 @@ import { grantToIntent, revokesGrant } from "../lib/grants";
 import { downloadBlob, makeZip } from "../lib/zip";
 import { ago } from "../lib/util";
 import { KIND_LABEL, intentEnglish, intentKey } from "../lib/policy";
-import { RedeployHelp } from "../components/Redeploy";
+import { GuidanceHelp, RedeployHelp } from "../components/Redeploy";
 import { ShowOnMap } from "../components/ShowOnMap";
 import { focusForGrant } from "../map/focus";
 
@@ -160,9 +160,18 @@ export function AuditStep() {
                         <div className="grow">
                           <div className="finding-title">
                             <Badge tone={SEV[f.severity].tone}>{SEV[f.severity].label}</Badge> {f.title}
+                            {f.rule && (
+                              <>
+                                {" "}
+                                <Badge tone="neutral" title="Private networking audit rule (detection only)">
+                                  {f.rule}
+                                </Badge>
+                              </>
+                            )}
                           </div>
                           <p className="small">{f.detail}</p>
-                          {f.redeploy && <RedeployHelp code={f.redeploy} />}
+                          {f.redeploy && <RedeployHelp code={f.redeploy} summary={f.rule === "N1" || f.rule === "N2" ? "How to redeploy without the PSC interface" : undefined} />}
+                          {f.guidance && <GuidanceHelp code={f.guidance} summary="How to move it to a connectivity template (not applied by Policy Studio)" />}
                           {f.resource && (
                             <ShowOnMap focus={{ direction: gateways.data?.gateways.find((x) => x.name === f.resource)?.type ?? "egress", node: f.resource }} what={f.resource.split("/").pop() ?? "it"} />
                           )}

@@ -81,6 +81,10 @@ const LESSONS: Record<StepKey, { title: string; body: ReactNode; flow: ReactNode
           <b>Shared extensions.</b> Several gateways can use the same extension, and then they switch together. To change one gateway only, give it <b>its own extension</b> (a copy) first; Policy Studio stages both steps. A change
           takes effect about 2–3 minutes after Apply (measured), sometimes before the operation reports done.
         </p>
+        <p>
+          <b>Private egress.</b> With a <b>connectivity template</b> (or the older inline networkConfig), an egress gateway can also reach destinations inside a VPC, still checked by IAP. An agent with its own <b>PSC interface</b> reaches a VPC
+          without the gateway, so nothing checks those calls. Policy Studio shows both; it doesn't build them.
+        </p>
       </>
     ),
     flow: <Flow caption="Egress: the gateway checks every outbound call" nodes={[{ label: "Agent", tone: "agent" }, { label: "Egress GW", sub: "IAP check", tone: "gw" }, { label: "MCP / A2A", sub: "API", tone: "dest" }]} />,
@@ -154,7 +158,8 @@ const LESSONS: Record<StepKey, { title: string; body: ReactNode; flow: ReactNode
           <li>agents not bound to an egress gateway (their grants are never checked),</li>
           <li>full access to MCP servers that have destructive tools,</li>
           <li>public members such as allAuthenticatedUsers,</li>
-          <li>grants to agents that were deleted.</li>
+          <li>grants to agents that were deleted,</li>
+          <li>private networking (N1–N5): agents with their own VPC access that skips the gateway, and how gateways reach into a VPC.</li>
         </ul>
         <p>Each finding can stage a fix in the cart, so you review it like any other change.</p>
       </>

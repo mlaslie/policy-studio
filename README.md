@@ -257,6 +257,21 @@ live; about 20 s) with `labels` in the update mask and the current labels re-sen
 alone clears the policy's labels. Terraform imports the policy and plans an in-place update (verified live). Not
 verified: `gcloud network-security authz-policies import` updating the existing policy in place.
 
+## Private networking
+
+Policy Studio **detects** private networking; it doesn't build it (no attachments, DNS zones, PSC endpoints or
+connectivity templates are created). It shows two things that matter to who can call what:
+
+- **Agents with their own PSC interface** (`pscInterfaceConfig`): their calls into a VPC skip the gateway, so no
+  registry check, IAP grant or gateway log applies. They can't be bound (Google rejects both; one bound by a later
+  update can't reach Google APIs), so a bind is blocked in preflight. On the map they carry a red "Own VPC access
+  (bypasses gateway)" chip.
+- **Egress gateways with private egress** (a connectivity template, or the older inline `networkConfig`): the VPC,
+  private domains and egress mode, on the gateway card and as a "Private egress · VPC" chip on the map.
+
+The audit adds N1–N5 (PSC interface without / with a gateway, inline networkConfig, unreadable template, egress mode
+`ALL_TRAFFIC`), with redeploy or step-by-step guidance. Details: [docs/PRIVATE_NETWORKING_PLAN.md](docs/PRIVATE_NETWORKING_PLAN.md).
+
 ## How long changes take to apply
 
 Verified (read back) means the setting is stored. It doesn't mean the gateway enforces it yet. A grant applied and
@@ -292,7 +307,8 @@ Read access: the Context step lists what your credentials can read (`testIamPerm
 command to grant it. Reading needs roughly: `roles/browser`, `roles/serviceusage.serviceUsageViewer`, `roles/networkservices.viewer`,
 `roles/networksecurity.viewer`, `roles/aiplatform.viewer`, `roles/agentregistry.viewer`, `roles/modelarmor.viewer`,
 `roles/logging.viewer` (gateway request logs) and an IAP role that can read IAM policies (`roles/iap.admin` includes
-it).
+it). Private networking reads `networkservices.agentConnectivityTemplates.get` / `list` (`roles/networkservices.viewer`)
+and, optionally, `compute.networkAttachments.get` (`roles/compute.networkViewer`, for the VPC name).
 
 Apply additionally needs `roles/iap.admin` (grants / revokes, on the Agent Registry project), `roles/aiplatform.user`
 (gateway binds) and `roles/networksecurity.editor` (Model Armor on/off); Model Armor setup also needs

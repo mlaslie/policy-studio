@@ -6,6 +6,7 @@ from typing import Any, Optional
 
 from .conditions import EGRESSOR, exact_access
 from .english import PROJECT_AGENTS_RE, engine_principal_parts
+from .gcp import networking
 from .gcp.engines import REDEPLOY_SNIPPET
 from .model import (Access, Context, Destination, Finding, Gateway, GatewayRef, Grant, Intent, Inventory,
                     McpServer, Source)
@@ -85,8 +86,8 @@ def audit(inv: Inventory, gateways: list[Gateway], ctx: Optional[Context] = None
 
     # 1. Agents not behind an egress gateway
     for e in inv.engines:
-        if e.gateways.get("egress"):
-            continue
+        if e.gateways.get("egress") or e.psc_interface:
+            continue                          # PSC interface: N1 / N2 below
         if not e.bindable:
             findings.append(Finding(
                 severity="medium", title=f"Unprotected egress: {e.display_name}",
@@ -202,6 +203,9 @@ def audit(inv: Inventory, gateways: list[Gateway], ctx: Optional[Context] = None
                 severity="medium", title=f"No IAP authorization on {gw.id}",
                 detail=(f"Egress gateway {gw.id} has no REQUEST_AUTHZ policy with the IAP extension, so "
                         "roles/iap.egressor grants are not checked on it."), resource=gw.name))
+
+    # 7. Private networking (N1–N5, networking.py): agents with their own VPC access, gateways' private egress
+    findings += [Finding(**f) for f in networking.audit_rules(inv.engines, gateways)]
 
     order = {"high": 0, "medium": 1, "info": 2}
     findings.sort(key=lambda f: order[f.severity])

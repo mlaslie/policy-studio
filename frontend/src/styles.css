@@ -1513,6 +1513,20 @@ input[type="checkbox"] {
   color: var(--text-2);
   margin-bottom: 6px;
 }
+/* Private egress row (gateway card) and Inventory's private networking column */
+.domain-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 6px 0 4px;
+}
+.domain-chip {
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--blue-weak);
+  color: var(--text);
+}
 .policy-chips {
   display: flex;
   flex-direction: column;

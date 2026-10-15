@@ -59,7 +59,7 @@ describe("us-west1: the scale scenario", () => {
   });
 
   it("other regions are unchanged", () => {
-    expect(buildWorld({ ...CTX, region: "us-east4" }).inventory.engines).toHaveLength(4);
+    expect(buildWorld({ ...CTX, region: "us-east4" }).inventory.engines).toHaveLength(5);
   });
 });
 

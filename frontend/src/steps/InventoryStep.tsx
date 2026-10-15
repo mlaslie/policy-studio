@@ -10,6 +10,7 @@ import { ArrowIcon, SearchIcon, WarnIcon } from "../components/Icons";
 import { shortName } from "../lib/policy";
 import { fmtDate, plural } from "../lib/util";
 import { ShowOnMap } from "../components/ShowOnMap";
+import { pscChips } from "../lib/networking";
 
 type Tab = "agents" | "mcp" | "apis" | "engines";
 
@@ -194,7 +195,23 @@ function EngineCard({ e }: { e: Engine }) {
         <span>
           Ingress: {e.gateways.ingress ? <Badge tone="green">{shortName(e.gateways.ingress)}</Badge> : <Badge tone="neutral">not bound</Badge>}
         </span>
-        <span>{e.bindable ? <Badge tone="neutral">bindable</Badge> : <Badge tone="amber" title="Created before 2026-04-29">can't be bound</Badge>}</span>
+        <span>{e.bindable ? <Badge tone="neutral">bindable</Badge> : <Badge tone="amber" title={e.bindable_reason ?? "Created before 2026-04-29"}>can't be bound</Badge>}</span>
+        <span data-testid="private-networking">
+          <Term k="psc-interface">Private networking</Term>:{" "}
+          {e.psc_interface ? (
+            pscChips(e).map((c, i) => (
+              <span key={c.text}>
+                {i > 0 && " "}
+                <Badge tone="red" title={c.tip}>
+                  {c.text}
+                  {i === 0 && e.psc_interface?.vpc ? ` · ${e.psc_interface.vpc}` : ""}
+                </Badge>
+              </span>
+            ))
+          ) : (
+            <Badge tone="neutral">none</Badge>
+          )}
+        </span>
       </div>
       {!e.gateways.egress && egress && e.bindable && <p className="small muted">Bind it to {egress.id} in step {stepN("gateways")} (Gateways) so its grants are enforced.</p>}
       <div className="principal">

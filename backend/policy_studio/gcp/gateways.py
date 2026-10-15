@@ -120,7 +120,8 @@ def list_region(r: Rest, projects: list[str], region: str) -> dict[str, Any]:
     return out
 
 
-def build(raw: dict[str, Any], engines: list[Engine]) -> list[Gateway]:
+def build(raw: dict[str, Any], engines: list[Engine], private: dict[str, dict | None] | None = None) -> list[Gateway]:
+    """`private`: {gateway name: networking.gateway_private_egress(...)} (absent = public egress only)."""
     ext_by_tail = {(x["_project"], tail(x["name"])): x for x in raw["extensions"]}
     ext_by_tail_any = {tail(x["name"]): x for x in raw["extensions"]}
     idx = iap_index(raw)
@@ -148,7 +149,8 @@ def build(raw: dict[str, Any], engines: list[Engine]) -> list[Gateway]:
                            type=PATHS.get(path, "egress"), governed_access_path=path,
                            registries=list(g.get("registries") or []), authz_policies=pols,
                            bound_engines=bound, create_time=g.get("createTime", ""),
-                           enforcement=enforcement_for(gtail, idx, names)))
+                           enforcement=enforcement_for(gtail, idx, names),
+                           private_egress=(private or {}).get(name)))
     gws.sort(key=lambda x: (x.type, x.name))
     return gws
 

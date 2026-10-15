@@ -77,6 +77,16 @@ export function addScale(w: ScaleParts, factor = 1) {
     authz_policies: [],
     bound_engines: [],
     create_time: "2026-08-02T16:20:00Z",
+    // Private egress for VPC Service Controls: every call goes into the VPC (audit N5).
+    private_egress: {
+      source: "template",
+      template: `${base}/agentConnectivityTemplates/west-vpcsc`,
+      network_attachment: `projects/${GP}/regions/${R}/networkAttachments/west-egress`,
+      vpc: "west-vpc",
+      dns_domains: ["corp.internal."],
+      vpc_egress: "ALL_TRAFFIC",
+      custom_trust: true,
+    },
   };
   const partnerIngress: Gateway = {
     name: `projects/${P}/locations/${R}/agentGateways/partner-ingress`,

@@ -62,7 +62,7 @@ function BlockedFix({ p }: { p: PreflightItem }) {
         </button>
       </Tip>
     );
-  if (p.fix === "redeploy") return <RedeployHelp />;
+  if (p.fix === "redeploy") return <RedeployHelp reason={p.reason} />;
   if (p.fix === "permission")
     return (
       <Tip tip="Open Context to see which role you're missing and the command to grant it.">

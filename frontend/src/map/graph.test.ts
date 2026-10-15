@@ -67,10 +67,12 @@ describe("egress verdicts (§4.4), us-east4: corp-egress in dry run", () => {
     expect(edge(g.edges, `out:${travel}`)).toMatchObject({ verdict: "direct", source: NOGW.egress, target: PSEUDO.anywhere, caller: travel });
   });
 
-  it("an agent that can't be bound: direct, flagged", () => {
+  it("an agent that can't be bound: direct, flagged (its PSC interface says why)", () => {
     const psc = g.nodes.find((n) => n.id === eng("simple-agent-with-psc").name)!;
     expect(psc.gateway).toBeNull();
-    expect(psc.chips.map((c) => c.text)).toContain("Can't be bound");
+    const chip = psc.chips.find((c) => c.text === "Own VPC access (bypasses gateway)")!;
+    expect(chip.tone).toBe("red");
+    expect(chip.title).toContain("PSC interface");
     expect(edge(g.edges, `direct:${psc.id}`)?.verdict).toBe("direct");
   });
 
