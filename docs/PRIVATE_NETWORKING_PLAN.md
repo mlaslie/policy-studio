@@ -630,6 +630,31 @@ Total: about **25–30 days**. P0–P3 alone (≈ 9–10 days) delivers discover
 
 ---
 
+## 12b. P0 live test outcome (2026-10-15, us-west1, torn down)
+
+Full results are in [P0_FINDINGS.md](P0_FINDINGS.md); its §8 lists the §2 fact updates. Changes to this plan:
+
+1. **§6.2 migration:** default to **in-place**. First PATCH an inline `networkConfig` (works, about 3.5 min). Then PATCH `agentConnectivityTemplate,networkConfig` (works, about 3 min). There's no new gateway, no rebinding and no archived revisions.
+   - Bare gateway to template in one PATCH fails (code 13) and drops labels, so always include `labels` in the mask.
+   - Template swaps work (about 11 s).
+   - Blue/green stays as the fallback until the in-place PATCH has been tested on a gateway with bound engines (traffic interruption not yet measured).
+2. **Body formats:**
+   - the gateway's `agentConnectivityTemplate` reference uses the **project number** (an ID gives 400);
+   - the template's attachment and `dnsPeeringConfig.targetNetwork` use the **project ID**;
+   - the attachment must be in the gateway's region.
+3. **PSC-I (A8):**
+   - creating an engine with both `pscInterfaceConfig` and `agentGatewayConfig` is rejected;
+   - patching a gateway onto a PSC-I engine is accepted but breaks the engine's Google API access, so preflight must block it and audit reports it as a broken configuration;
+   - PSC-I with no gateway is an ungoverned path into the VPC (high severity).
+4. **Ingress:** private clients (PGA, PSC endpoint, narrow or full zone) do reach the ingress gateway, but **Model Armor enforcement was inconsistent per engine**: 50–70% blocked when bound, some blocked when unbound, slow to clear after unbinding. So:
+   - don't present ingress Model Armor as a guarantee;
+   - file product feedback;
+   - default to the narrow `REGION-aiplatform.googleapis.com.` zone (the only hostname that works for `streamQuery`).
+5. **Egress to private Cloud Run** through the `run.app` zone and a PSC endpoint for Google APIs works with Cloud Run ingress `internal`, and needs no load balancer. Proof of the private path is the gateway log's upstream `serverIp`.
+6. **Engine deploys** behind a gateway may need `GOOGLE_API_PREVENT_AGENT_TOKEN_SHARING_FOR_GCP_SERVICES=false` (401s on Google APIs without it; cause not isolated). Add it to the demo bootstrap and to the redeploy guidance.
+7. **VPC-SC:** the account has org-level Access Context Manager rights. Demo it in a dedicated project with a scoped access policy, dry run first. The API isn't enabled yet.
+8. **Demo cost:** without a load balancer, the standing cost is the VM, the PSC endpoint and the DNS zones.
+
 ## 12a. Decisions (user, 2026-10-15)
 
 1. **P0 live test** runs in the **same project, in a separate region** (not one of the demo's regions), with its own throwaway gateways and resources, torn down afterwards.
