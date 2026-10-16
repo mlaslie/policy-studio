@@ -37,6 +37,15 @@ Sources of truth (REST shapes, gcloud flags and Terraform resources verified liv
                    policy in place (~20 s operation), a flip takes effect about 2-3 minutes after Apply, and
                    Terraform plans an in-place update of the imported policy. Not verified: gcloud authz-policies
                    import updating an existing policy in place.
+  registry       Agent Registry entries (registry_service): POST https://agentregistry.googleapis.com/v1/projects/P/
+                   locations/R/services?serviceId=ID (long-running), DELETE .../services/ID (long-running); body
+                   {displayName, description, interfaces[{url, protocolBinding}], endpointSpec | mcpServerSpec}
+                   (checked against the v1 discovery document); gcloud agent-registry services create / delete
+                   (flags checked with --help: repeated --interfaces=protocolBinding=...,url=...,
+                   --endpoint-spec-type / --mcp-server-spec-type=no-spec); Terraform google_agent_registry_service
+                   (hashicorp/google >= 8.6.0, schema checked). A grant on an entry created in the same cart names it
+                   by the Service (destination.pending_service): its id (registryResource) is looked up after the
+                   create. Not verified live: the create through gcloud and Terraform.
   timing         every bundle and item ends with a comment saying how long its changes take to reach the gateway
                    (timing.py): stored isn't in effect.
 """
@@ -52,7 +61,9 @@ from . import hcl, timing
 from .conditions import EGRESSOR, compare_access_many, condition_for
 from .english import PROJECT_AGENTS_RE, engine_principal_parts, intent_english, member_label, modify_change
 from .gcp import model_armor as ma_mod
-from .model import (Anatomy, Bundle, Condition, Context, Intent, Outputs, RenderItem, RenderResult, SetupParams,
+from .gcp import registry as reg_mod
+from .model import (Anatomy, Bundle, Condition, Context, Intent, Outputs, RegistryInterfaceIn, RegistryService,
+                    RenderItem, RenderResult, SetupParams,
                     TemplateFilters)
 
 PROVIDER_VERSION = ">= 8.1.0"
@@ -66,13 +77,14 @@ TF_RESOURCE = {"agent": ("google_iap_agent_registry_agent_iam_member", "agent_id
                "endpoint": ("google_iap_agent_registry_endpoint_iam_member", "endpoint_id")}
 KIND_LABEL = {"agent": "A2A agent", "mcp_server": "MCP server", "endpoint": "API endpoint",
               "registry": "Agent Registry (every entry)"}
-# Bundle order: gateway bindings, Model Armor setup (template -> extension -> service agent roles), Model Armor
-# on/off, grants. Setup deletes (undo) run after Model Armor off, in reverse.
-ORDER = {"bind_gateway": 0, "unbind_gateway": 0, "model_armor_template": 1, "model_armor_extension": 2,
+# Bundle order: registry entries, gateway bindings, Model Armor setup (template -> extension -> service agent roles),
+# Model Armor on/off, grants. Setup deletes (undo) run after Model Armor off, in reverse; registry entry deletes last
+# (after the revokes of their grants).
+ORDER = {"registry_service": -1, "bind_gateway": 0, "unbind_gateway": 0, "model_armor_template": 1, "model_armor_extension": 2,
          "iam_project_grant": 3, "dedicate_extension": 4, "set_enforcement": 5, "model_armor_on": 7,
          "model_armor_off": 7, "grant": 8, "revoke": 8, "modify": 8}
 REVERT_ORDER = 6          # dedicate_extension revert: after set_enforcement (so a flip of the copy runs first)
-DELETE_ORDER = {"iam_project_grant": 9, "model_armor_extension": 10, "model_armor_template": 11}
+DELETE_ORDER = {"iam_project_grant": 9, "model_armor_extension": 10, "model_armor_template": 11, "registry_service": 12}
 PLACEHOLDER_EXT = "MODEL_ARMOR_EXTENSION"
 
 
@@ -89,6 +101,10 @@ class RenderEnv:
     known_extensions: Optional[list[str]] = None   # Model Armor extensions discovery found (None = not looked up)
     iap: Optional[dict[str, Any]] = None   # gateways.iap_index() + {"names": {gateway tail: name}} (None = not looked up)
     staged_copies: dict[str, str] = field(default_factory=dict)  # new IAP extension tail -> source (dedicate_extension)
+    registry: Optional[list[RegistryService]] = None   # the region's writable registry Services (None = not looked up)
+    registry_grants: dict[str, int] = field(default_factory=dict)   # Service name -> bindings on its entry today
+    registry_urls: dict[str, str] = field(default_factory=dict)     # normalized URL -> "Display name (id)" today
+    staged_services: dict[str, dict[str, Any]] = field(default_factory=dict)  # registry_service creates: id -> {kind, tools}
 
     @property
     def project(self) -> str:
@@ -191,6 +207,7 @@ class IamSpec:
     old_conditions: list[Optional[Condition]] = field(default_factory=list)
     new_conditions: list[Optional[Condition]] = field(default_factory=list)
     multi: bool = False                         # not one binding -> one binding
+    pending: str = ""                           # Service id of an entry a registry_service in this cart creates
 
 
 @dataclass
@@ -304,10 +321,21 @@ def iam_spec(intent: Intent, env: RenderEnv, warnings: list[str]) -> IamSpec:
             and not env.engines[s.engine].get("egress") and s.engine not in env.staged_egress:
         warnings.append(f"{s.label or short(s.engine)} isn't bound to an egress gateway, so this grant isn't enforced "
                         "until it is (stage a gateway binding).")
+    pending = (d.pending_service or "").strip() if d and kind != "registry" else ""
+    if pending:
+        rid = "ENTRY_ID"
+        staged = env.staged_services.get(pending)
+        if staged is None:
+            warnings.append(f"The entry {pending} isn't created by an item in this cart: stage “Register a new "
+                            "destination” with it, or pick an existing entry.")
+        elif acc and acc.mode in ("read_only_hint", "tools") and kind == "mcp_server" and not staged.get("tools"):
+            warnings.append(f"{pending} is registered without a tool list, so this tool condition has no tool "
+                            "attributes to match: only MCP setup calls (initialize, tools/list) get through. Add the "
+                            "tool list (tools/list) to the registration, or grant full access.")
     resource = f"projects/{env.gw_number}/locations/{env.region}/iap_web/agentRegistry"
     if kind != "registry":
         resource += f"/{COLLECTION[kind]}/{rid}"
-    return IamSpec(op={"grant": "add", "revoke": "remove"}.get(intent.kind, "modify"), kind=kind, rid=rid,
+    return IamSpec(pending=pending,op={"grant": "add", "revoke": "remove"}.get(intent.kind, "modify"), kind=kind, rid=rid,
                    member=member, role=EGRESSOR, condition=cond, resource=resource,
                    dest_label=(d.label or d.name or d.id or KIND_LABEL[kind]) if d else "the destination",
                    src_label=(s.label if s and s.label else member_label(member)), old_condition=old,
@@ -477,6 +505,11 @@ def with_staged(env: RenderEnv, intents: list[Intent]) -> RenderEnv:
             except Blocked:
                 continue
             copies[_tail(new)] = src
+    services = dict(env.staged_services)
+    for it in intents:
+        if it.kind == "registry_service" and it.params and not it.params.delete and it.params.service_id:
+            services[it.params.service_id.strip()] = {"kind": it.params.kind or "endpoint",
+                                                      "tools": bool(it.params.tool_spec)}
     for it in intents:
         if it.is_delete or not it.params:
             continue
@@ -489,7 +522,7 @@ def with_staged(env: RenderEnv, intents: list[Intent]) -> RenderEnv:
             n = f"projects/{project}/locations/{env.region}/templates/{short(it.params.template_id)}"
             if n not in tmpls:
                 tmpls.append(n)
-    return replace(env, staged_extensions=exts, staged_templates=tmpls, staged_copies=copies)
+    return replace(env, staged_extensions=exts, staged_templates=tmpls, staged_copies=copies, staged_services=services)
 
 
 # ====================================================================== anatomy
@@ -512,6 +545,10 @@ def iam_anatomy(sp: IamSpec) -> Anatomy:
              + "; IAP paths use the project number",
              f"role: {sp.role} = may send traffic to it through the egress gateway",
              _member_note(sp.member)]
+    if sp.pending:
+        notes.insert(1, f"entry: created by the registry_service item for {sp.pending} in this cart. Agent Registry "
+                        "assigns the entry's id (registryResource) when it projects the Service, so the commands look "
+                        "it up after the create, and Apply fills it in")
     if sp.condition:
         if "mcp.toolName', '') == ''" in sp.condition.expression or "''" in sp.condition.expression:
             notes.append("condition: the '' branch is there because MCP setup calls (initialize, tools/list) carry no "
@@ -561,8 +598,9 @@ def gcloud_iam(sp: IamSpec, env: RenderEnv) -> str:
     if sp.op == "modify":
         return gcloud_modify(sp, env)
     verb = "add-iam-policy-binding" if sp.op == "add" else "remove-iam-policy-binding"
+    rid = f'"${entry_var(sp.pending)}"' if sp.pending else sp.rid
     flags = [f"gcloud iap web {verb}", f"--project={env.gw_project}", "--resource-type=agent-registry",
-             f"--region={env.region}", *([f"{GCLOUD_FLAG[sp.kind]}={sp.rid}"] if sp.kind in GCLOUD_FLAG else []),
+             f"--region={env.region}", *([f"{GCLOUD_FLAG[sp.kind]}={rid}"] if sp.kind in GCLOUD_FLAG else []),
              f"--member={shq(sp.member)}",
              f"--role={sp.role}"]
     cf = _cond_flag(sp.condition)
@@ -573,6 +611,8 @@ def gcloud_iam(sp: IamSpec, env: RenderEnv) -> str:
                + json.dumps({"title": sp.condition.title, "expression": sp.condition.expression}, indent=2)
                + "\nEOF\n")
         cf = [f"--condition-from-file={fname}"]
+    if sp.pending:
+        pre = gcloud_entry_lookup(sp.pending, env) + pre
     return pre + cont(flags + cf)
 
 
@@ -685,14 +725,16 @@ def gcloud_modify(sp: IamSpec, env: RenderEnv) -> str:
         cont([f"gcloud iap web set-iam-policy {f}-new.json", *where])])
 
 
-def rest_iam(sp: IamSpec) -> str:
+def rest_iam(sp: IamSpec, env: Optional["RenderEnv"] = None) -> str:
     many = sp.op == "modify" and sp.multi
     verb = {"add": "add the binding", "remove": "remove the binding",
             "modify": ("remove every old binding" if not sp.new_conditions else "swap the old bindings for the new "
                        "one") if many else "swap the old binding for the new one"}[sp.op]
     filt = {"add": JQ_ADD, "remove": JQ_REMOVE,
             "modify": "{policy: (" + (JQ_MODIFY_MANY if many else JQ_MODIFY) + ")}"}[sp.op]
-    lines = [f"RESOURCE={shq('https://iap.googleapis.com/v1/' + sp.resource)}",
+    res_line = (f"RESOURCE={shq('https://iap.googleapis.com/v1/' + sp.resource)}" if not sp.pending else
+                rest_entry_lookup(sp.pending, sp.resource, env or RenderEnv(ctx=Context())))
+    lines = [res_line,
              *(_many_vars(sp) if many else _iam_vars(sp)),
              "",
              f"# Read-modify-write: get the policy (version 3 keeps conditions), "
@@ -836,9 +878,13 @@ def py_str(s: str) -> str:
     return json.dumps(s, ensure_ascii=False)
 
 
-def python_iam_call(sp: IamSpec) -> str:
+def python_iam_call(sp: IamSpec, env: Optional["RenderEnv"] = None) -> str:
     c = sp.condition
     args = [py_str(sp.resource), py_str(sp.member)]
+    if sp.pending and env is not None:
+        prefix = sp.resource.rsplit("/", 1)[0] + "/"
+        args[0] = (f"{py_str(prefix)} + registry_entry_id({py_str(env.gw_project)}, {py_str(env.region)}, "
+                   f"{py_str(sp.pending)})")
     if sp.op == "modify" and sp.multi:
         olds = "[" + ", ".join(py_str(o.expression) if o else "None" for o in sp.old_conditions) + "]"
         news = "[" + ", ".join(f"({py_str(n.title)}, {py_str(n.expression)})" if n else "(None, None)"
@@ -864,7 +910,9 @@ def _tf_member(sp: IamSpec, env: RenderEnv, name: str, bundle: bool, cond: Optio
     b = hcl.Block(f'resource "{rtype}" "{name}"')
     b.attr("project", "local.gateway_project" if bundle else hcl.q(env.gw_project))
     b.attr("location", "var.region" if bundle else hcl.q(env.region))
-    if key:
+    if key and sp.pending:
+        b.attr(key, f"basename(google_agent_registry_service.{reg_tf_name(sp.pending)}.registry_resource)")
+    elif key:
         b.s(key, sp.rid)
     b.s("role", sp.role)
     b.s("member", sp.member)
@@ -906,6 +954,11 @@ def tf_iam(sp: IamSpec, env: RenderEnv, name: str, bundle: bool) -> str:
             "the condition there instead. If the grant was made outside Terraform, use the gcloud, REST or Python tab "
             "(one read-modify-write).") + "#\n# Today:\n" + hcl.commented(old) + "\n" + new)
     text = _tf_member(sp, env, name, bundle, sp.condition).render()
+    if sp.op == "add" and sp.pending:
+        return hcl.comment_lines(
+            f"The entry is the google_agent_registry_service {reg_tf_name(sp.pending)} block (registry_service item "
+            "in this cart); its id is the last segment of registry_resource, which the registry fills in shortly after "
+            "the create. If the plan shows it unknown or empty, run `terraform apply` again.") + text
     if sp.op == "add":
         return text
     return (hcl.comment_lines(
@@ -2082,6 +2135,297 @@ def tf_ded(sp: DedSpec, env: RenderEnv, name: str, bundle: bool, final: Optional
             + _tf_import(f"google_network_security_authz_policy.{pol_name}", sp.policy) + "\n" + pb.render())
 
 
+# ====================================================================== Agent Registry entries (registry_service)
+AGENTREGISTRY_V1 = "https://agentregistry.googleapis.com/v1"
+TF_REGISTRY_VERSION = ">= 8.6.0"       # google_agent_registry_service (schema checked in hashicorp/google 8.6.0)
+REG_LABEL = {"endpoint": "API endpoint", "mcp_server": "MCP server", "agent": "A2A agent"}
+GCLOUD_BINDING = {"JSONRPC": "jsonrpc", "GRPC": "grpc", "HTTP_JSON": "http-json"}
+A2A_OUT_OF_SCOPE = ("A2A agents can't be registered here: Agent Registry registers them from their agent card "
+                    "(agentSpec A2A_AGENT_CARD, with no interfaces), not from URLs. Publish the agent with its card "
+                    "(agents-cli publish, or gcloud agent-registry services create --agent-spec-type=a2a-agent-card).")
+GRANTS_LOST = ("IAP grants live on the entry: deleting it deletes them, and re-creating it (undo) gives a new, empty "
+               "entry, so they don't come back")
+
+
+@dataclass
+class RegSpec:
+    op: str                        # create | delete
+    project: str
+    region: str
+    service_id: str
+    name: str                      # projects/P/locations/R/services/ID
+    kind: str                      # endpoint | mcp_server
+    display_name: str
+    description: str
+    interfaces: list[dict[str, str]]   # [{url, protocol_binding}]
+    body: dict[str, Any]           # the create body (delete: what an undo re-creates)
+    existing: Optional[RegistryService] = None
+    grants: Optional[int] = None   # delete: bindings on the entry today (None = unknown)
+    tool_spec: Optional[dict[str, Any]] = None
+
+
+def reg_tf_name(service_id: str) -> str:
+    return hcl.ident(f"registry_{service_id}")
+
+
+def entry_var(service_id: str) -> str:
+    """Shell variable holding the entry id of a Service created in this cart."""
+    return "ENTRY_" + re.sub(r"[^A-Za-z0-9]", "_", service_id).upper()
+
+
+def find_service(env: RenderEnv, service_id: str) -> Optional[RegistryService]:
+    return next((x for x in env.registry or [] if x.id == service_id), None)
+
+
+def reg_spec(intent: Intent, env: RenderEnv, warnings: list[str]) -> RegSpec:
+    p = intent.params or SetupParams()
+    project = setup_project(p, env)
+    sid = (p.service_id or "").strip()
+    existing = find_service(env, sid) if sid else None
+    kind = (p.kind or (existing.kind if existing else "") or "").strip()
+    if kind == "agent":
+        raise Blocked(A2A_OUT_OF_SCOPE)
+    if kind not in ("endpoint", "mcp_server"):
+        if kind:
+            raise Blocked(f"Unknown registry kind {kind!r}: use endpoint (an API) or mcp_server.")
+        warnings.append("No kind: pick API endpoint or MCP server.")
+        kind = "endpoint"
+    if not sid:
+        warnings.append("No service id: enter an id for the registry entry.")
+        sid = "SERVICE_ID"
+    elif not reg_mod.SERVICE_ID_RE.match(sid):
+        warnings.append(f"Service id {sid!r} should be 4–63 lowercase letters, digits and hyphens, starting with a "
+                        "letter and not ending with a hyphen.")
+    ifs = [{"url": (i.url or "").strip(), "protocol_binding": (i.protocol_binding or "").strip().upper()
+            or reg_mod.DEFAULT_BINDING[kind]} for i in p.interfaces or [] if (i.url or "").strip()]
+    display = (p.display_name or "").strip()
+    description = (p.description or "").strip()
+    tool_spec = p.tool_spec
+    if p.delete and existing is not None:
+        # an undo re-creates exactly what is there now
+        ifs = [{"url": i.url, "protocol_binding": i.protocol_binding} for i in existing.interfaces]
+        display, description = existing.display_name, existing.description
+        tool_spec = existing.tool_spec
+    if not p.delete:
+        if not ifs:
+            warnings.append("No URL: add at least one URL the agents call.")
+        for i in ifs:
+            prob = reg_mod.url_problem(i["url"])
+            if prob:
+                warnings.append(prob[:1].upper() + prob[1:] + ".")
+            if i["protocol_binding"] not in reg_mod.BINDINGS:
+                warnings.append(f"Protocol {i['protocol_binding']!r} for {i['url']} isn't one of "
+                                f"{', '.join(reg_mod.BINDINGS)}.")
+        hint = reg_mod.run_app_hint([i["url"] for i in ifs])
+        if hint:
+            warnings.append(hint)
+        if len(display) > 63:
+            warnings.append("The display name is cut to 63 characters (the registry's limit).")
+        if tool_spec and len(json.dumps(tool_spec)) > reg_mod.TOOL_SPEC_MAX:
+            warnings.append("The tool list is over the registry's 10 KB limit for a tool spec.")
+    if not reg_mod.SINGLE_REGION_RE.match(env.region):
+        warnings.append(f"{env.region} isn't a single region: Agent Gateway uses the registry of its own region "
+                        "(us-east4, europe-west4, ...), not us / eu / global.")
+    if p.delete:
+        warnings.append(f"Deleting the entry: {GRANTS_LOST}.")
+    body = reg_mod.service_body(kind, display or sid, ifs, description, tool_spec if kind == "mcp_server" else None)
+    grants = env.registry_grants.get(existing.name) if existing else None
+    return RegSpec(op="delete" if p.delete else "create", project=project, region=env.region, service_id=sid,
+                   name=f"projects/{project}/locations/{env.region}/services/{sid}", kind=kind,
+                   display_name=display or sid, description=description, interfaces=ifs, body=body,
+                   existing=existing, grants=grants, tool_spec=tool_spec if kind == "mcp_server" else None)
+
+
+def reg_url(sp: RegSpec, with_id: bool) -> str:
+    base = f"{AGENTREGISTRY_V1}/projects/{sp.project}/locations/{sp.region}/services"
+    return f"{base}?serviceId={sp.service_id}" if with_id else f"{base}/{sp.service_id}"
+
+
+def reg_english(sp: RegSpec, intent: Intent) -> str:
+    """intent_english, with what the spec filled in (a delete names the entry as it is today)."""
+    params = (intent.params or SetupParams()).model_copy(update={
+        "kind": sp.kind, "display_name": sp.display_name, "service_id": sp.service_id,
+        "interfaces": [RegistryInterfaceIn(url=i["url"], protocol_binding=i["protocol_binding"])
+                       for i in sp.interfaces]})
+    return intent_english(intent.model_copy(update={"params": params}))
+
+
+def reg_anatomy(sp: RegSpec) -> Anatomy:
+    spec_key = reg_mod.SPEC_KEY[sp.kind]
+    if sp.op == "delete":
+        notes = ["delete: removes the Service and the entry it projects (a long-running operation)",
+                 GRANTS_LOST + (f" ({sp.grants} today)" if sp.grants else ""),
+                 "agents bound to an egress gateway can no longer call these URLs: the gateway only lets calls to "
+                 "registered destinations through",
+                 "undo re-creates the Service with the same body (read just before the delete), as a new entry"]
+        return Anatomy(resource=sp.name, role=f"Agent Registry {REG_LABEL[sp.kind]}",
+                       member=", ".join(i["url"] for i in sp.interfaces) or "(deleted)", notes=notes)
+    notes = ["resource: a writable Agent Registry Service; the registry projects it into a read-only "
+             f"{REG_LABEL[sp.kind]} entry with its own id (registryResource), which IAP grants are set on",
+             "interfaces: every URL agents call; the gateway matches hostnames exactly, so each form of a URL (both "
+             "run.app forms, a regional host, ...) is its own interface",
+             f"{spec_key}: " + ("TOOL_SPEC: the tools/list response, so tool conditions (read-only, specific tools) "
+                                "can match" if sp.tool_spec else
+                                "NO_SPEC" + (": no tool list, so tool conditions have no tool attributes to match "
+                                             "(grant full access, or add the tool list)" if sp.kind == "mcp_server"
+                                             else "")),
+             "registering isn't authorization: agents still need a roles/iap.egressor grant on the entry",
+             "a long-running operation (seconds)"]
+    return Anatomy(resource=sp.name, role=f"Agent Registry {REG_LABEL[sp.kind]}",
+                   member=", ".join(f"{i['url']} ({i['protocol_binding']})" for i in sp.interfaces) or "(no URL)",
+                   notes=notes)
+
+
+def gcloud_reg(sp: RegSpec) -> str:
+    where = [f"--project={sp.project}", f"--location={sp.region}"]
+    if sp.op == "delete":
+        return ("# " + GRANTS_LOST + ".\n"
+                + cont([f"gcloud agent-registry services delete {sp.service_id}", *where, "--quiet"]))
+    flags = [f"gcloud agent-registry services create {sp.service_id}", *where,
+             f"--display-name={shq(sp.body['displayName'])}"]
+    if sp.body.get("description"):
+        flags.append(f"--description={shq(sp.body['description'])}")
+    pre = ""
+    if sp.kind == "mcp_server" and sp.tool_spec:
+        pre = sh_assign("TOOLS", json.dumps(sp.tool_spec, separators=(",", ":"), ensure_ascii=False)) + "\n"
+        flags += ["--mcp-server-spec-type=tool-spec", '--mcp-server-spec-content="$TOOLS"']
+    elif sp.kind == "mcp_server":
+        flags.append("--mcp-server-spec-type=no-spec")
+    else:
+        flags.append("--endpoint-spec-type=no-spec")
+    for i in sp.body["interfaces"]:
+        binding = GCLOUD_BINDING.get(i["protocolBinding"], i["protocolBinding"].lower())
+        if "," in i["url"] or "=" in i["url"]:
+            flags.append("--interfaces=" + shq(json.dumps([{"protocolBinding": i["protocolBinding"], "url": i["url"]}],
+                                                         separators=(",", ":"))))
+        else:
+            flags.append("--interfaces=" + shq(f"protocolBinding={binding},url={i['url']}"))
+    return ("# Flags checked with `gcloud agent-registry services create --help`; waits for the operation (add --async\n"
+            "# not to). One --interfaces per URL. The REST tab sends the same body.\n" + pre + cont(flags))
+
+
+def _lookup_loop(var: str, cmd: str) -> str:
+    """Poll until the entry id is there: registryResource is filled a few seconds after the create."""
+    return (f"for _ in $(seq 1 40); do\n  {var}=\"$({cmd})\"\n  [ -n \"${var}\" ] && break\n  sleep 3\ndone\n"
+            f'[ -n "${var}" ] || {{ echo "no registryResource yet: run this again" >&2; exit 1; }}\n')
+
+
+def gcloud_entry_lookup(service_id: str, env: RenderEnv) -> str:
+    cmd = (f"gcloud agent-registry services describe {service_id} --project={env.gw_project} "
+           f"--location={env.region} --format='value(registryResource.basename())'")
+    return (f"# The entry's id is assigned by Agent Registry when {service_id} is created: look it up (it can take a\n"
+            "# few seconds after the create).\n" + _lookup_loop(entry_var(service_id), cmd))
+
+
+def rest_entry_lookup(service_id: str, resource: str, env: RenderEnv) -> str:
+    var = entry_var(service_id)
+    svc = f"{AGENTREGISTRY_V1}/projects/{env.gw_project}/locations/{env.region}/services/{service_id}"
+    prefix = "https://iap.googleapis.com/v1/" + resource.rsplit("/", 1)[0]
+    cmd = (f'curl -sS --fail-with-body {shq(svc)} -H "Authorization: Bearer $TOKEN" '
+           "| jq -r '(.registryResource // \"\") | split(\"/\") | last // \"\"'")
+    return (f"# The entry's id is assigned by Agent Registry when {service_id} is created: look it up (it can take a\n"
+            "# few seconds after the create).\n" + _lookup_loop(var, cmd) + f'RESOURCE="{prefix}/${{{var}}}"')
+
+
+def rest_reg(sp: RegSpec) -> str:
+    if sp.op == "delete":
+        return "# Long-running operation. " + GRANTS_LOST + ".\n" + curl("DELETE", reg_url(sp, False))
+    return ("# Long-running operation: poll the returned operation name. registryResource (the entry IAP grants use)\n"
+            "# is filled shortly after; GET the service to read it.\n"
+            + curl("POST", reg_url(sp, True), body=json.dumps(sp.body, separators=(",", ":"), ensure_ascii=False)))
+
+
+PY_REGISTRY_HELPERS = """import time
+
+import google.auth
+from google.auth.transport.requests import AuthorizedSession
+
+# Agent Registry Services over REST: create and delete are long-running operations.
+AGENTREGISTRY = "https://agentregistry.googleapis.com/v1"
+session = AuthorizedSession(google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])[0])
+
+
+def _wait(op, timeout=300):
+    while not op.get("done"):
+        time.sleep(3)
+        timeout -= 3
+        if timeout <= 0:
+            raise TimeoutError(f"still running: {op.get('name')}")
+        r = session.get(f"{AGENTREGISTRY}/{op['name']}")
+        r.raise_for_status()
+        op = r.json()
+    if op.get("error"):
+        raise RuntimeError(op["error"])
+    return op
+
+
+def create_registry_service(project, region, service_id, body):
+    \"\"\"Create an Agent Registry Service and wait for it. Returns the Service, with registryResource (the entry IAP
+    grants are set on) once the registry has projected it.\"\"\"
+    services = f"{AGENTREGISTRY}/projects/{project}/locations/{region}/services"
+    r = session.post(services, params={"serviceId": service_id}, json=body)
+    r.raise_for_status()
+    _wait(r.json())
+    for _ in range(40):          # registryResource is filled shortly after the create
+        svc = session.get(f"{services}/{service_id}").json()
+        if svc.get("registryResource"):
+            break
+        time.sleep(3)
+    print("created", svc.get("name"), "->", svc.get("registryResource"))
+    return svc
+
+
+def delete_registry_service(project, region, service_id):
+    \"\"\"Delete a Service and the entry it projects (its IAP grants go with it).\"\"\"
+    r = session.delete(f"{AGENTREGISTRY}/projects/{project}/locations/{region}/services/{service_id}")
+    r.raise_for_status()
+    _wait(r.json())
+    print("deleted", service_id)
+
+
+def registry_entry_id(project, region, service_id):
+    \"\"\"The id IAP grants use: the projected entry's, not the Service's.\"\"\"
+    r = session.get(f"{AGENTREGISTRY}/projects/{project}/locations/{region}/services/{service_id}")
+    r.raise_for_status()
+    return r.json()["registryResource"].rsplit("/", 1)[-1]
+"""
+
+
+def python_reg_call(sp: RegSpec) -> str:
+    if sp.op == "delete":
+        return f"delete_registry_service({py_str(sp.project)}, {py_str(sp.region)}, {py_str(sp.service_id)})"
+    return (f"create_registry_service(\n    {py_str(sp.project)},\n    {py_str(sp.region)},\n    "
+            f"{py_str(sp.service_id)},\n    {py_obj(sp.body, 1)},\n)")
+
+
+def tf_reg(sp: RegSpec, env: RenderEnv, name: str, bundle: bool) -> str:
+    b = hcl.Block(f'resource "google_agent_registry_service" "{name}"')
+    _tf_where(b, sp.project, env, bundle)
+    b.s("service_id", sp.service_id)
+    b.s("display_name", sp.body["displayName"])
+    if sp.body.get("description"):
+        b.s("description", sp.body["description"])
+    b.blank()
+    if sp.kind == "mcp_server":
+        mb = b.block("mcp_server_spec")
+        mb.s("type", "TOOL_SPEC" if sp.tool_spec else "NO_SPEC")
+        if sp.tool_spec:
+            mb.attr("content", "jsonencode(" + hcl.obj(sp.tool_spec, 2) + ")")
+    else:
+        b.block("endpoint_spec").s("type", "NO_SPEC")
+    for i in sp.body["interfaces"]:
+        ib = b.block("interfaces")
+        ib.s("url", i["url"])
+        ib.s("protocol_binding", i["protocolBinding"])
+    text = b.render()
+    if sp.op == "create":
+        return hcl.comment_lines(f"google_agent_registry_service needs hashicorp/google {TF_REGISTRY_VERSION} (schema "
+                                 "checked against 8.6.0; the bundle's required_providers asks for it).") + text
+    return (hcl.comment_lines(
+        "Delete the entry: remove its google_agent_registry_service block and run `terraform apply`. If it was "
+        f"created outside Terraform, use the gcloud, REST or Python tab. {GRANTS_LOST}.") + "#\n" + hcl.commented(text))
+
+
 # ====================================================================== per intent
 @dataclass
 class _Rendered:
@@ -2111,6 +2455,8 @@ def _tf_name(intent: Intent, spec: Any) -> str:
         base = f"iap_{spec.ext_id}"
     elif isinstance(spec, DedSpec):
         base = f"{'revert' if spec.op == 'revert' else 'dedicated'}_{spec.new_id}"
+    elif isinstance(spec, RegSpec):
+        return reg_tf_name(spec.service_id)
     else:
         base = f"model_armor_{short(spec.gateway)}"
     return hcl.ident(base)
@@ -2153,8 +2499,10 @@ def render_one(intent: Intent, env: RenderEnv, tf_name: Optional[str] = None) ->
         sp: Any = iam_spec(intent, env, warnings)
         name = tf_name or _tf_name(intent, sp)
         extra = (PY_MODIFY_MANY_HELPER if intent.multi else PY_MODIFY_HELPER) if k == "modify" else ""
+        if sp.pending:
+            extra = PY_REGISTRY_HELPERS            # registry_entry_id()
         r = _assemble(intent.id, k, intent_english(intent), iam_anatomy(sp), sp, gcloud_iam(sp, env),
-                      rest_iam(sp), PY_IAP_HELPERS + ("\n\n" + extra if extra else ""), python_iam_call(sp),
+                      rest_iam(sp, env), PY_IAP_HELPERS + ("\n\n" + extra if extra else ""), python_iam_call(sp, env),
                       tf_iam(sp, env, name, bundle=False), name, warnings)
         return replace(r, py_helpers=PY_IAP_HELPERS, py_extra=extra)
     if k in ("bind_gateway", "unbind_gateway"):
@@ -2178,6 +2526,11 @@ def render_one(intent: Intent, env: RenderEnv, tf_name: Optional[str] = None) ->
         return _assemble(intent.id, k, intent_english(intent), proj_iam_anatomy(sp), sp, gcloud_proj_iam(sp),
                          rest_proj_iam(sp), PY_PROJECT_IAM_HELPERS, python_proj_iam_call(sp),
                          tf_proj_iam(sp, env, name, bundle=False), name, warnings)
+    if k == "registry_service":
+        sp = reg_spec(intent, env, warnings)
+        name = tf_name or _tf_name(intent, sp)
+        return _assemble(intent.id, k, reg_english(sp, intent), reg_anatomy(sp), sp, gcloud_reg(sp), rest_reg(sp),
+                         PY_REGISTRY_HELPERS, python_reg_call(sp), tf_reg(sp, env, name, bundle=False), name, warnings)
     if k == "set_enforcement":
         sp = enf_spec(intent, env, warnings)
         name = tf_name or _tf_name(intent, sp)
@@ -2237,8 +2590,9 @@ def _main_tf(env: RenderEnv, rendered: list[_Rendered]) -> str:
     tf = hcl.Block("terraform")
     tf.s("required_version", TF_VERSION)
     tf.blank()
-    tf.block("required_providers").attr("google", hcl.obj({"source": "hashicorp/google",
-                                                           "version": PROVIDER_VERSION}, 2))
+    version = TF_REGISTRY_VERSION if any(isinstance(r.spec, RegSpec) and r.spec.op == "create" for r in rendered) \
+        else PROVIDER_VERSION
+    tf.block("required_providers").attr("google", hcl.obj({"source": "hashicorp/google", "version": version}, 2))
     out += [tf.render(), "\n"]
     prov = hcl.Block('provider "google"')
     prov.attr("project", "var.project_id").attr("region", "var.region")
@@ -2268,7 +2622,9 @@ def _main_tf(env: RenderEnv, rendered: list[_Rendered]) -> str:
             out.append(tf_ded(r.spec, env, r.tf_name, bundle=True, final=final_mode.get(_tail(r.spec.new_ext))
                               if r.spec.op == "dedicate" else None))
             continue
-        if isinstance(r.spec, IamSpec):
+        if isinstance(r.spec, RegSpec):
+            out.append(tf_reg(r.spec, env, r.tf_name, bundle=True))
+        elif isinstance(r.spec, IamSpec):
             out.append(tf_iam(r.spec, env, r.tf_name, bundle=True))
         elif isinstance(r.spec, BindSpec):
             out.append(tf_bind(r.spec, env, r.tf_name, bundle=True))
@@ -2291,8 +2647,9 @@ def _shell_header(env: RenderEnv, what: str) -> str:
     return ("#!/usr/bin/env bash\n"
             f"# {what} generated by Policy Studio for project {env.project} ({env.number}), region {env.region}"
             + (f", gateway project {env.gw_project}" if env.gw_project != env.project else "") + ".\n"
-            "# Review before running. Order: gateway bindings, Model Armor setup (template, extension, service\n"
-            "# agent roles), dedicated IAP extensions, enforcement mode, Model Armor on/off, then grants.\n"
+            "# Review before running. Order: registry entries, gateway bindings, Model Armor setup (template,\n"
+            "# extension, service agent roles), dedicated IAP extensions, enforcement mode, Model Armor on/off, then\n"
+            "# grants; deletes of registry entries last.\n"
             "set -euo pipefail\n")
 
 

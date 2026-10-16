@@ -178,6 +178,12 @@ def build_env(ctx: Context, intents: list[Intent], notes: Optional[list[str]] = 
                         it.gateway.policy = ma.name.rsplit("/", 1)[-1]
         except Exception as e:  # noqa: BLE001
             notes.append(f"Model Armor lookup failed: {err_text(e)}")
+    if "registry_service" in kinds or any(i.destination and i.destination.pending_service for i in intents):
+        try:
+            st = service.registry_state(service.inventory_view(ctx))
+            env.registry, env.registry_grants, env.registry_urls = st["services"], st["grants"], st["urls"]
+        except Exception as e:  # noqa: BLE001  (preflight then can't check duplicates; apply re-reads the Service)
+            notes.append(f"registry lookup failed: {err_text(e)}")
     if kinds & set(ENFORCEMENT_KINDS):
         try:
             raw = service.gateway_raw(ctx)

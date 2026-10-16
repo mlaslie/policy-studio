@@ -130,6 +130,23 @@ def _short(name: str) -> str:
     return (name or "").rstrip("/").split("/")[-1]
 
 
+REGISTRY_KIND = {"endpoint": "API endpoint", "mcp_server": "MCP server", "agent": "A2A agent"}
+
+
+def registry_english(intent: Intent) -> str:
+    p = intent.params
+    kind = REGISTRY_KIND.get((p.kind if p else None) or "", "entry")
+    sid = ((p.service_id if p else "") or "").strip() or "SERVICE_ID"
+    name = ((p.display_name if p else "") or "").strip() or sid
+    urls = [i.url for i in (p.interfaces if p else None) or [] if i.url]
+    if p and p.delete:
+        return (f"Delete the Agent Registry {kind} {name} ({sid}): agents can no longer reach "
+                + ("its URL" if len(urls) == 1 else "its URLs") + " through the gateway, and the IAP grants on it are "
+                "removed with it.")
+    where = (urls[0] if len(urls) == 1 else f"{len(urls)} URLs: {', '.join(urls)}") if urls else "no URL yet"
+    return f"Register {kind} {name} ({sid}) in Agent Registry, at {where}."
+
+
 def intent_english(intent: Intent) -> str:
     k = intent.kind
     if k in ("grant", "revoke"):
@@ -182,6 +199,8 @@ def intent_english(intent: Intent) -> str:
         return f"Give gateway {g} its own IAP extension {new}."
     p = intent.params
     delete = bool(p and p.delete)
+    if k == "registry_service":
+        return registry_english(intent)
     if k == "model_armor_template":
         tid = _short((p.template_id if p else "") or "") or "TEMPLATE_ID"
         return (f"Delete Model Armor template {tid}." if delete else

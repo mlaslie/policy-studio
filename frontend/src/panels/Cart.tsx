@@ -25,6 +25,7 @@ const TONE: Record<Intent["kind"], string> = {
   iam_project_grant: "purple",
   set_enforcement: "amber",
   dedicate_extension: "blue",
+  registry_service: "blue",
 };
 
 const FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]), [tabindex]:not([tabindex="-1"])';

@@ -43,13 +43,17 @@ WRITE_PERMISSIONS: dict[str, tuple[list[str], bool, str, str]] = {
     "set_enforcement": (["networkservices.authzExtensions.update"], False, "both", "roles/networkservices.admin"),
     "dedicate_extension": (["networkservices.authzExtensions.create", "networksecurity.authzPolicies.update"], False,
                            "both", "roles/networkservices.admin roles/networksecurity.editor"),
+    # create and delete: an undo of either is the other
+    "registry_service": (["agentregistry.services.create", "agentregistry.services.delete"], False, "gateway",
+                         "roles/agentregistry.editor"),
 }
 KIND_LABEL = {"grant": "grants", "revoke": "revokes", "modify": "grant changes", "bind_gateway": "gateway binds",
               "unbind_gateway": "gateway unbinds", "model_armor_on": "Model Armor on",
               "model_armor_off": "Model Armor off", "model_armor_template": "Model Armor templates",
               "model_armor_extension": "Model Armor extensions",
               "iam_project_grant": "service agent role grants",
-              "set_enforcement": "enforcement mode changes", "dedicate_extension": "dedicated IAP extensions"}
+              "set_enforcement": "enforcement mode changes", "dedicate_extension": "dedicated IAP extensions",
+              "registry_service": "Agent Registry entries"}
 
 
 # ------------------------------------------------------------------ machine-facing pieces (replaced in tests)
@@ -328,7 +332,7 @@ def report(target: str, *, mode: str, runtime: str, generate_reason: str, gatewa
                                  role_fix))
         else:
             checks.append(_check("can_write", "ok", "Can apply every kind of change",
-                                 "Grants, revokes, gateway binds, Model Armor and its setup, enforcement mode."))
+                                 "Grants, revokes, gateway binds, Model Armor and its setup, enforcement mode, registry entries."))
 
     errors = [c for c in checks if c["status"] == "error"]
     can_apply = mode == "apply" and not errors

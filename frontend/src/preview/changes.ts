@@ -24,7 +24,7 @@ export interface ChangeRow {
   change: "added" | "removed" | "same" | "unknown";
 }
 export interface PreviewWarning {
-  id: "widen" | "remove_all" | "inherited" | "hint" | "hint_new" | "no_gateway" | "unknown";
+  id: "widen" | "remove_all" | "inherited" | "hint" | "hint_new" | "no_gateway" | "unknown" | "new_entry" | "no_tools";
   tone: "red" | "amber" | "info";
   text: string;
 }
@@ -53,6 +53,8 @@ export interface PreviewInput {
   engine?: Engine;
   /** The cart: a gateway bind staged there counts (the no-gateway warning then says so). */
   cart?: Intent[];
+  /** Staged with the change: a registry_service create of the destination it grants on (destination.pending_service). */
+  extras?: Intent[];
 }
 
 const norm = (e: string | undefined | null) => (e ?? "").replace(/\s+/g, " ").trim();
@@ -84,14 +86,16 @@ function stateOf(ex: Existing, tool: string | null, tools: Record<string, boolea
   return { state, by: [...all, ...new Set(maybe)], ownBy };
 }
 
-export function previewModel({ intent, inv, engine, cart = [] }: PreviewInput): PreviewModel {
+export function previewModel({ intent, inv, engine, cart = [], extras = [] }: PreviewInput): PreviewModel {
   const dest = intent.destination!;
   const who = intent.source?.label ?? "The agent";
   const principal = intent.source?.principal;
   const before = existingFor(inv, principal, dest.name);
-  const afterInv = simulate({ inventory: inv, gateways: [] }, [intent]).inventory;
+  const regs = extras.filter((x) => x.kind === "registry_service" && !x.params?.delete);
+  const afterInv = simulate({ inventory: inv, gateways: [] }, [...regs, intent]).inventory;
   const after = existingFor(afterInv, principal, dest.name);
-  const mcp = dest.kind === "mcp_server" ? inv.mcp_servers.find((m) => m.name === dest.name) : undefined;
+  // a new entry (registered with this change) is only in the after state
+  const mcp = dest.kind === "mcp_server" ? (inv.mcp_servers.find((m) => m.name === dest.name) ?? afterInv.mcp_servers.find((m) => m.name === dest.name)) : undefined;
   const toolMap = mcp ? Object.fromEntries(mcp.tools.map((t) => [t.name, t.read_only])) : null;
 
   const row = (name: string, tool: string | null, readOnly?: boolean): ChangeRow => {
@@ -136,6 +140,13 @@ export function previewModel({ intent, inv, engine, cart = [] }: PreviewInput): 
         ? `${engine.display_name} isn't behind an egress gateway yet (a bind is in your cart): until it is, nothing is enforced.`
         : `${engine.display_name} isn't behind an egress gateway: its calls go straight out and nothing is enforced, so this change has no effect until it's bound.`,
     });
+  }
+  if (dest.pending_service) {
+    const reg = regs.find((x) => x.params?.service_id === dest.pending_service);
+    const n = reg?.params?.interfaces?.length ?? 0;
+    warnings.push({ id: "new_entry", tone: "info", text: `${dest.label} is registered with this change (${n} URL${n === 1 ? "" : "s"}), then granted: Apply registers it first and grants on the id the registry gives it.` });
+    if (mcp && !mcp.tools.length && intent.access && intent.access.mode !== "all")
+      warnings.push({ id: "no_tools", tone: "amber", text: `${dest.label} is registered without a tool list, so this tool condition only lets MCP setup calls through. Grant full access, or add the tools/list response to the registration.` });
   }
   if (rows.some((r) => r.today === "unknown" || r.after === "unknown"))
     warnings.push({ id: "unknown", tone: "info", text: "A custom or group condition can't be evaluated here: those rows show “can't tell”." });

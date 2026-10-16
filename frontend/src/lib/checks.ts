@@ -41,7 +41,8 @@ export function checksFor(intent: Intent | null, { inv, cart, engineByName, engi
     }
   }
   const all = [...inv.agents.map((a) => a.name), ...inv.mcp_servers.map((m) => m.name), ...inv.endpoints.map((x) => x.name)];
-  if (dest.kind !== "registry" && !all.includes(dest.name)) out.push({ id: "unreg", tone: "amber", text: `${dest.label} isn't in the Agent Registry for this region. The gateway can't route to unregistered destinations; register it first.` });
+  // (a destination registered with this change isn't in the registry yet: its create is staged with it)
+  if (dest.kind !== "registry" && !dest.pending_service && !all.includes(dest.name)) out.push({ id: "unreg", tone: "amber", text: `${dest.label} isn't in the Agent Registry for this region. The gateway can't route to unregistered destinations; register it first.` });
 
   const current: Binding[] = inv.access[dest.name] ?? [];
   const cond = conditionFor(intent.access);

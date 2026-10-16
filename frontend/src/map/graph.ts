@@ -123,7 +123,7 @@ export interface PNode {
   hiddenLines?: number;
   /** Staged-change view (diff.ts): what the cart changes on this node, and the cart intents that do it. */
   /** shield: Model Armor turned on or off by the cart (drawn as a pending shield on the gateway). */
-  pending?: { text: string[]; removed?: boolean; intents: string[]; shield?: { to: "on" | "off"; template?: string } };
+  pending?: { text: string[]; removed?: boolean; added?: boolean; intents: string[]; shield?: { to: "on" | "off"; template?: string } };
 }
 
 export interface PEdge {

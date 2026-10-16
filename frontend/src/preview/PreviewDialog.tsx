@@ -13,7 +13,7 @@ import { useStudio } from "../store";
 import { CheckIcon, CloseIcon, CloudIcon, PencilIcon, ServerIcon, WarnIcon } from "../components/Icons";
 import { ToolKindIcon, ToolStateLabel } from "../components/ToolMarks";
 import { Badge } from "../components/ui";
-import { accessFromCondition, accessWords, conditionFor } from "../lib/policy";
+import { accessFromCondition, accessWords, conditionFor, intentEnglish } from "../lib/policy";
 import { buildPolicyGraph } from "../map/graph";
 import { simulate } from "../map/simulate";
 import { diffGraphs, mergeStaged } from "../map/diff";
@@ -28,6 +28,7 @@ import { TimingNote } from "../components/Timing";
 
 const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
+const NO_EXTRAS: Intent[] = [];
 const STATE_LABEL: Record<ToolState, string> = { allowed: "Allowed", denied: "Denied", unknown: "Can't tell" };
 
 /** An MCP server card for the preview: each tool today → after (the map's card shows one state). */
@@ -76,23 +77,25 @@ const PreviewMcpNode = memo(({ data }: NodeProps<MNode>) => {
 });
 const previewNodeTypes = { ...nodeTypes, previewMcp: PreviewMcpNode };
 
-function PreviewMap({ intent, model }: { intent: Intent; model: PreviewModel }) {
+function PreviewMap({ intent, model, extras }: { intent: Intent; model: PreviewModel; extras: Intent[] }) {
   const { inventory, gateways, modelArmor, ctxInfo, ctx } = useStudio();
   const inv = inventory.data!;
   const gws = gateways.data?.gateways ?? [];
   const flow = useMemo(() => {
     const input = { context: ctxInfo.data, ctx, direction: "egress" as const, inherited: true };
     const base = buildPolicyGraph({ inventory: inv, gateways: gws, modelArmor: modelArmor.data, ...input });
-    const sim = simulate({ inventory: inv, gateways: gws, modelArmor: modelArmor.data }, [intent]);
+    // a registry entry staged with the change is drawn as a pending destination
+    const staged = [...extras.filter((x) => x.kind === "registry_service" && !x.params?.delete), intent];
+    const sim = simulate({ inventory: inv, gateways: gws, modelArmor: modelArmor.data }, staged);
     const after = buildPolicyGraph({ inventory: sim.inventory, gateways: sim.gateways, modelArmor: sim.modelArmor, ...input });
-    const merged = mergeStaged(base, after, diffGraphs(base, after), [intent], inv, sim.effects);
+    const merged = mergeStaged(base, after, diffGraphs(base, after), staged, inv, sim.effects);
     const { view, dest } = previewGraph(merged, intent, inv.project_agents_principal ?? null);
     const expanded = new Set(view.nodes.filter((n) => n.kind === "mcp").map((n) => n.id));
     const layout = layoutView(view, { expanded });
     const f = toFlow(view, layout, { node: null, edge: null, hit: null }, expanded, true);
     const nodes = f.nodes.map((n): MNode => ({ ...n, draggable: false, selectable: false, ...(n.id === dest && n.type === "mcp" ? { type: "previewMcp", data: { ...n.data, previewRows: model.rows } } : {}) }));
     return { nodes, edges: f.edges.map((e) => ({ ...e, selectable: false, focusable: false })) };
-  }, [inv, gws, modelArmor.data, ctxInfo.data, ctx, intent, model]);
+  }, [inv, gws, modelArmor.data, ctxInfo.data, ctx, intent, model, extras]);
   return (
     <div className="pmap pv-map" role="img" aria-label={`Map of the change: ${model.sentence}`}>
       <EdgeMarkers />
@@ -147,13 +150,15 @@ function Cond({ c }: { c: { title?: string; expression?: string } | null | undef
 export interface PreviewDialogProps {
   intent: Intent;
   extras: number;
+  /** The intents staged with it (fixes, and a registry_service create of the destination). */
+  extraIntents?: Intent[];
   approveLabel: string;
   onApprove: () => void;
   onModify: () => void;
   onCancel: () => void;
 }
 
-export default function PreviewDialog({ intent, extras, approveLabel, onApprove, onModify, onCancel }: PreviewDialogProps) {
+export default function PreviewDialog({ intent, extras, extraIntents = NO_EXTRAS, approveLabel, onApprove, onModify, onCancel }: PreviewDialogProps) {
   const { inventory, cart } = useStudio();
   const inv = inventory.data!;
   const panel = useRef<HTMLDivElement>(null);
@@ -161,7 +166,8 @@ export default function PreviewDialog({ intent, extras, approveLabel, onApprove,
   const titleId = useId();
   const descId = useId();
   const engine = intent.source?.engine ? inv.engines.find((e) => e.name === intent.source!.engine) : undefined;
-  const model = useMemo(() => previewModel({ intent, inv, engine, cart }), [intent, inv, engine, cart]);
+  const model = useMemo(() => previewModel({ intent, inv, engine, cart, extras: extraIntents }), [intent, inv, engine, cart, extraIntents]);
+  const regs = extraIntents.filter((x) => x.kind === "registry_service");
   const mcp = intent.destination?.kind === "mcp_server";
   const removing = model.kind === "revoke" || model.kind === "remove_all";
   const modifyRef = useRef(onModify);
@@ -236,7 +242,19 @@ export default function PreviewDialog({ intent, extras, approveLabel, onApprove,
           </div>
         </div>
         <div className="sheet-body pv-body">
-          <PreviewMap intent={intent} model={model} />
+          <PreviewMap intent={intent} model={model} extras={extraIntents} />
+          {regs.length > 0 &&
+            section(
+              "Registered first",
+              <ul className="pv-bindings">
+                {regs.map((r) => (
+                  <li key={r.id} className="pv-binding add">
+                    <Badge tone="green">New entry</Badge> <span className="small">{intentEnglish(r)}</span>
+                    <div className="muted tiny">Created before the grant (the grant uses the id the registry gives it).</div>
+                  </li>
+                ))}
+              </ul>,
+            )}
           {model.warnings.length > 0 && (
             <div className="checks pv-warnings" role="list" aria-label="Warnings">
               {model.warnings.map((w) => (
@@ -303,7 +321,7 @@ export default function PreviewDialog({ intent, extras, approveLabel, onApprove,
               </li>
             </ul>,
           )}
-          <TimingNote kinds={[intent.kind]} className="pv-timing" />
+          <TimingNote kinds={[...regs.map((r) => r.kind), intent.kind]} className="pv-timing" />
         </div>
         <div className="pv-foot">
           <button className="btn btn-text" onClick={onCancel}>
@@ -315,7 +333,8 @@ export default function PreviewDialog({ intent, extras, approveLabel, onApprove,
           </button>
           <button className={`btn ${removing ? "btn-danger" : "btn-primary"}`} onClick={onApprove} ref={removing ? undefined : first}>
             <CheckIcon size={14} /> {approveLabel}
-            {extras > 0 && ` (+${extras} fix)`}
+            {extras - regs.length > 0 && ` (+${extras - regs.length} fix)`}
+            {regs.length > 0 && " (+ new entry)"}
           </button>
         </div>
       </div>

@@ -110,6 +110,10 @@ Apply is available when the mode is `apply` and no check is an error.
   and returned with its inverse (`undo`). Results are appended to `~/.policy-studio/apply-log.jsonl`
   (`STUDIO_APPLY_LOG` overrides the path).
 
+## Inventory
+
+Step 4 lists the Agent Registry entries (A2A and Agent Runtime agents, MCP servers with their tools, API endpoints) and the Agent Runtime engines, each with who can reach it. **Register…** stages a new entry (the same form as the builder's "Register a new destination…"; to grant it in the same change, use the builder). **Delete entry…** on an MCP server or endpoint registered by hand (one with a writable Service; entries the platform registers, such as Agent Runtime agents, have none) asks first, saying how many grants go with it, then stages the delete. Deleting is destructive: the entry's IAP grants are deleted with it, and Undo registers it again (same URLs, tool list and description) as a new entry without them. On the map, a staged registration is a pending destination ("New entry (staged)") and a staged delete a pending removal.
+
 ## Build a policy
 
 Step 5 builds one change at a time: **who** is calling (an agent, every agent in the project, or a principal), **what** it calls (a registry entry), and **how much** of it (MCP servers: the read-only hint, specific tools, all tools or a custom condition; other destinations: full access). The preview under it shows the sentence, the IAM anatomy and the prerequisite checks.
@@ -117,6 +121,8 @@ Step 5 builds one change at a time: **who** is calling (an agent, every agent in
 **Change existing access.** When the agent already holds one or more direct grants on the destination, the builder says so ("Helpdesk Agent already has access to Tickets MCP. Your change replaces it.") and works on that access instead of adding a grant next to it (IAM would keep both). It starts from today's access: on an MCP server, Specific tools with the tools allowed today checked, each noting the grant that allows it ("allowed today by: read-only grant"). Read-only (hint) is offered only when an existing grant uses it, with a note that switching to Specific tools pins today's read-only tools and drops future ones. Tools allowed by an inherited grant (project-wide, public, group or registry-wide) are checked and locked, with a link to that grant: they can only be changed there and aren't part of the change. The result is ONE change: a `modify` that replaces every existing grant with the new one in a single IAM update (several grants merge into one), or, when every tool is unchecked ("Remove access" on other destinations), a revoke (one grant) or the `modify` "remove all" form (several grants, still one update). The same access as today is no change.
 
 **Preview before the cart.** Add to cart (and Add & build another) opens a preview first: a small read-only map of the change (the agent, its gateway or the no-gateway path, the destination; staged line styles; MCP tools today → after), a table of each tool (or the destination) today and after with the grants behind each, the bindings replaced or removed and the new one with its condition, and warnings (wider access, all access removed, tools that stay allowed by an inherited grant, the read-only hint's change, an agent with no gateway where nothing is enforced). **Approve** stages it and opens Review on it; **Modify** (or Esc) goes back to the builder with every choice kept; **Cancel** discards the change: the agent and destination stay selected and "How much of it?" goes back to where it started (today's access, or the default for a new grant). Audit fixes, map panel actions and Undo stage as before, without the preview.
+
+**Register a new destination.** When what the agent calls isn't in the Agent Registry yet, "Register a new destination…" in "What may it call?" opens a small form: an MCP server or an API endpoint, a display name, a service id (suggested from the name), one or more URLs each with its protocol (JSON-RPC for MCP servers, HTTP + JSON for endpoints by default; gRPC too), an optional description and, for an MCP server, an optional tool list (the server's `tools/list` response, so read-only and specific-tools grants can match; without it the entry has no tools and only full access does anything). It checks what Apply would refuse (https only, no wildcard, a URL already registered by another entry, an id that exists, a multi-region like `us`) and warns when only one of Cloud Run's two `run.app` URLs is listed. When an egress gateway in the region has private egress, each URL says whether it's under one of its private domains ("This URL is under run.app., which the gateway corp-egress resolves inside corp-vpc"); that's display only. "Use this destination" makes the new entry the destination: the grant and the registration are staged together (the preview shows both, Apply registers first and grants on the id the registry assigns). A2A agents aren't offered: the registry registers them from their agent card, not from URLs.
 
 The mock reproduces a merge case with `?case=merge` (`VITE_MOCK=1`): the Helpdesk Agent holds a read-only grant and a separate close_ticket grant on Tickets MCP, and search_tickets is allowed project-wide.
 
@@ -264,7 +270,7 @@ connectivity templates are created). It shows two things that matter to who can 
 
 - **Agents with their own PSC interface** (`pscInterfaceConfig`): their calls into a VPC skip the gateway, so no
   registry check, IAP grant or gateway log applies. They can't be bound (Google rejects both; one bound by a later
-  update can't reach Google APIs), so a bind is blocked in preflight. On the map they carry a red "Own VPC access
+  update can't reach Google APIs), so a bind is blocked in preflight. On the map they carry a red "Direct VPC access
   (bypasses gateway)" chip.
 - **Egress gateways with private egress** (a connectivity template, or the older inline `networkConfig`): the VPC,
   private domains and egress mode, on the gateway card and as a "Private egress · VPC" chip on the map.
@@ -314,7 +320,8 @@ Apply additionally needs `roles/iap.admin` (grants / revokes, on the Agent Regis
 (gateway binds) and `roles/networksecurity.editor` (Model Armor on/off); Model Armor setup also needs
 `roles/modelarmor.admin` (templates), `roles/networkservices.admin` (authz extensions) and
 `roles/resourcemanager.projectIamAdmin` (service agent roles); switching enforcement needs `roles/networkservices.admin`
-(and `roles/networksecurity.editor` to give a gateway its own extension). The **Can write** check names what's missing. Reading
+(and `roles/networksecurity.editor` to give a gateway its own extension); registering and deleting Agent Registry
+entries needs `roles/agentregistry.editor` (`agentregistry.services.create` / `.delete`, gateway project). The **Can write** check names what's missing. Reading
 the service agents' roles uses `resourcemanager.projects.getIamPolicy` (`roles/browser`).
 
 ## Generated code

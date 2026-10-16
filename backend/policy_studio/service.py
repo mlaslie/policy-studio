@@ -288,6 +288,24 @@ def _project_agents_principal(r: Rest, ctx: Context, engines: list[Engine], numb
     return eng_mod.project_agents_principal(org, number) if org and number else None
 
 
+def registry_state(inv: Inventory) -> dict[str, Any]:
+    """What registry_service preflight, render and diff need from the inventory: the Services, the bindings on each
+    Service's entry, and every registered URL (normalized) with the entry that has it."""
+    entries = [x for coll in (inv.agents, inv.mcp_servers, inv.endpoints) for x in coll]
+    grants: dict[str, int] = {}
+    urls: dict[str, str] = {}
+    for x in entries:
+        if x.service:
+            grants[x.service] = len(inv.access.get(x.name, []))
+        for u in x.urls or ([x.url] if x.url else []):
+            urls.setdefault(reg_mod.norm_url(u), f"{x.display_name} ({x.id})")
+    for svc in inv.services:
+        for i in svc.interfaces:
+            urls[reg_mod.norm_url(i.url)] = f"{svc.display_name} ({svc.id})"
+    listed = not any(e.startswith("list services") for e in inv.errors)
+    return {"services": list(inv.services) if listed else None, "grants": grants, "urls": urls}
+
+
 def inventory_view(ctx: Context, refresh: bool = False) -> Inventory:
     def build() -> Inventory:
         r = rest_for(ctx)
@@ -323,6 +341,7 @@ def inventory_view(ctx: Context, refresh: bool = False) -> Inventory:
                     it.error = f"IAP policy: {reg['policy_errors'][it.name]}"
         return Inventory(engines=engines, agents=reg["agents"], mcp_servers=reg["mcp_servers"],
                          endpoints=reg["endpoints"], access=access, access_errors=reg["policy_errors"],
+                         services=reg["services"],
                          project_agents_principal=_project_agents_principal(r, ctx, engines, c.project_number),
                          errors=errors, synced_at=now_iso())
     return cache.get((ctx.key(), "inventory"), build, refresh)

@@ -15,7 +15,7 @@
 // sends ALL_TRAFFIC into the VPC, N5); simple-agent-with-psc has its own PSC interface and no gateway (N1); Ops
 // Copilot has a PSC interface and an egress binding (N2, broken). Region us-west1 is the scale scenario (mockScale.ts): about 50 agents and 500 grants, two egress gateways
 // (one in dry run), and corp-ingress with Model Armor on (screened Client-to-Agent lines).
-import type { AuditResp, Binding, ContextInfo, Ctx, EnforcementMode, Finding, Gateway, Grant, Inventory, MaSetup, McpTool, ModelArmorResp, ServiceAgent, Template, TemplateFilters } from "./types";
+import type { AuditResp, Binding, ContextInfo, Ctx, EnforcementMode, Finding, Gateway, Grant, Inventory, MaSetup, McpTool, ModelArmorResp, RegistryService, ServiceAgent, Template, TemplateFilters } from "./types";
 import { READ_ONLY_EXPR, ROLE, toolsExpr } from "../lib/policy";
 import { PSC_BIND_REASON, auditRules } from "../lib/networking";
 import { SCALE_REGION, addScale, scaleFactor } from "./mockScale";
@@ -529,7 +529,22 @@ export function buildWorld(ctx: Ctx) {
     name === reg ? "Agent Registry (all entries)" : (agents.find((a) => a.name === name)?.display_name ?? mcp_servers.find((m) => m.name === name)?.display_name ?? endpoints.find((e) => e.name === name)?.display_name ?? name);
   const kindOf = (name: string): Grant["resource_kind"] => (name === reg ? "registry" : name.includes("/mcpServers/") ? "mcp_server" : name.includes("/endpoints/") ? "endpoint" : "agent");
 
-  const inventory: Inventory = { engines, agents, mcp_servers, endpoints, access, access_errors, project_agents_principal: projectSet, errors: [] };
+  // Writable registry Services behind the entries registered by hand (the Google API endpoints and the Agent Runtime
+  // agents are registered by the platform here). The registry projects each into an entry with its own id.
+  const services: RegistryService[] = [];
+  const serve = (x: { name: string; display_name: string; url?: string; urls?: string[]; service?: string | null }, sid: string, kind: RegistryService["kind"], urls: string[]) => {
+    const svc: RegistryService = { name: `${reg}/services/${sid}`, id: sid, kind, display_name: x.display_name, description: "", interfaces: urls.map((url) => ({ url, protocol_binding: kind === "mcp_server" ? "JSONRPC" : "HTTP_JSON" })), registry_resource: x.name.replace(/^projects\/[^/]+\//, `projects/${MOCK_NUMBER}/`) };
+    services.push(svc);
+    x.service = svc.name;
+    x.urls = urls;
+  };
+  serve(tickets, "tickets-mcp", "mcp_server", [tickets.url!, `https://tickets-mcp-${MOCK_NUMBER}.${R}.run.app/mcp`]);
+  serve(hrdir, "hr-directory-mcp", "mcp_server", [hrdir.url!]);
+  serve(weather, "weather-api", "endpoint", [weather.url]);
+  serve(payments, "partner-payments", "endpoint", [payments.url]);
+  services[0].tool_spec = { tools: tickets.tools.map((t) => ({ name: t.name, annotations: t.annotations })) };
+
+  const inventory: Inventory = { engines, agents, mcp_servers, endpoints, access, access_errors, services, project_agents_principal: projectSet, errors: [] };
 
   const grants = (): Grant[] =>
     Object.entries(inventory.access).flatMap(([res, bs]) => bs.map((x) => ({ ...x, resource: res, resource_kind: kindOf(res), resource_label: labelOf(res) })));

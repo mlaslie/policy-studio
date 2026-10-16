@@ -18,6 +18,11 @@ Every write is checked against an allowlist of exactly the calls Apply makes:
            ?updateMask=customProvider.authzExtension.resources,labels   (body: only those two fields; dedicate /
            revert. labels is in the mask because a PATCH without it clears the policy's labels, seen live; the
            current labels are re-sent)
+  Agent Registry entries (registry_service):
+  POST   https://agentregistry.googleapis.com/v1/projects/P/locations/R/services?serviceId=ID
+           (body: displayName, description, interfaces[{url (https), protocolBinding}] and exactly one of
+           endpointSpec {type: NO_SPEC} / mcpServerSpec {type: NO_SPEC | TOOL_SPEC, content}; never agentSpec)
+  DELETE https://agentregistry.googleapis.com/v1/projects/P/locations/R/services/ID
   POST   https://cloudresourcemanager.googleapis.com/v1/projects/P:setIamPolicy  (guarded: only through
            set_project_iam_policy, and only when the change adds or removes members of the Model Armor roles)
 Reads (getIamPolicy, GET engine / operation / policy) go through the read-only Rest client.
@@ -53,7 +58,42 @@ ALLOWED: list[tuple[str, re.Pattern[str]]] = [
                          rf"authzExtensions/{_SEG}\?updateMask=metadata,failOpen$")),
     ("PATCH", re.compile(rf"^https://networksecurity\.googleapis\.com/v1/projects/{_SEG}/locations/{_SEG}/"
                          rf"authzPolicies/{_SEG}\?updateMask=customProvider\.authzExtension\.resources,labels$")),
+    ("POST", re.compile(rf"^https://agentregistry\.googleapis\.com/v1/projects/{_SEG}/locations/{_SEG}/"
+                        rf"services\?serviceId={_SEG}$")),
+    ("DELETE", re.compile(rf"^https://agentregistry\.googleapis\.com/v1/projects/{_SEG}/locations/{_SEG}/"
+                          rf"services/{_SEG}$")),
 ]
+SERVICE_FIELDS = {"displayName", "description", "interfaces", "endpointSpec", "mcpServerSpec"}
+SERVICE_BINDINGS = {"JSONRPC", "GRPC", "HTTP_JSON"}
+
+
+def check_service_body(body: Any) -> None:
+    """Raise unless `body` is an Agent Registry Service create body Policy Studio builds: only the allowed fields,
+    https interface URLs with a known protocol binding, and exactly one endpoint or MCP server spec."""
+    def bad(why: str) -> ValueError:
+        return ValueError(f"policy_studio writer: a registry service body {why}")
+    if not isinstance(body, dict) or set(body) - SERVICE_FIELDS:
+        raise bad(f"may only contain {', '.join(sorted(SERVICE_FIELDS))}")
+    specs = [k for k in ("endpointSpec", "mcpServerSpec") if k in body]
+    if len(specs) != 1:
+        raise bad("needs exactly one of endpointSpec / mcpServerSpec")
+    spec = body[specs[0]]
+    allowed_types = {"NO_SPEC"} if specs[0] == "endpointSpec" else {"NO_SPEC", "TOOL_SPEC"}
+    if not isinstance(spec, dict) or spec.get("type") not in allowed_types or set(spec) - {"type", "content"} or \
+            (spec.get("type") == "NO_SPEC" and spec.get("content")) or \
+            (spec.get("type") == "TOOL_SPEC" and not isinstance(spec.get("content"), dict)):
+        raise bad(f"has an unsupported {specs[0]}")
+    ifs = body.get("interfaces")
+    if not isinstance(ifs, list) or not ifs:
+        raise bad("needs at least one interface")
+    for i in ifs:
+        if not isinstance(i, dict) or set(i) != {"url", "protocolBinding"} or \
+                i["protocolBinding"] not in SERVICE_BINDINGS or not isinstance(i["url"], str) or \
+                not i["url"].lower().startswith("https://") or "*" in i["url"]:
+            raise bad("has an interface that isn't {url: https://..., protocolBinding: JSONRPC | GRPC | HTTP_JSON}")
+    for k in ("displayName", "description"):
+        if k in body and not isinstance(body[k], str):
+            raise bad(f"has a non-string {k}")
 # Allowed only through Writer.set_project_iam_policy, which checks the policy change itself.
 GUARDED: list[tuple[str, re.Pattern[str]]] = [
     ("POST", re.compile(rf"^https://cloudresourcemanager\.googleapis\.com/v1/projects/{_SEG}:setIamPolicy$")),
@@ -152,6 +192,14 @@ class Writer:
             raise ValueError("policy_studio writer: an authz policy PATCH may only set "
                              "customProvider.authzExtension.resources to one extension, and labels")
         return self._write("PATCH", url, body)
+
+    def create_registry_service(self, url: str, body: dict[str, Any]) -> Any:
+        """registry_service: create an Agent Registry Service (long-running), body checked by check_service_body."""
+        check_service_body(body)
+        return self._write("POST", url, body)
+
+    def delete_registry_service(self, url: str) -> Any:
+        return self._write("DELETE", url)
 
     def set_project_iam_policy(self, project_url: str, current: dict[str, Any], policy: dict[str, Any]) -> Any:
         """Project setIamPolicy, only for adding / removing members of the Model Armor roles (see

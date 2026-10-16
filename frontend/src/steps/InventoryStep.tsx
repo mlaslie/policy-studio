@@ -6,11 +6,13 @@ import { stepN, useLookup, useStudio } from "../store";
 import type { Binding, Engine, Intent, McpServer, McpTool, RegAgent, ResourceKind } from "../api/types";
 import { Badge, Callout, Disclosure, KindIcon, Load, StepHeader, Tabs, Term } from "../components/ui";
 import { CopyButton } from "../components/Glass";
-import { ArrowIcon, SearchIcon, WarnIcon } from "../components/Icons";
+import { ArrowIcon, PlusIcon, SearchIcon, TrashIcon, WarnIcon } from "../components/Icons";
 import { shortName } from "../lib/policy";
 import { fmtDate, plural } from "../lib/util";
 import { ShowOnMap } from "../components/ShowOnMap";
 import { pscChips } from "../lib/networking";
+import { RegisterForm } from "../components/RegisterForm";
+import { GRANTS_LOST, createIntent, deleteIntent } from "../lib/registry";
 
 type Tab = "agents" | "mcp" | "apis" | "engines";
 
@@ -88,6 +90,46 @@ function BuildBtn({ dest }: { dest: Intent["destination"] }) {
   );
 }
 
+/** "Delete entry…": stages the delete of the registry Service behind an entry (after a confirm that says what goes with
+ *  it). Entries the platform registered (no Service) can't be deleted here. */
+export function DeleteEntry({ entry, access }: { entry: { name: string; display_name: string; service?: string | null }; access?: Binding[] }) {
+  const { inventory, addIntents, cart } = useStudio();
+  const [asking, setAsking] = useState(false);
+  const svc = inventory.data?.services?.find((x) => x.name === entry.service);
+  if (!svc || svc.kind === "agent") return null;
+  const staged = cart.some((i) => i.kind === "registry_service" && i.params?.delete && i.params.service_id === svc.id);
+  const n = access?.length ?? 0;
+  if (staged) return <Badge tone="amber">deletion staged</Badge>;
+  if (!asking)
+    return (
+      <Tip tip={`Stage deleting ${entry.display_name} from the Agent Registry (asks first). Nothing changes in Google Cloud until you apply.`}>
+        <button className="btn btn-small btn-text" onClick={() => setAsking(true)}>
+          <TrashIcon size={14} /> Delete entry…
+        </button>
+      </Tip>
+    );
+  return (
+    <div className="reg-delete-confirm" role="alertdialog" aria-label={`Delete ${entry.display_name}?`}>
+      <span className="small">
+        Delete <b>{entry.display_name}</b> (<span className="mono">{svc.id}</span>)? {n ? `${n} grant${n === 1 ? "" : "s"} on it ${n === 1 ? "is" : "are"} removed with it. ` : ""}
+        {GRANTS_LOST}.
+      </span>
+      <button
+        className="btn btn-small btn-danger"
+        onClick={() => {
+          addIntents([deleteIntent(svc)]);
+          setAsking(false);
+        }}
+      >
+        Stage delete
+      </button>
+      <button className="btn btn-small btn-text" onClick={() => setAsking(false)}>
+        Cancel
+      </button>
+    </div>
+  );
+}
+
 function AgentCard({ a, access, engine }: { a: RegAgent; access?: Binding[]; engine?: Engine }) {
   return (
     <article className="card asset">
@@ -134,6 +176,7 @@ function McpCard({ m, access }: { m: McpServer; access?: Binding[] }) {
         </div>
         <BuildBtn dest={destOf("mcp_server", m)} />
       </header>
+      <DeleteEntry entry={m} access={access} />
       <table className="tools-table">
         <thead>
           <tr>
@@ -234,7 +277,8 @@ function EngineCard({ e }: { e: Engine }) {
 }
 
 export function InventoryStep() {
-  const { inventory } = useStudio();
+  const { inventory, gateways, ctx, cart, addIntents } = useStudio();
+  const [registering, setRegistering] = useState(false);
   const [tab, setTab] = useState<Tab>("agents");
   const [q, setQ] = useState("");
   const [showAllEndpoints, setShowAll] = useState(false);
@@ -276,7 +320,27 @@ export function InventoryStep() {
                   <SearchIcon size={16} />
                   <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search names, tools, skills…" aria-label="Search inventory" />
                 </label>
+                <Tip tip="Register an API endpoint or an MCP server in the Agent Registry (staged in the cart). To grant it in the same change, use Build a policy → Register a new destination.">
+                  <button className="btn btn-small btn-tonal" onClick={() => setRegistering(true)} disabled={registering}>
+                    <PlusIcon size={14} /> Register…
+                  </button>
+                </Tip>
               </div>
+              {registering && (
+                <RegisterForm
+                  inv={inv}
+                  gateways={gateways.data?.gateways ?? []}
+                  region={ctx.region}
+                  cart={cart}
+                  submitLabel="Stage registration"
+                  submitTip="Stage the new registry entry in the cart. Nothing changes in Google Cloud until you apply."
+                  onSubmit={(f) => {
+                    addIntents([createIntent(f)]);
+                    setRegistering(false);
+                  }}
+                  onCancel={() => setRegistering(false)}
+                />
+              )}
               {tab === "agents" && (
                 <div className="asset-list">
                   {agents.map((a) => (
@@ -316,7 +380,10 @@ export function InventoryStep() {
                             <AccessList compact bindings={inv.access[e.name] ?? []} />
                           </td>
                           <td>
-                            <BuildBtn dest={destOf("endpoint", e)} />
+                            <div className="reg-entry-actions">
+                              <BuildBtn dest={destOf("endpoint", e)} />
+                              <DeleteEntry entry={e} access={inv.access[e.name]} />
+                            </div>
                           </td>
                         </tr>
                       ))}

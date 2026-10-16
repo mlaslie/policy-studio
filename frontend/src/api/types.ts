@@ -166,6 +166,10 @@ export type RegAgent = {
   url?: string;
   skills: Skill[];
   engine?: string;
+  /** Every interface URL (url is the first). */
+  urls?: string[];
+  /** The writable Agent Registry Service that projects it (null = auto-registered). */
+  service?: string | null;
 };
 export type McpTool = {
   name: string;
@@ -174,8 +178,23 @@ export type McpTool = {
   destructive: boolean;
   annotations: Record<string, unknown>;
 };
-export type McpServer = { name: string; id: string; display_name: string; url?: string; tools: McpTool[] };
-export type Endpoint = { name: string; id: string; display_name: string; url: string };
+export type McpServer = { name: string; id: string; display_name: string; url?: string; urls?: string[]; service?: string | null; tools: McpTool[] };
+export type Endpoint = { name: string; id: string; display_name: string; url: string; urls?: string[]; service?: string | null };
+export type ProtocolBinding = "JSONRPC" | "GRPC" | "HTTP_JSON";
+export type RegistryInterface = { url: string; protocol_binding: ProtocolBinding };
+/** A writable Agent Registry Service. The registry projects it into a read-only entry with its own id
+ *  (registry_resource), which IAP grants are set on. */
+export type RegistryService = {
+  name: string;
+  id: string;
+  kind: "endpoint" | "mcp_server" | "agent";
+  display_name: string;
+  description: string;
+  interfaces: RegistryInterface[];
+  registry_resource: string;
+  /** mcpServerSpec TOOL_SPEC content ({tools: [...]}), when set. */
+  tool_spec?: { tools?: unknown[] } | null;
+};
 
 export type Binding = {
   role: string;
@@ -192,6 +211,8 @@ export type Inventory = {
   access: Record<string, Binding[]>;
   /** Registry entries whose IAM policy couldn't be read (no key in `access`), with the reason. */
   access_errors: Record<string, string>;
+  /** Writable registry Services in the region (absent from older backends). */
+  services?: RegistryService[];
   /** principalSet of every Agent Runtime agent in the project (null when the org id can't be found). */
   project_agents_principal: string | null;
   errors: string[];
@@ -232,7 +253,8 @@ export type IntentKind =
   | "model_armor_extension"
   | "iam_project_grant"
   | "set_enforcement"
-  | "dedicate_extension";
+  | "dedicate_extension"
+  | "registry_service";
 export type MaLevel = "LOW_AND_ABOVE" | "MEDIUM_AND_ABOVE" | "HIGH" | "off";
 export type TemplateFilters = {
   pi_jailbreak: MaLevel;
@@ -254,6 +276,14 @@ export type SetupParams = {
   member?: string;
   roles?: string[];
   gateway?: string;
+  /** registry_service: an Agent Registry entry (one Service, several interface URLs). */
+  kind?: "endpoint" | "mcp_server";
+  service_id?: string;
+  display_name?: string;
+  description?: string;
+  interfaces?: RegistryInterface[];
+  /** mcp_server: the tools/list response, so tool conditions can match (an undo of a delete re-creates it). */
+  tool_spec?: { tools?: unknown[] } | null;
 };
 export type SourceType = "engine" | "project_agents" | "custom";
 export type AccessMode = "all" | "read_only_hint" | "tools" | "custom";
@@ -263,7 +293,15 @@ export type Intent = {
   kind: IntentKind;
   source?: { type: SourceType; principal: string; label: string; engine?: string };
   /** registry = the whole Agent Registry (a registry-wide grant): id "", name projects/P/locations/R. */
-  destination?: { kind: ResourceKind | "registry"; id: string; name: string; label: string };
+  destination?: {
+    kind: ResourceKind | "registry";
+    id: string;
+    name: string;
+    label: string;
+    /** The service id of a registry_service create in the same cart: the entry id isn't known until the registry
+     *  projects it, so Apply fills it in after the create (which runs first). */
+    pending_service?: string;
+  };
   access?: Access;
   /** modify: the existing binding's condition, exact (mode "custom" with its expression and title, or mode "all");
    *  `access` is the new one. Applied as one read-modify-write. */
@@ -331,7 +369,7 @@ export type AuthInfo = {
 };
 export type ApplyState = "running" | "done" | "verified" | "failed" | "skipped";
 /** `progress: true` with state "done" = a long-running operation is still being polled (not final). */
-export type PreflightFix = "ma_setup" | "redeploy" | "permission" | "already" | "";
+export type PreflightFix = "ma_setup" | "redeploy" | "permission" | "already" | "duplicate" | "";
 export type ApplyItemEvent = {
   intent_id: string;
   state: ApplyState;

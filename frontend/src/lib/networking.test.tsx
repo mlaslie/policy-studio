@@ -54,11 +54,11 @@ describe("map chips", () => {
     expect(privateEgressChip(ingress.private_egress)).toBeNull();
   });
 
-  it("agents: red Own VPC access; Broken as well when bound", () => {
+  it("agents: red Direct VPC access; Broken as well when bound", () => {
     const psc = node(eng(CTX, "simple-agent-with-psc").name).chips.filter((c) => c.tone === "red").map((c) => c.text);
-    expect(psc).toEqual(["Own VPC access (bypasses gateway)"]);
+    expect(psc).toEqual(["Direct VPC access (bypasses gateway)"]);
     const ops = node(eng(CTX, "Ops Copilot").name).chips.filter((c) => c.tone === "red").map((c) => c.text);
-    expect(ops).toEqual(["Own VPC access (bypasses gateway)", "Broken: PSC interface + gateway"]);
+    expect(ops).toEqual(["Direct VPC access (bypasses gateway)", "Broken: PSC interface + gateway"]);
     expect(pscChips(eng(CTX, "Helpdesk Agent"))).toEqual([]);
   });
 
@@ -70,7 +70,7 @@ describe("map chips", () => {
   it("the ingress map shows no bypass chip (it's about egress)", () => {
     const gi = buildPolicyGraph({ inventory: w.inventory, gateways: w.gateways, modelArmor: w.modelArmor, direction: "ingress" });
     const n = gi.nodes.find((x) => x.id === eng(CTX, "simple-agent-with-psc").name)!;
-    expect(n.chips.map((c) => c.text)).not.toContain("Own VPC access (bypasses gateway)");
+    expect(n.chips.map((c) => c.text)).not.toContain("Direct VPC access (bypasses gateway)");
     expect(n.chips.find((c) => c.text === "Can't be bound")?.title).toBe(PSC_BIND_REASON);
   });
 });

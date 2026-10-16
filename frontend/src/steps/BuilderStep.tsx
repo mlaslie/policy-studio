@@ -6,7 +6,7 @@ import { Tip } from "../components/Tooltip";
 import { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
 import { useLookup, useStudio } from "../store";
 import { api } from "../api/client";
-import type { AccessMode, Grant, Intent, RenderItem, SourceType } from "../api/types";
+import type { AccessMode, Grant, Intent, McpServer, RenderItem, SourceType } from "../api/types";
 import { Badge, Callout, KindIcon, Load, Spinner, StepHeader, Tabs, Term } from "../components/ui";
 import { useDestinations } from "./InventoryStep";
 import { WarningCallouts } from "./ModelArmorSetup";
@@ -18,6 +18,8 @@ import { READ_ONLY_EXPR, ROLE, accessFromCondition, accessTos, conditionFor, int
 import { buildModeOf, changeIntent, existingFor, initialChoice, inheritedLabel, isSame, lockedTools, modeOptions, targetOf, toolNote, toolsToday, usesHint, type BuildChoice, type BuildMode } from "../lib/existing";
 import { focusForGrant } from "../map/focus";
 import { approve as approvePreview, cancel as cancelPreview, openPreview, type PreviewState } from "../preview/flow";
+import { RegisterForm } from "../components/RegisterForm";
+import { REG_KIND_LABEL, createIntent, parseTools, pendingDestination, pendingEntryName, type RegForm } from "../lib/registry";
 
 const PreviewDialog = lazy(() => import("../preview/PreviewDialog"));
 
@@ -74,7 +76,11 @@ function Anatomy({ item, intent }: { item: RenderItem | null; intent: Intent }) 
       <div className="anat-title">
         IAM anatomy <span className="muted small">— what will actually be written</span>
       </div>
-      <AnatomyRow k="resource" v={a?.resource || `…/iap_web/agentRegistry/${intent.destination?.kind === "mcp_server" ? "mcpServers" : intent.destination?.kind === "endpoint" ? "endpoints" : "agents"}/${intent.destination?.id}`} meaning={<>what is being protected: the registry entry for {intent.destination?.label}</>} />
+      <AnatomyRow
+        k="resource"
+        v={a?.resource || `…/iap_web/agentRegistry/${intent.destination?.kind === "mcp_server" ? "mcpServers" : intent.destination?.kind === "endpoint" ? "endpoints" : "agents"}/${intent.destination?.pending_service ? "ENTRY_ID" : intent.destination?.id}`}
+        meaning={intent.destination?.pending_service ? <>the new registry entry for {intent.destination.label}: its id is assigned when {intent.destination.pending_service} is registered (Apply registers it first)</> : <>what is being protected: the registry entry for {intent.destination?.label}</>}
+      />
       <AnatomyRow k="role" v={a?.role || ROLE} meaning={<><Term k="iap-egressor">may send traffic to it through the gateway</Term></>} />
       <AnatomyRow
         k="member"
@@ -164,8 +170,11 @@ function RevokePicker({ onStage, initial }: { onStage: (i: Intent) => void; init
 }
 
 // ------------------------------------------------------------------ main
+/** A new destination the builder registers with the grant: its form, and the create intent (a stable id). */
+type NewReg = { form: RegForm; intent: Intent };
+
 export function BuilderStep() {
-  const { inventory, ctx, ctxInfo, draft, addIntents, updateIntent, openReview, openMap, cart } = useStudio();
+  const { inventory, gateways, ctx, ctxInfo, draft, addIntents, updateIntent, openReview, openMap, cart } = useStudio();
   const { inv, engineByName } = useLookup();
   const dests = useDestinations();
   const [mode, setMode] = useState<Mode>("grant");
@@ -184,6 +193,8 @@ export function BuilderStep() {
   const [extraFixes, setExtraFixes] = useState<Intent[]>([]);
   const [remove, setRemove] = useState(false);
   const [preview, setPreview] = useState<PreviewState>(null);
+  const [regOpen, setRegOpen] = useState(false);
+  const [newReg, setNewReg] = useState<NewReg | null>(null);
   const lastSeq = useRef(0);
   /** The draft's source and destination, and whether it edits a cart item: its access stands (see the pair effect). */
   const prefill = useRef<{ key: string; editing: boolean } | null>(null);
@@ -206,6 +217,8 @@ export function BuilderStep() {
       setDestName(i.destination.name);
       setDq("");
     } else if (i.source) setDestName("");
+    if (!i.destination?.pending_service) setNewReg(null);
+    setRegOpen(false);
     // A staged modify's new access (the remove-all form: no tool / "Remove access"); a custom expression that is one
     // of the known forms (an exact one from a grant) is shown as that form.
     const acc = i.kind === "modify" ? accessTos(i)[0] : i.access;
@@ -218,8 +231,27 @@ export function BuilderStep() {
     prefill.current = i.source && i.destination ? { key: `${i.source.principal}|${i.destination.name}`, editing: !!draft.editId } : null;
   }, [draft]);
 
-  const dest = dests.find((d) => d.name === destName);
-  const mcp = dest?.kind === "mcp_server" ? inv?.mcp_servers.find((m) => m.name === dest.name) : undefined;
+  // A destination registered with this change (Register a new destination…) isn't in the inventory yet: it's drawn and
+  // granted under its pending name, and the grant names its service (pending_service) for Apply to fill in the id.
+  const pendingDest = newReg ? pendingDestination(newReg.intent) : null;
+  const regTools = useMemo<McpServer["tools"]>(
+    () =>
+      ((newReg ? parseTools(newReg.form.tools_json).spec?.tools : null) ?? []).map((t) => {
+        const x = t as { name: string; description?: string; annotations?: Record<string, unknown> };
+        return { name: x.name, description: x.description ?? "", read_only: !!x.annotations?.readOnlyHint, destructive: !!x.annotations?.destructiveHint, annotations: x.annotations ?? {} };
+      }),
+    [newReg],
+  );
+  const dest = pendingDest
+    ? { kind: pendingDest.kind as "mcp_server" | "endpoint", id: "", name: pendingDest.name, label: pendingDest.label, sub: `New ${REG_KIND_LABEL[newReg!.form.kind]} · registered with this change` }
+    : dests.find((d) => d.name === destName);
+  const mcp: McpServer | undefined =
+    dest?.kind === "mcp_server"
+      ? pendingDest
+        ? { name: pendingDest.name, id: newReg!.form.service_id, display_name: pendingDest.label, url: newReg!.form.rows[0]?.url, tools: regTools }
+        : inv?.mcp_servers.find((m) => m.name === dest.name)
+      : undefined;
+  const destRef = (d: NonNullable<typeof dest>): NonNullable<Intent["destination"]> => (pendingDest ? pendingDest : { kind: d.kind, id: d.id, name: d.name, label: d.label });
   const eng = engineByName.get(engine);
   const projectSet = projectPrincipalSet(inv?.engines[0]?.principal, ctxInfo.data?.project_number);
   const customErr = srcType === "custom" ? validateMember(custom) : null;
@@ -269,12 +301,12 @@ export function BuilderStep() {
   const lint = dest ? draftLint({ mode: access, tools, expr, remove }, dest.kind, change) : [];
   const target = source && dest ? targetOf(choice, dest.kind, bmode, new Set(locked.keys())) : null;
   const intent: Intent | null =
-    source && dest ? changeIntent({ id: editId ?? "preview", source, destination: { kind: dest.kind, id: dest.id, name: dest.name, label: dest.label }, own: ex.own, target }) : null;
+    source && dest ? changeIntent({ id: editId ?? "preview", source, destination: destRef(dest), own: ex.own, target }) : null;
   const same = change && isSame(ex.own, target);
   const intentKey = JSON.stringify(intent);
   // Prerequisite checks read a grant: in change mode, the grant-shaped version of the new access (the "already
   // exists" / "change the existing grant instead" checks don't apply: this is that change).
-  const checkIntent: Intent | null = intent?.kind === "grant" ? intent : source && dest && target && target !== "remove" ? { id: "check", kind: "grant", source, destination: { kind: dest.kind, id: dest.id, name: dest.name, label: dest.label }, access: target } : null;
+  const checkIntent: Intent | null = intent?.kind === "grant" ? intent : source && dest && target && target !== "remove" ? { id: "check", kind: "grant", source, destination: destRef(dest), access: target } : null;
   const checks = useChecks(checkIntent).filter((c) => !change || (c.id !== "dup" && c.id !== "replace"));
 
   // Live preview from POST /render (debounced); the local sentence shows instantly meanwhile.
@@ -286,9 +318,10 @@ export function BuilderStep() {
     }
     let live = true;
     const t = setTimeout(() => {
+      // a grant on a new entry is rendered with its create (the commands look the entry's id up after it)
       api
-        .render(ctx, [intent])
-        .then((r) => live && setRender(r.items[0] ?? null))
+        .render(ctx, newReg ? [newReg.intent, intent] : [intent])
+        .then((r) => live && setRender(r.items.find((x) => x.intent_id === intent.id) ?? null))
         .catch((e) => live && setRenderErr(e instanceof Error ? e.message : String(e)));
     }, 250);
     return () => {
@@ -296,9 +329,11 @@ export function BuilderStep() {
       clearTimeout(t);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [intentKey, ctx]);
+  }, [intentKey, ctx, newReg]);
 
   const resetWhat = () => {
+    setNewReg(null);
+    setRegOpen(false);
     setDestName("");
     setDq("");
     setAccess("all");
@@ -337,10 +372,11 @@ export function BuilderStep() {
   const commit = (another: boolean, staged: Intent | null = intent) => {
     if (!staged) return;
     const finalIntent = { ...staged, id: editId ?? newId() };
+    const regs = newReg ? [newReg.intent] : [];
     if (editId && cart.some((c) => c.id === editId)) {
       updateIntent(editId, finalIntent);
-      if (extraFixes.length) addIntents(extraFixes);
-    } else addIntents([...extraFixes, finalIntent]);
+      if (extraFixes.length || regs.length) addIntents([...regs, ...extraFixes]);
+    } else addIntents([...regs, ...extraFixes, finalIntent]);
     if (another) {
       resetWhat();
       document.querySelector(".center")?.scrollTo({ top: 0, behavior: "smooth" });
@@ -463,18 +499,57 @@ export function BuilderStep() {
               </Section>
 
               <Section n={2} title="What may it call?" sub="A destination from the Agent Registry." done={!!dest}>
-                {dest ? (
+                {regOpen ? (
+                  <RegisterForm
+                    inv={invd}
+                    gateways={gateways.data?.gateways ?? []}
+                    region={ctx.region}
+                    cart={cart}
+                    initial={newReg?.form}
+                    submitLabel="Use this destination"
+                    submitTip="Pick the new entry as what may be called. Add to cart stages its registration and the grant together (the registration runs first). Nothing changes in Google Cloud until you apply."
+                    onSubmit={(form) => {
+                      setNewReg({ form, intent: createIntent(form, newReg?.intent.id) });
+                      setDestName(pendingEntryName(form.service_id.trim()));
+                      setRegOpen(false);
+                    }}
+                    onCancel={() => setRegOpen(false)}
+                  />
+                ) : dest ? (
                   <div className="picked">
                     <KindIcon kind={dest.kind} size={18} />
                     <div className="grow">
-                      <b>{dest.label}</b> <span className="muted small">· {dest.kind === "endpoint" ? `${kindNoun(dest.kind)} · ${dest.sub}` : dest.sub}</span>
+                      <b>{dest.label}</b> <span className="muted small">· {dest.kind === "endpoint" && !newReg ? `${kindNoun(dest.kind)} · ${dest.sub}` : dest.sub}</span>
+                      {newReg && (
+                        <div className="muted tiny">
+                          <Badge tone="amber">new entry</Badge> {newReg.form.rows.filter((r) => r.url.trim()).map((r) => r.url.trim()).join(", ")}
+                        </div>
+                      )}
                     </div>
-                    <button className="btn btn-small btn-text" onClick={() => setDestName("")}>
+                    {newReg && (
+                      <button className="btn btn-small btn-text" onClick={() => setRegOpen(true)}>
+                        Edit registration
+                      </button>
+                    )}
+                    <button
+                      className="btn btn-small btn-text"
+                      onClick={() => {
+                        setNewReg(null);
+                        setDestName("");
+                      }}
+                    >
                       Change
                     </button>
                   </div>
                 ) : (
                   <>
+                    <div className="reg-entry-actions">
+                      <Tip tip="Not in the Agent Registry yet? Register it (an API endpoint or an MCP server, with its URLs) and grant it in the same change.">
+                        <button className="btn btn-small btn-tonal" onClick={() => setRegOpen(true)}>
+                          <PlusIcon size={14} /> Register a new destination…
+                        </button>
+                      </Tip>
+                    </div>
                     <label className="search wide">
                       <SearchIcon size={16} />
                       <input value={dq} onChange={(e) => setDq(e.target.value)} placeholder="Filter by name…" aria-label="Filter destinations by name" autoFocus={!!source} />
@@ -652,13 +727,14 @@ export function BuilderStep() {
                           : `Preview the change${extraFixes.length ? ` and ${extraFixes.length} fix` : ""} first (a small map and what changes), then approve it to ${editing ? "replace the staged item" : "stage it in the cart"} and open Review & output. Nothing changes in Google Cloud until you apply.`
                     }
                   >
-                    <button className="btn btn-primary" disabled={!intent || blocking(lint)} onClick={() => intent && setPreview(openPreview(intent, extraFixes, false, editing ? editId : undefined))}>
+                    <button className="btn btn-primary" disabled={!intent || blocking(lint)} onClick={() => intent && setPreview(openPreview(intent, [...(newReg ? [newReg.intent] : []), ...extraFixes], false, editing ? editId : undefined))}>
                       {editing ? "Save changes" : "Add to cart"}
+                      {newReg && " (+ new entry)"}
                       {extraFixes.length > 0 && ` (+${extraFixes.length} fix)`}
                     </button>
                   </Tip>
                   <Tip tip={intent ? "Preview the change, then stage it and start a new one, keeping who is calling. Nothing changes in Google Cloud until you apply." : "Answer the questions above first."}>
-                    <button className="btn btn-tonal" disabled={!intent || blocking(lint)} onClick={() => intent && setPreview(openPreview(intent, extraFixes, true, editing ? editId : undefined))}>
+                    <button className="btn btn-tonal" disabled={!intent || blocking(lint)} onClick={() => intent && setPreview(openPreview(intent, [...(newReg ? [newReg.intent] : []), ...extraFixes], true, editing ? editId : undefined))}>
                       <PlusIcon size={16} /> Add & build another
                     </button>
                   </Tip>
@@ -680,6 +756,7 @@ export function BuilderStep() {
           <PreviewDialog
             intent={preview.intent}
             extras={preview.extras.length}
+            extraIntents={preview.extras}
             approveLabel={preview.editId ? "Approve: save changes" : preview.another ? "Approve & build another" : "Approve: add to cart"}
             onApprove={onApprove}
             onModify={() => setPreview(null)}

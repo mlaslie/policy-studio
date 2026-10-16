@@ -36,7 +36,7 @@ export const SETUP_KINDS = new Set<Intent["kind"]>(["model_armor_template", "mod
 export const isDestructive = (i: Intent) =>
   DESTRUCTIVE_KINDS.has(i.kind) ||
   removesAll(i) ||
-  (SETUP_KINDS.has(i.kind) && !!i.params?.delete) ||
+  ((SETUP_KINDS.has(i.kind) || i.kind === "registry_service") && !!i.params?.delete) ||
   (i.kind === "set_enforcement" && i.mode === "DRY_RUN") ||
   (i.kind === "dedicate_extension" && !!i.revert);
 
@@ -108,6 +108,7 @@ export const DESTRUCTIVE_PHRASE: Partial<Record<Intent["kind"], string>> = {
   modify: "removes all of an agent's access to a destination",
   set_enforcement: "puts a gateway in dry run: nothing is blocked",
   dedicate_extension: "deletes a gateway's own IAP extension",
+  registry_service: "deletes an Agent Registry entry and the IAP grants on it (they don't come back on undo)",
 };
 
 /** Typical time of the Apply call per kind, shown next to the elapsed timer (lib/timing.ts has the table, with how
@@ -128,6 +129,7 @@ export const CHANGE_KIND: Record<Intent["kind"], string> = {
   iam_project_grant: "Project IAM for the gateway's service agent (setup)",
   set_enforcement: "Update the IAP authz extension (long-running)",
   dedicate_extension: "Copy the IAP extension + update the gateway's IAP policy (long-running)",
+  registry_service: "Agent Registry entry (long-running, seconds)",
 };
 
 export function fmtElapsed(ms: number): string {
@@ -158,6 +160,7 @@ const KIND_NOUN: Record<Intent["kind"], string> = {
   iam_project_grant: "granting the service agent roles",
   set_enforcement: "changing a gateway's enforcement mode",
   dedicate_extension: "giving a gateway its own IAP extension",
+  registry_service: "registering or deleting Agent Registry entries",
 };
 /** Why this kind can't be applied by the signed-in user (null when it can, or when /auth doesn't say). */
 export function kindBlockedReason(a: AuthInfo | null, kind: Intent["kind"]): string | null {

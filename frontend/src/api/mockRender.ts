@@ -6,6 +6,7 @@ import { MOCK_NUMBER, templateFrom } from "./mockData";
 import { ROLE, accessFroms, accessTos, conditionFor, intentEnglish, isMultiModify, modifyChange, removesAll, shortName } from "../lib/policy";
 import { modifyWarning } from "../lib/apply";
 import { timingNote, timingSentence } from "../lib/timing";
+import { GRANTS_LOST, REG_KIND_LABEL, grantsOnService, runAppHint, serviceOf } from "../lib/registry";
 
 const IAP = "https://iap.googleapis.com/v1";
 
@@ -21,11 +22,19 @@ const ident = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace
 const hcl = (s: string) => JSON.stringify(s).replace(/\$\{/g, "$${");
 const sq = (s: string) => `'${s.replace(/'/g, `'"'"'`)}'`;
 
+/** Shell variable holding the id of an entry a registry_service in the same cart creates (as the backend's entry_var). */
+const entryVar = (sid: string) => "ENTRY_" + sid.replace(/[^A-Za-z0-9]/g, "_").toUpperCase();
+
 function iapResource(ctx: Ctx, i: Intent) {
   const d = i.destination!;
   const base = `projects/${MOCK_NUMBER}/locations/${ctx.region}/iap_web/agentRegistry`;
-  return d.kind === "registry" ? base : `${base}/${REG_PATH[d.kind]}/${d.id}`;
+  return d.kind === "registry" ? base : `${base}/${REG_PATH[d.kind]}/${d.pending_service ? "${" + entryVar(d.pending_service) + "}" : d.id}`;
 }
+
+const lookupLines = (ctx: Ctx, sid: string) => [
+  `# The entry's id is assigned by Agent Registry when ${sid} is created: look it up.`,
+  `${entryVar(sid)}="$(gcloud agent-registry services describe ${sid} --project=${ctx.gateway_project || ctx.project} --location=${ctx.region} --format='value(registryResource.basename())')"`,
+];
 
 function grantOutputs(ctx: Ctx, i: Intent, revoke: boolean): { outputs: Outputs; warnings: string[]; notes: string[] } {
   const d = i.destination!;
@@ -54,7 +63,7 @@ function grantOutputs(ctx: Ctx, i: Intent, revoke: boolean): { outputs: Outputs;
   } else {
     const body = [
       `resource "${tfType}" "${name}" {`,
-      ...([["project", "var.project_id"], ["location", "var.region"], ...(tfKey ? [[tfKey, hcl(d.id)]] : []), ["role", `"${ROLE}"`], ["member", hcl(member)]] as const).map(
+      ...([["project", "var.project_id"], ["location", "var.region"], ...(tfKey ? [[tfKey, d.pending_service ? `basename(google_agent_registry_service.${ident(`registry_${d.pending_service}`)}.registry_resource)` : hcl(d.id)]] : []), ["role", `"${ROLE}"`], ["member", hcl(member)]] as const).map(
         ([k, v]) => `  ${k.padEnd(Math.max(tfKey.length, 8))} = ${v}`,
       ),
     ];
@@ -66,7 +75,7 @@ function grantOutputs(ctx: Ctx, i: Intent, revoke: boolean): { outputs: Outputs;
   // ---------- gcloud
   const flags = [
     `  --resource-type=agent-registry \\`,
-    ...(gFlag ? [`  --${gFlag}=${d.id} \\`] : []),
+    ...(gFlag ? [`  --${gFlag}=${d.pending_service ? '"$' + entryVar(d.pending_service) + '"' : d.id} \\`] : []),
     `  --region=${ctx.region} \\`,
     `  --project=${ctx.project} \\`,
     `  --member=${sq(member)} \\`,
@@ -74,6 +83,7 @@ function grantOutputs(ctx: Ctx, i: Intent, revoke: boolean): { outputs: Outputs;
   ];
   let gcloud: string;
   const verb = revoke ? "remove" : "add";
+  if (d.pending_service) notes.push(`The entry is created by the registry_service item for ${d.pending_service} in this cart; its id is assigned when the registry projects it, so the commands look it up (Apply fills it in).`);
   if (revoke && !cond) {
     gcloud = [`# ${intentEnglish(i)}`, `gcloud iap web remove-iam-policy-binding \\`, ...flags.slice(0, -1), `  --role=${ROLE} \\`, `  --condition=None`].join("\n");
   } else if (cond) {
@@ -95,7 +105,7 @@ function grantOutputs(ctx: Ctx, i: Intent, revoke: boolean): { outputs: Outputs;
 
   // ---------- REST
   const bindingJson = JSON.stringify({ role: ROLE, members: [member], ...(cond ? { condition: cond } : {}) });
-  const rest = [
+  let rest = [
     `# ${intentEnglish(i)}`,
     `# IAM is read-modify-write: read the policy (with its etag), change it, write it back.`,
     `RES="${res}"`,
@@ -143,7 +153,96 @@ function grantOutputs(ctx: Ctx, i: Intent, revoke: boolean): { outputs: Outputs;
     `client.set_iam_policy(request=iam_policy_pb2.SetIamPolicyRequest(resource=resource, policy=policy))`,
   ].join("\n");
 
+  if (d.pending_service) {
+    const look = lookupLines(ctx, d.pending_service).join("\n") + "\n";
+    const nl = gcloud.indexOf("\n");
+    gcloud = gcloud.slice(0, nl + 1) + look + gcloud.slice(nl + 1);
+    const nr = rest.indexOf("\n");
+    rest = rest.slice(0, nr + 1) + look + rest.slice(nr + 1);
+  }
   return { outputs: { terraform, gcloud, rest, python }, warnings, notes };
+}
+
+/** registry_service: create or delete an Agent Registry Service, like the backend's render (gcloud agent-registry
+ *  services create with one --interfaces per URL, REST POST ?serviceId=, google_agent_registry_service). */
+function registryOutputs(ctx: Ctx, w: World, i: Intent): { outputs: Outputs; warnings: string[]; notes: string[]; resource: string } {
+  const p = i.params ?? {};
+  const proj = p.project || w.GP;
+  const R = ctx.region;
+  const sid = p.service_id || "SERVICE_ID";
+  const kind = p.kind ?? "endpoint";
+  const svc = serviceOf(w.inventory, sid);
+  const ifs = p.delete && svc ? svc.interfaces : (p.interfaces ?? []);
+  const head = `# ${intentEnglish(i)}\n`;
+  const url = `https://agentregistry.googleapis.com/v1/projects/${proj}/locations/${R}/services`;
+  const resource = `projects/${proj}/locations/${R}/services/${sid}`;
+  const warnings: string[] = [];
+  const notes: string[] = [];
+  const cont = " \\\n  ";
+  if (p.delete) {
+    const n = grantsOnService(w.inventory, svc);
+    warnings.push(`Deleting the entry: ${GRANTS_LOST}.`);
+    notes.push("delete: removes the Service and the entry it projects (a long-running operation)", GRANTS_LOST + (n ? ` (${n} today)` : ""), "undo re-creates the Service with the same body (read just before the delete), as a new entry");
+    return {
+      resource,
+      warnings,
+      notes,
+      outputs: {
+        terraform: head + `# Delete the entry: remove its google_agent_registry_service block and run terraform apply. ${GRANTS_LOST}.`,
+        gcloud: head + [`gcloud agent-registry services delete ${sid}`, `--project=${proj} --location=${R} --quiet`].join(cont),
+        rest: head + `curl -sS --fail-with-body -X DELETE '${url}/${sid}' -H "Authorization: Bearer $(gcloud auth print-access-token)"`,
+        python: head + `delete_registry_service(${JSON.stringify(proj)}, ${JSON.stringify(R)}, ${JSON.stringify(sid)})`,
+      },
+    };
+  }
+  const body = {
+    displayName: p.display_name || sid,
+    ...(p.description ? { description: p.description } : {}),
+    interfaces: ifs.map((x) => ({ url: x.url, protocolBinding: x.protocol_binding })),
+    ...(kind === "mcp_server" ? { mcpServerSpec: p.tool_spec ? { type: "TOOL_SPEC", content: p.tool_spec } : { type: "NO_SPEC" } } : { endpointSpec: { type: "NO_SPEC" } }),
+  };
+  const hint = runAppHint(ifs.map((x) => x.url));
+  if (hint) warnings.push(hint);
+  notes.push(
+    `resource: a writable Agent Registry Service; the registry projects it into a read-only ${REG_KIND_LABEL[kind]} entry with its own id (registryResource), which IAP grants are set on`,
+    "interfaces: every URL agents call; the gateway matches hostnames exactly, so each form of a URL is its own interface",
+    kind === "mcp_server"
+      ? p.tool_spec
+        ? "mcpServerSpec: TOOL_SPEC, so tool conditions can match"
+        : "mcpServerSpec: NO_SPEC: no tool list, so tool conditions have no tool attributes to match (grant full access, or add the tool list)"
+      : "endpointSpec: NO_SPEC",
+    "registering isn't authorization: agents still need a roles/iap.egressor grant on the entry",
+  );
+  const binding = { JSONRPC: "jsonrpc", GRPC: "grpc", HTTP_JSON: "http-json" } as const;
+  const tf = [
+    `resource "google_agent_registry_service" "${ident(`registry_${sid}`)}" {`,
+    `  project      = ${hcl(proj)}`,
+    `  location     = ${hcl(R)}`,
+    `  service_id   = ${hcl(sid)}`,
+    `  display_name = ${hcl(p.display_name || sid)}`,
+    "",
+    kind === "mcp_server" ? `  mcp_server_spec {\n    type = "${p.tool_spec ? "TOOL_SPEC" : "NO_SPEC"}"\n  }` : `  endpoint_spec {\n    type = "NO_SPEC"\n  }`,
+    ...ifs.map((x) => `  interfaces {\n    url              = ${hcl(x.url)}\n    protocol_binding = "${x.protocol_binding}"\n  }`),
+    "}",
+  ].join("\n");
+  const gflags = [
+    `gcloud agent-registry services create ${sid}`,
+    `--project=${proj} --location=${R}`,
+    `--display-name=${sq(p.display_name || sid)}`,
+    kind === "mcp_server" ? `--mcp-server-spec-type=${p.tool_spec ? "tool-spec" : "no-spec"}` : "--endpoint-spec-type=no-spec",
+    ...ifs.map((x) => `--interfaces=${sq(`protocolBinding=${binding[x.protocol_binding]},url=${x.url}`)}`),
+  ];
+  return {
+    resource,
+    warnings,
+    notes,
+    outputs: {
+      terraform: head + "# google_agent_registry_service needs hashicorp/google >= 8.6.0.\n" + tf,
+      gcloud: head + gflags.join(cont),
+      rest: head + [`curl -sS --fail-with-body -X POST '${url}?serviceId=${sid}'`, `-H "Authorization: Bearer $(gcloud auth print-access-token)" -H "Content-Type: application/json"`, `-d ${sq(JSON.stringify(body))}`].join(cont),
+      python: head + `create_registry_service(${JSON.stringify(proj)}, ${JSON.stringify(R)}, ${JSON.stringify(sid)}, ${JSON.stringify(body)})`,
+    },
+  };
 }
 
 /** modify: one read-modify-write that swaps the binding with the old condition for one with the new condition, like
@@ -611,6 +710,10 @@ export function mockRender(ctx: Ctx, w: World, intents: Intent[]): RenderResult 
     } else if (i.kind === "bind_gateway" || i.kind === "unbind_gateway") {
       r = bindOutputs(ctx, w, i, i.kind === "unbind_gateway");
       anatomy = { resource: i.engine ?? "", role: "", member: "", condition: null, notes: r.notes };
+    } else if (i.kind === "registry_service") {
+      const s = registryOutputs(ctx, w, i);
+      r = s;
+      anatomy = { resource: s.resource, role: `Agent Registry ${REG_KIND_LABEL[i.params?.kind ?? "endpoint"]}`, member: (i.params?.interfaces ?? []).map((x) => `${x.url} (${x.protocol_binding})`).join(", "), condition: null, notes: s.notes };
     } else if (i.kind === "set_enforcement" || i.kind === "dedicate_extension") {
       const s = enforcementOutputs(ctx, w, i, intents);
       r = s;
@@ -675,6 +778,21 @@ const sameCond = (a: Binding["condition"], b: Binding["condition"]) => normExpr(
 
 export function mockDiff(w: World, intents: Intent[]): DiffResult {
   const items: DiffItem[] = intents.map((i) => {
+    if (i.kind === "registry_service") {
+      const p = i.params ?? {};
+      const svc = serviceOf(w.inventory, p.service_id ?? "");
+      if (p.delete) {
+        if (!svc) return { intent_id: i.id, status: "absent", current: null, detail: `no registry entry ${p.service_id}` };
+        const entry = [...w.inventory.mcp_servers, ...w.inventory.endpoints].find((x) => x.service === svc.name);
+        const cur = entry ? (w.inventory.access[entry.name] ?? []) : [];
+        return { intent_id: i.id, status: "remove", current: cur.length ? cur : null, after: [], detail: `will delete ${svc.display_name} (${svc.id}, ${svc.interfaces.map((x) => x.url).join(", ")})${cur.length ? `; its ${cur.length} grant${cur.length === 1 ? " goes" : "s go"} with it` : ""}. ${GRANTS_LOST}.` };
+      }
+      if (svc) return { intent_id: i.id, status: "present", current: null, detail: `${svc.id} already exists` };
+      const n = (p.interfaces ?? []).length;
+      return { intent_id: i.id, status: "add", current: null, detail: `will register ${n} URL${n === 1 ? "" : "s"}: ${(p.interfaces ?? []).map((x) => x.url).join(", ")}${i.id.startsWith("u-") ? " (a new entry: the IAP grants of the deleted one don't come back)" : ""}` };
+    }
+    if ((i.kind === "grant" || i.kind === "revoke" || i.kind === "modify") && i.destination?.pending_service)
+      return { intent_id: i.id, status: i.kind === "grant" ? "add" : "absent", current: [], detail: `on the new entry ${i.destination.pending_service}, registered by an earlier item in this request (it has no grants yet)` };
     if (i.kind === "grant" || i.kind === "revoke" || i.kind === "modify") {
       const res = i.destination?.name ?? "";
       const current = w.inventory.access[res] ?? [];

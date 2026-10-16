@@ -155,6 +155,8 @@ class Agent(_M):
     display_name: str = ""
     kind: Literal["runtime", "a2a"] = "a2a"
     url: Optional[str] = None
+    urls: list[str] = Field(default_factory=list)
+    service: Optional[str] = None      # the writable Service that projects it (None = auto-registered)
     skills: list[Skill] = Field(default_factory=list)
     engine: Optional[str] = None
     error: Optional[str] = None
@@ -173,6 +175,8 @@ class McpServer(_M):
     id: str
     display_name: str = ""
     url: Optional[str] = None
+    urls: list[str] = Field(default_factory=list)     # every interface URL (url is the first)
+    service: Optional[str] = None      # the writable Agent Registry Service that projects it (None = auto-registered)
     tools: list[Tool] = Field(default_factory=list)
     error: Optional[str] = None
 
@@ -182,7 +186,27 @@ class Endpoint(_M):
     id: str
     display_name: str = ""
     url: Optional[str] = None
+    urls: list[str] = Field(default_factory=list)
+    service: Optional[str] = None
     error: Optional[str] = None
+
+
+class RegistryInterface(_M):
+    url: str
+    protocol_binding: Literal["JSONRPC", "GRPC", "HTTP_JSON"] = "HTTP_JSON"
+
+
+class RegistryService(_M):
+    """A writable Agent Registry Service (agentregistry v1 .../services). The registry projects it into a read-only
+    Agent / McpServer / Endpoint (`registry_resource`, a different id); IAP grants are set on that projection."""
+    name: str
+    id: str
+    kind: Literal["endpoint", "mcp_server", "agent"] = "endpoint"
+    display_name: str = ""
+    description: str = ""
+    interfaces: list[RegistryInterface] = Field(default_factory=list)
+    registry_resource: str = ""        # projects/N/locations/R/{endpoints|mcpServers|agents}/ID ("" until projected)
+    tool_spec: Optional[dict[str, Any]] = None   # mcpServerSpec TOOL_SPEC content ({tools: [...]}), when set
 
 
 class Inventory(_M):
@@ -192,6 +216,7 @@ class Inventory(_M):
     endpoints: list[Endpoint] = Field(default_factory=list)
     access: dict[str, list[Binding]] = Field(default_factory=dict)
     access_errors: dict[str, str] = Field(default_factory=dict)
+    services: list[RegistryService] = Field(default_factory=list)   # writable registry Services (None read = [])
     project_agents_principal: Optional[str] = None
     errors: list[str] = Field(default_factory=list)
 
@@ -209,6 +234,9 @@ class Destination(_In):
     id: str
     name: str = ""
     label: str = ""
+    # The id of a registry_service created earlier in the same request: the entry's id isn't known until the registry
+    # projects it, so Apply fills it in after the create (and render looks it up).
+    pending_service: Optional[str] = None
 
 
 class Access(_In):
@@ -227,8 +255,9 @@ class GatewayRef(_In):
 
 IntentKind = Literal["grant", "revoke", "modify", "bind_gateway", "unbind_gateway", "model_armor_on",
                      "model_armor_off", "model_armor_template", "model_armor_extension", "iam_project_grant",
-                     "set_enforcement", "dedicate_extension"]
+                     "set_enforcement", "dedicate_extension", "registry_service"]
 SETUP_KINDS = ("model_armor_template", "model_armor_extension", "iam_project_grant")
+DELETABLE_KINDS = SETUP_KINDS + ("registry_service",)     # params.delete is the inverse (undo)
 ENFORCEMENT_KINDS = ("set_enforcement", "dedicate_extension")
 
 Level = Literal["LOW_AND_ABOVE", "MEDIUM_AND_ABOVE", "HIGH", "off"]
@@ -244,8 +273,13 @@ class TemplateFilters(_In):
     malicious_uri: bool = True
 
 
+class RegistryInterfaceIn(_In):
+    url: str = ""
+    protocol_binding: str = "HTTP_JSON"     # JSONRPC | GRPC | HTTP_JSON (checked by preflight)
+
+
 class SetupParams(_In):
-    """Parameters of the Model Armor setup kinds. `delete: true` is the inverse (undo) of each."""
+    """Parameters of the Model Armor setup kinds and registry_service. `delete: true` is the inverse (undo) of each."""
     project: Optional[str] = None          # where the template / extension / grant lives (default: gateway project)
     delete: bool = False
     # model_armor_template
@@ -260,6 +294,13 @@ class SetupParams(_In):
     member: Optional[str] = None
     roles: Optional[list[str]] = None
     gateway: Optional[str] = None           # informational: the gateway whose service agent this is
+    # registry_service (an Agent Registry entry: one Service, several interface URLs)
+    kind: Optional[str] = None              # endpoint | mcp_server (A2A agents need an agent card: not supported)
+    service_id: Optional[str] = None
+    display_name: Optional[str] = None
+    description: Optional[str] = None
+    interfaces: Optional[list[RegistryInterfaceIn]] = None
+    tool_spec: Optional[dict[str, Any]] = None   # mcp_server: TOOL_SPEC content (an undo re-creates it); else NO_SPEC
 
 
 class Intent(_In):
@@ -332,11 +373,11 @@ class Intent(_In):
 
     @property
     def is_delete(self) -> bool:
-        return self.kind in SETUP_KINDS and bool(self.params and self.params.delete)
+        return self.kind in DELETABLE_KINDS and bool(self.params and self.params.delete)
 
     @property
     def is_destructive(self) -> bool:
-        """Revokes, unbinds, Model Armor off, setup deletes, dry run (stops blocking) and reverting a dedicated
+        """Revokes, unbinds, Model Armor off, setup and registry entry deletes, dry run (stops blocking) and reverting a dedicated
         extension (deletes it). A modify isn't (render and preflight warn when it widens access), except its "remove
         all" form, which removes every binding it names and adds none."""
         if self.kind in ("revoke", "unbind_gateway", "model_armor_off"):

@@ -163,8 +163,20 @@ export function mergeStaged(before: PolicyGraph, after: PolicyGraph, d: GraphDif
     const shield = to ? { to, template: (to === "off" ? bn.get(n.id) : n)?.modelArmor?.template } : undefined;
     return { ...n, chips, pending: { text: t, intents, ...(shield ? { shield } : {}) } };
   });
-  for (const n of before.nodes)
-    if (!afterIds.has(n.id) && needed.has(n.id)) nodes.push({ ...n, chips: [...n.chips, { text: "Removed (staged)", tone: "amber", pending: true }], pending: { text: ["Its last grant is staged for removal"], removed: true, intents: [] } });
+  // A destination a staged registry_service registers (new in after) or deletes (gone in after): pending marks
+  const regIntents = (id: string) => cart.filter((i) => i.kind === "registry_service" && (effects[i.id] ?? []).includes(id)).map((i) => i.id);
+  for (const [k, n] of nodes.entries()) {
+    if (bn.has(n.id) || n.column !== "dests") continue;
+    const ids = regIntents(n.id);
+    if (!ids.length) continue;
+    nodes[k] = { ...n, chips: [...n.chips, { text: "New entry (staged)", tone: "amber", pending: true }], pending: { text: ["Registered by a staged change"], intents: ids, added: true } };
+  }
+  for (const n of before.nodes) {
+    if (afterIds.has(n.id)) continue;
+    const ids = n.column === "dests" ? regIntents(n.id) : [];
+    if (ids.length) nodes.push({ ...n, chips: [...n.chips, { text: "Deletion staged", tone: "amber", pending: true }], pending: { text: ["The registry entry is staged for deletion (its grants go with it)"], removed: true, intents: ids } });
+    else if (needed.has(n.id)) nodes.push({ ...n, chips: [...n.chips, { text: "Removed (staged)", tone: "amber", pending: true }], pending: { text: ["Its last grant is staged for removal"], removed: true, intents: [] } });
+  }
   return { ...after, nodes, edges };
 }
 

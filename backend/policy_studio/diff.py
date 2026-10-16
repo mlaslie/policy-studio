@@ -8,8 +8,9 @@ from .english import condition_english, make_binding, modify_change
 from .gcp.engines import tail
 from .model import Binding, Condition, DiffItem, Gateway, Intent, Inventory
 from .gcp import model_armor as ma_mod
-from .render import (MODE_LABEL, Blocked, RenderEnv, dedicate_names, engine_full, english_list, ext_spec, gateway_full,
-                     proj_iam_spec, short, template_spec)
+from .gcp import registry as reg_mod
+from .render import (GRANTS_LOST, MODE_LABEL, Blocked, RenderEnv, dedicate_names, engine_full, english_list, ext_spec,
+                     find_service, gateway_full, proj_iam_spec, short, template_spec)
 
 
 def resource_key(intent: Intent, inv: Inventory, env: RenderEnv) -> Optional[str]:
@@ -39,6 +40,12 @@ def _diff_iam(intent: Intent, inv: Inventory, env: RenderEnv) -> DiffItem:
     d = intent.destination
     label = (d.label or d.name or d.id) if d else ""
     kind = d.kind if d else "mcp_server"
+    if d and d.pending_service:
+        grant = intent.kind == "grant"
+        return DiffItem(intent_id=intent.id, status="add" if grant else "absent", current=[],
+                        after=[_new_binding(intent, want, label, kind, inv)] if grant else None,
+                        detail=f"on the new entry {d.pending_service}, registered by an earlier item in this request "
+                               "(it has no grants yet)")
     if key is None or key not in inv.access:
         err = inv.access_errors.get(key or "", "")
         detail = (f"current IAM policy unavailable ({err})" if err else
@@ -230,6 +237,40 @@ def _diff_enforcement(intent: Intent, gateways: list[Gateway], env: RenderEnv) -
                                       f"{short(cur_ext)}" if enf.shared_with else ""))
 
 
+def _diff_registry(intent: Intent, inv: Inventory, env: RenderEnv) -> DiffItem:
+    """registry_service against the region's Services (and, for a delete, the grants on the entry)."""
+    p = intent.params
+    sid = ((p.service_id if p else "") or "").strip()
+    delete = intent.is_delete
+    if env.registry is None:
+        return DiffItem(intent_id=intent.id, status="remove" if delete else "add",
+                        detail="the region's registry entries are unknown (couldn't list services)")
+    svc = find_service(env, sid)
+    if delete:
+        if svc is None:
+            return DiffItem(intent_id=intent.id, status="absent", detail=f"no registry entry {sid}")
+        key = next((x.name for coll in (inv.mcp_servers, inv.endpoints, inv.agents) for x in coll
+                    if x.service == svc.name), None)
+        current = inv.access.get(key, []) if key else []
+        n = len(current)
+        urls = english_list([i.url for i in svc.interfaces])
+        return DiffItem(intent_id=intent.id, status="remove", current=current or None, after=[],
+                        detail=f"will delete {svc.display_name} ({sid}, {urls})"
+                               + (f"; its {n} grant{'s go' if n != 1 else ' goes'} with it" if n else "")
+                               + f". {GRANTS_LOST}.")
+    if svc is not None:
+        same = reg_mod.same_interfaces([{"url": i.url, "protocolBinding": i.protocol_binding} for i in svc.interfaces],
+                                       [{"url": i.url, "protocolBinding": (i.protocol_binding or "").upper()}
+                                        for i in (p.interfaces if p else None) or []])
+        return DiffItem(intent_id=intent.id, status="present" if same else "absent",
+                        detail=f"{sid} already exists" + ("" if same else " with other URLs: pick another id"))
+    urls = [i.url for i in (p.interfaces if p else None) or [] if i.url]
+    return DiffItem(intent_id=intent.id, status="add",
+                    detail=f"will register {len(urls)} URL{'s' if len(urls) != 1 else ''}: {english_list(urls)}"
+                           + (" (a new entry: the IAP grants of the deleted one don't come back)" if intent.id.startswith("undo-")
+                              else ""))
+
+
 def diff(intents: list[Intent], inv: Inventory, gateways: list[Gateway], env: RenderEnv,
          ma: Optional[dict[str, Any]] = None) -> list[DiffItem]:
     out = []
@@ -242,6 +283,8 @@ def diff(intents: list[Intent], inv: Inventory, gateways: list[Gateway], env: Re
             out.append(_diff_setup(it, env, ma))
         elif it.kind in ("set_enforcement", "dedicate_extension"):
             out.append(_diff_enforcement(it, gateways, env))
+        elif it.kind == "registry_service":
+            out.append(_diff_registry(it, inv, env))
         else:
             out.append(_diff_ma(it, gateways, env))
     return out

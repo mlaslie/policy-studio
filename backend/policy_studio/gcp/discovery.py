@@ -37,6 +37,8 @@ PERMISSIONS: list[tuple[str, str, str, bool]] = [
     ("agentregistry.agents.list", "list A2A / Runtime agents in Agent Registry", "roles/agentregistry.viewer", False),
     ("agentregistry.mcpServers.list", "list MCP servers in Agent Registry", "roles/agentregistry.viewer", False),
     ("agentregistry.endpoints.list", "list API endpoints in Agent Registry", "roles/agentregistry.viewer", False),
+    ("agentregistry.services.list", "list registered Services (which entry Policy Studio can delete, duplicate URLs)",
+     "roles/agentregistry.viewer", False),
     ("iap.webServiceVersions.getIamPolicy", "read who may reach each Agent Registry entry (IAP IAM)",
      "roles/iap.admin", False),
     ("modelarmor.templates.list", "read Model Armor templates and filters", "roles/modelarmor.viewer", False),
@@ -67,6 +69,8 @@ PERMISSIONS: list[tuple[str, str, str, bool]] = [
      "roles/networkservices.admin", True),
     ("networksecurity.authzPolicies.update", "give a gateway its own IAP extension", "roles/networksecurity.editor",
      True),
+    ("agentregistry.services.create", "register a destination in Agent Registry", "roles/agentregistry.editor", True),
+    ("agentregistry.services.delete", "delete an Agent Registry entry", "roles/agentregistry.editor", True),
 ]
 
 _numbers: dict[str, str] = {}

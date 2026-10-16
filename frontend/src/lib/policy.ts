@@ -2,6 +2,7 @@
 // plain-English sentences for intents, and principal helpers. The backend's /render is the source of
 // truth for generated commands; this module only powers instant previews and labels.
 import type { Access, AccessMode, Ctx, Intent, McpServer } from "../api/types";
+import { registryEnglish } from "./registry";
 
 export const ROLE = "roles/iap.egressor";
 export const TOOL_ATTR = "iap.googleapis.com/mcp.toolName";
@@ -148,6 +149,8 @@ export function intentEnglish(i: Intent): string {
       return i.revert
         ? `Point ${gw} back at ${shortName(i.source_extension ?? "") || "its original extension"} and delete ${i.new_name ?? "its own extension"}.`
         : `Give ${gw} its own IAP extension ${i.new_name ?? ""} (a copy of ${shortName(i.source_extension ?? "") || "the shared one"}).`;
+    case "registry_service":
+      return registryEnglish(i);
   }
 }
 
@@ -164,10 +167,12 @@ export const KIND_LABEL: Record<Intent["kind"], string> = {
   iam_project_grant: "Service agent roles",
   set_enforcement: "Enforcement mode",
   dedicate_extension: "Own IAP extension",
+  registry_service: "Registry entry",
 };
 
 /** Order used for the review list: infrastructure first, then grants (plan §5). */
 export const KIND_ORDER: Record<Intent["kind"], number> = {
+  registry_service: -1,
   bind_gateway: 0,
   unbind_gateway: 1,
   model_armor_template: 2,
@@ -205,7 +210,7 @@ export function intentKey(i: Intent): string {
     gateway: g ? [shortName(g.name), g.direction] : null,
     engine: i.engine ? shortName(i.engine) : null,
     source: i.source?.principal ?? null,
-    destination: i.destination ? [i.destination.kind, i.destination.id || shortName(i.destination.name)] : null,
+    destination: i.destination ? [i.destination.kind, i.destination.id || shortName(i.destination.name), ...(i.destination.pending_service ? [i.destination.pending_service] : [])] : null,
     access: a ? [a.mode, [...(a.tools ?? [])].filter(Boolean).sort(), a.expression ?? "", a.title ?? null] : null,
     access_from: f ? [f.mode, [...(f.tools ?? [])].filter(Boolean).sort(), f.expression ?? "", f.title ?? null] : null,
     access_from_list: list(i.access_from_list),

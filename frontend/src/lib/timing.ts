@@ -57,6 +57,7 @@ export const TIMING: Record<Kind, Timing> = {
   model_armor_off: t("estimate", 1, 3, 5, ["about 4 min", 240], "usually in a few minutes", "turning Model Armor off takes about 4 min, then usually a few more (not measured)", "Prompts may still be screened, and blocked, until then."),
   model_armor_template: t("estimate", 1, 3, 5, FEW_SECONDS, "in a few minutes", "a Model Armor template change takes a few minutes (not measured)", "Model Armor may still use the old settings until then."),
   model_armor_extension: t("estimate", 1, 3, 5, ["about 1 min", 60], "in a few minutes", "a Model Armor extension change takes a few minutes (not measured)", "Model Armor on may not find it until then."),
+  registry_service: t("estimate", 0.5, 2, 5, ["about 30 s", 30], "in a few minutes", "a registry entry is created or deleted in seconds, then takes a few minutes to reach the gateway (not measured); grants on a new entry follow IAM timing", "The gateway may still answer 403 (unregistered) for a new entry, or still route to a deleted one, until then."),
 };
 
 export const BASIS_LABEL: Record<Basis, string> = { measured: "measured", documented: "Google's documented range", estimate: "not measured" };

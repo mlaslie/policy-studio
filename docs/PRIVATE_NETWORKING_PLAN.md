@@ -1,6 +1,6 @@
 # Policy Studio: private networking (plan)
 
-**Status:** N-1 and N-2 built (detection, audit, preflight, UI; see §10). N-3 and N-4 not started. **Scope narrowed 2026-10-15** (user decision): Policy Studio *detects* private networking. It doesn't build it.
+**Status:** N-1, N-2 and N-3 built (detection, audit, preflight, UI, registry entries; see §10). N-4 not started. **Scope narrowed 2026-10-15** (user decision): Policy Studio *detects* private networking. It doesn't build it.
 
 The original, much larger plan (create attachments, DNS zones, PSC endpoints and connectivity templates; migrate gateways; detect private destinations) is kept below as **Appendix A** for reference. It is superseded. Live-test results are in [P0_FINDINGS.md](P0_FINDINGS.md). A step-by-step console guide for building private egress by hand exists as a separate PDF.
 
@@ -72,7 +72,7 @@ Block `bind_gateway` for an engine with `psc_interface`. Message: "This agent ha
 ## 6. UI
 
 - **Gateways step:** a "Private egress" row on the gateway card. It shows the VPC, the domains as chips, the egress mode, and template vs inline. When the gateway has none, the row reads "Public egress only".
-- **Policy map:** a small "Private egress · corp-vpc" chip on the gateway node, with the tooltip listing the domains. On agent nodes with a PSC interface, a red "Own VPC access (bypasses gateway)" chip.
+- **Policy map:** a small "Private egress · corp-vpc" chip on the gateway node, with the tooltip listing the domains. On agent nodes with a PSC interface, a red "Direct VPC access (bypasses gateway)" chip.
 - **Inventory:** a "Private networking" column on engines.
 - **Audit:** N1–N5.
 - **Learn panel / glossary:** short entries for "PSC interface", "connectivity template" and "private egress", reusing the plain-English explanations.
@@ -117,9 +117,11 @@ N-1 plus N-2 is the 3–4 days discussed. N-3 is the separate registry write pat
 | Phase | Status | Where |
 |---|---|---|
 | N-1 | **Built** | `gcp/networking.py` (pure parsers + rules); wired in `service.py` (template read by project id, optional attachment read, cached like the other reads; a 403 gives `error: "can't read details: …"`), `gcp/engines.py` (`psc_interface`; a PSC interface makes the engine unbindable, that reason first), `gcp/discovery.py` (3 read permissions, `compute.googleapis.com`); `docs/API.md`; mock world (`api/mockData.ts`, `mockScale.ts`) and `backend/tests/fakegcp.py`. |
-| N-2 | **Built** | `audit.py` N1–N5 (`Finding.rule`, `redeploy` for N1/N2, `guidance` for N3); preflight / render block of `bind_gateway` through `bindable=false`; Gateways "Private egress" row, map chips (gateway "Private egress · VPC", agent "Own VPC access (bypasses gateway)" and "Broken: PSC interface + gateway"), Inventory "Private networking", Learn and glossary. The frontend port of the rules (`lib/networking.ts`) and the backend read one fixture (`backend/tests/fixtures/networking_cases.json`). |
-| N-3 | Not started | |
+| N-2 | **Built** | `audit.py` N1–N5 (`Finding.rule`, `redeploy` for N1/N2, `guidance` for N3); preflight / render block of `bind_gateway` through `bindable=false`; Gateways "Private egress" row, map chips (gateway "Private egress · VPC", agent "Direct VPC access (bypasses gateway)" and "Broken: PSC interface + gateway"), Inventory "Private networking", Learn and glossary. The frontend port of the rules (`lib/networking.ts`) and the backend read one fixture (`backend/tests/fixtures/networking_cases.json`). |
+| N-3 | **Built** | `registry_service` intent (`model.py`; `params.kind` endpoint / mcp_server, `service_id`, `display_name`, `description`, `interfaces[{url, protocol_binding}]`, `tool_spec`, `delete`; `destination.pending_service` for a grant on an entry created in the same request). `gcp/registry.py` (Services listed into the inventory, entries linked to their Service, URL / run.app / id helpers), `apply.py` (create first and delete last, LRO waited for, `registryResource` polled, interfaces read back, NOT_FOUND after a delete, undo both ways), `preflight.py` (region, id, https / wildcard / duplicate URL, run.app hint, delete warnings), `diff.py`, `render.py` (gcloud, REST, Python, Terraform `google_agent_registry_service`), `english.py`, `timing.py` + `lib/timing.ts`, `gcp/writer.py` (POST / DELETE with a body guard), `gcp/auth.py` (`roles/agentregistry.editor`). UI: Builder "Register a new destination…" (with the private-domain hint), Inventory "Register…" / "Delete entry…", map pending nodes, preview, Review, Apply, Undo; mock world with Services. |
 | N-4 | Not started | |
+
+Choices made while building N-3: the API shapes come from the v1 discovery document (only `services` is writable; `endpoints` / `mcpServers` / `agents` are read-only projections with their own ids, so a grant on a new entry is resolved after the create); A2A agents are out of scope (the registry takes an agent card with no interfaces, not URLs); an MCP server is registered NO_SPEC unless the user pastes its `tools/list` (tool conditions need it); deleting is a warning, not a block (the grants that go with it are counted, and Google API hosts flagged); Terraform uses `google_agent_registry_service` (hashicorp/google >= 8.6.0, validated with 8.6.0).
 
 Choices made while building: N2 means a PSC interface plus an **egress** binding (the combination P0 tested); the map's PSC chips show on the egress view only; the attachment's `network` field names the VPC (the subnet URL doesn't), falling back to the DNS `targetNetwork`; the N3 guidance sends `labels` in the update mask (P0: a PATCH can drop them).
 

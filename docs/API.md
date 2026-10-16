@@ -103,11 +103,24 @@ Inventory = {
               psc_interface: null | { network_attachment, vpc?: string /* from the attachment, when readable */,
                                       dns_domains: string[] } /* spec.deploymentSpec.pscInterfaceConfig: the agent's
                                       own way into a VPC, which skips the gateway */ }],
-  agents:  [{ name, id, display_name, kind: "runtime"|"a2a", url?, skills: [{id, name, description}], engine?, error? }],
-  mcp_servers: [{ name, id, display_name, url?, tools: [{name, description, read_only, destructive, annotations}], error? }],
-  endpoints: [{ name, id, display_name, url, error? }],
+  agents:  [{ name, id, display_name, kind: "runtime"|"a2a", url?, urls: string[], service: string | null,
+              skills: [{id, name, description}], engine?, error? }],
+  mcp_servers: [{ name, id, display_name, url?, urls: string[] /* every interface URL; url is the first */,
+                  service: string | null /* the writable Service behind it; null = auto-registered */,
+                  tools: [{name, description, read_only, destructive, annotations}], error? }],
+  endpoints: [{ name, id, display_name, url, urls: string[], service: string | null, error? }],
+  services: [RegistryService] /* the region's writable Services; [] when they can't be listed (errors says why) */,
   access: { [registryResourceName]: Binding[] }, access_errors: { [registryResourceName]: string },
   project_agents_principal: string | null, errors: string[], synced_at }
+RegistryService = { name /* projects/P/locations/R/services/ID */, id, kind: "endpoint"|"mcp_server"|"agent",
+                    display_name, description, interfaces: [{url, protocol_binding: "JSONRPC"|"GRPC"|"HTTP_JSON"}],
+                    registry_resource /* projects/N/locations/R/{endpoints|mcpServers|agents}/ID: the projection IAP
+                                         grants are set on (its own id, agentregistry-...); "" until projected */,
+                    tool_spec?: {tools: [...]} /* mcpServerSpec TOOL_SPEC content */ }
+  // Agent Registry v1 (discovery document, Oct 2026): services is the only writable collection; endpoints,
+  // mcpServers and agents are read-only projections of Services (plus auto-registered entries, e.g. Agent Runtime
+  // agents, which have no Service). GET .../services lists them (agentregistry.services.list, in
+  // roles/agentregistry.viewer).
 Binding = { role, member, member_label, condition?: {title, expression}, english }
 Grant  = Binding & { resource, resource_kind: "agent"|"mcp_server"|"endpoint"|"registry", resource_label }
   // To revoke a Grant, send its exact condition: access {mode: "custom", expression: <condition.expression>,
@@ -130,9 +143,13 @@ Finding = { severity: "high"|"medium"|"info", title, detail, resource?, fix?: In
 
 Intent = { id, kind: "grant"|"revoke"|"modify"|"bind_gateway"|"unbind_gateway"|"model_armor_on"|"model_armor_off"
               |"model_armor_template"|"model_armor_extension"|"iam_project_grant"
-              |"set_enforcement"|"dedicate_extension",
+              |"set_enforcement"|"dedicate_extension"|"registry_service",
   source?:      { type: "engine"|"project_agents"|"custom", principal, label, engine? },
-  destination?: { kind: "agent"|"mcp_server"|"endpoint"|"registry", id, name, label },
+  destination?: { kind: "agent"|"mcp_server"|"endpoint"|"registry", id, name, label,
+                  pending_service?: string /* the service id of a registry_service create in the same request: the
+                                              entry's id isn't known until the registry projects it, so Apply runs
+                                              the create first and fills it in; id "" and name
+                                              "pending-registry/<service id>" (the UI's map name) meanwhile */ },
   access?:      { mode: "all"|"read_only_hint"|"tools"|"custom", tools?: string[], expression?: string,
                   title?: string /* exact condition title, e.g. when revoking an existing binding */ },
                   // grant/revoke: no access = unconditional. Revoke fixes (/audit) and the undo of a revoke carry
@@ -178,11 +195,38 @@ SetupParams = { project? /* default: the gateway project */, delete?: boolean /*
   // model_armor_extension
   name?, template? /* id or projects/P/locations/R/templates/T */,
   // iam_project_grant (only the three Model Armor roles)
-  member?, roles?: string[], gateway? }
+  member?, roles?: string[], gateway?,
+  // registry_service (an Agent Registry entry)
+  kind?: "endpoint"|"mcp_server", service_id?, display_name?, description?,
+  interfaces?: [{url, protocol_binding: "JSONRPC"|"GRPC"|"HTTP_JSON"}] /* every URL the agents call */,
+  tool_spec?: {tools: [...]} /* mcp_server only: the tools/list response, sent as mcpServerSpec TOOL_SPEC (an undo of
+                                a delete re-creates it); without it NO_SPEC, so tool conditions have no tool
+                                attributes to match */ }
+  // registry_service: create = POST https://agentregistry.googleapis.com/v1/projects/P/locations/R/services
+  //   ?serviceId=ID with {displayName, description?, interfaces[{url, protocolBinding}], endpointSpec {type: NO_SPEC} |
+  //   mcpServerSpec {type: NO_SPEC | TOOL_SPEC, content}} (a long-running operation, waited for), then GET the Service
+  //   until registryResource is set and check the interfaces (same url + protocolBinding pairs). delete
+  //   (params.delete) = GET the Service (its body becomes the undo), DELETE .../services/ID (long-running), read back
+  //   NOT_FOUND. Destructive: the entry's IAP grants go with it, and the undo (a create with the same body) is a new
+  //   entry without them. A2A agents are out of scope (Agent Registry registers them from an agent card: agentSpec
+  //   A2A_AGENT_CARD with no interfaces); kind "agent" renders as an item error and preflight blocks it.
+  //   English: "Register MCP server Notes MCP (notes-mcp) in Agent Registry, at 2 URLs: …" / "Delete the Agent
+  //   Registry MCP server Notes MCP (notes-mcp): agents can no longer reach its URLs through the gateway, and the IAP
+  //   grants on it are removed with it."
+  //   Render: gcloud agent-registry services create ID --project --location --display-name [--description]
+  //   --endpoint-spec-type=no-spec | --mcp-server-spec-type=no-spec|tool-spec [--mcp-server-spec-content] and one
+  //   --interfaces=protocolBinding=jsonrpc|grpc|http-json,url=URL per URL (flags checked with --help; services
+  //   delete ID --quiet); REST the calls above; Python over an AuthorizedSession (create_registry_service /
+  //   delete_registry_service / registry_entry_id); Terraform google_agent_registry_service (hashicorp/google >= 8.6.0,
+  //   schema checked; the bundle's required_providers asks for it when it has one). A grant on a pending entry looks
+  //   the id up after the create: gcloud agent-registry services describe ID --format='value(registryResource.
+  //   basename())' (polled, it is filled a few seconds after the create), REST GET + jq, Python registry_entry_id(),
+  //   Terraform basename(google_agent_registry_service.<name>.registry_resource).
   // model_armor_on without gateway.extension uses an extension a model_armor_extension in the same request creates
   // (no placeholder, no warning); otherwise the one discovery finds; otherwise MODEL_ARMOR_EXTENSION with a warning.
-  // Bundle / apply order: bindings, template -> extension -> service agent roles -> Model Armor on/off, grants;
-  // setup deletes after Model Armor off, in reverse.
+  // Bundle / apply order: registry entry creates, bindings, template -> extension -> service agent roles -> Model
+  // Armor on/off, grants; setup deletes after Model Armor off, in reverse; registry entry deletes last (after the
+  // revokes on them).
   // Duplicates (same kind + gateway / engine / source / destination / access / params) render with a warning
   // and are left out of the bundle; /apply skips them. bind_gateway of an engine that can't be bound renders as an
   // item error.
@@ -241,7 +285,18 @@ PreflightItem = { intent_id, status: "ok"|"blocked"|"duplicate"|"invalid", reaso
   // modify whose access equals access_from (fix "already"; several bindings: the same set of conditions), or whose
   // access_from binding isn't in the current inventory ("The grant changed since you looked; Sync and try again";
   // several bindings: blocked when ANY of access_from_list is missing, unless the whole change is already there).
-
+  // registry_service (from the inventory's Services and entry URLs; skipped when they couldn't be listed):
+  //   the region isn't a single region (us / eu / global); kind isn't endpoint / mcp_server (A2A: out of scope);
+  //   the service id breaks the API's rule (4–63 lowercase letters, digits and hyphens, starting with a letter) or
+  //   exists; no URL; a URL that isn't https, has a wildcard or no host, or is listed twice; a protocol binding other
+  //   than JSONRPC / GRPC / HTTP_JSON; a URL already registered by another entry in the region (fix "duplicate",
+  //   "Duplicate: <url> is already registered in <region> as <name> (<id>)") or by an earlier create in the request;
+  //   a delete of a Service that isn't there (fix "already").
+  //   warning: only one of Cloud Run's two URL forms (SERVICE-PROJECT_NUMBER.REGION.run.app or
+  //   SERVICE-HASH-XX.a.run.app; "also register the other run.app URL shown on the Cloud Run page"); a delete: "N
+  //   grants on this entry will be removed with it", and a Google API host the bound agents lose.
+  //   A grant (revoke, modify) on destination.pending_service is blocked when no create in the request registers it,
+  //   and "Not attempted" when that create is blocked.
 DiffItem = { intent_id, status: "add"|"present"|"replace"|"remove"|"absent", detail, error? /* invalid intent */,
              current: Binding[] | null /* the member's roles/iap.egressor bindings on the resource today */,
              after:   Binding[] | null /* the same after the change; null for gateway / Model Armor intents */ }
@@ -255,6 +310,9 @@ DiffItem = { intent_id, status: "add"|"present"|"replace"|"remove"|"absent", det
   // other bindings); "absent" when any of access_from_list is missing.
   // set_enforcement: "replace" (mode changes; detail "gw: Dry run → Enforce", plus shared gateways), "present" (same
   // mode), with current_mode / target_mode. dedicate_extension: "add" / "present"; revert: "remove" / "absent".
+  // registry_service: "add" ("will register 2 URLs: …"), "present" (the id exists with the same URLs), "absent" (the
+  // id exists with other URLs; a delete of nothing), "remove" (current = the bindings on the entry, after = [];
+  // detail names the grants that go with it). A grant on a pending entry: "add", "on the new entry <id>".
 
 GatewayLogs = { gateway, since /* RFC 3339 */, filter, console_url, notes: [str], errors: [str],
                 truncated /* some entries of the window aren't in entries (see notes for which) */,
@@ -359,11 +417,11 @@ Available only when `can_apply`; otherwise it returns 403 with the reason.
 {"context": {...}, "intents": [Intent], "confirm": {"project": "proj-b", "acknowledge_destructive": false}}
 ```
 
-`confirm.project` must equal `context.project`. Revokes, unbinds, `model_armor_off`, setup deletes (`params.delete`), `set_enforcement` to `DRY_RUN` and `dedicate_extension` with `revert` need `acknowledge_destructive: true`.
+`confirm.project` must equal `context.project`. Revokes, unbinds, `model_armor_off`, setup and registry entry deletes (`params.delete`), `set_enforcement` to `DRY_RUN` and `dedicate_extension` with `revert` need `acknowledge_destructive: true`.
 
 The response streams NDJSON or SSE events per intent: `{intent_id, state: "running"|"done"|"verified"|"failed"|"skipped", detail, operation?, undo?: Intent, raw_error?, blocked?, fix?, effect?, effect_after_s?, effect_max_s?, effect_measured?}`, then `{type: "done", summary}` (`summary.blocked` counts preflight refusals).
 
-Verified means stored, not in effect. A `verified` event also says how long the gateway takes to enforce the change (`backend/policy_studio/timing.py`, the same table as `frontend/src/lib/timing.ts`): `effect` ("Stored. Takes effect in a few minutes (up to about 7)."), `effect_after_s` and `effect_max_s` (typical and max seconds after the event) and `effect_measured`. Grants, revokes, modify and service agent roles: 120 / 420 (Google's documented IAM range). Bind / unbind: 60 / 120 after the redeploy (about 5 minutes, which Apply waits for). `set_enforcement`: 120 / 180 (measured: 2m40s, 2m08s, 2m19s after Apply). `dedicate_extension`: 150 / 180. Model Armor on / off and setup: 180 / 300 (not measured). The apply log records the same fields per item, and the done entry adds `ready_after_s` / `ready_max_s`: the largest typical and the largest max among the verified items. Generated bundles and items end with a comment saying how long their changes take.
+Verified means stored, not in effect. A `verified` event also says how long the gateway takes to enforce the change (`backend/policy_studio/timing.py`, the same table as `frontend/src/lib/timing.ts`): `effect` ("Stored. Takes effect in a few minutes (up to about 7)."), `effect_after_s` and `effect_max_s` (typical and max seconds after the event) and `effect_measured`. Grants, revokes, modify and service agent roles: 120 / 420 (Google's documented IAM range). Bind / unbind: 60 / 120 after the redeploy (about 5 minutes, which Apply waits for). `set_enforcement`: 120 / 180 (measured: 2m40s, 2m08s, 2m19s after Apply). `dedicate_extension`: 150 / 180. Model Armor on / off and setup: 180 / 300 (not measured). `registry_service`: 120 / 300 (not measured; the create or delete itself takes seconds). The apply log records the same fields per item, and the done entry adds `ready_after_s` / `ready_max_s`: the largest typical and the largest max among the verified items. Generated bundles and items end with a comment saying how long their changes take.
 
 Before any call, duplicates are `skipped` and the `/preflight` blockers `failed` with `blocked: true`. Known Google Cloud errors get a plain-English `detail` (e.g. the AGENT_IDENTITY 400 on a bind) with the original in `raw_error`.
 
@@ -377,5 +435,8 @@ Each intent is applied, then read back and verified:
 - **set_enforcement:** GET the extension (must be `iap.googleapis.com`; skipped if already in the mode) → PATCH `?updateMask=metadata,failOpen` with the live metadata (only `iamEnforcementMode` added or removed) → wait for the operation → read back mode and failOpen. Undo: the previous mode.
 - **dedicate_extension:** GET the source extension and the gateway's REQUEST_AUTHZ policy (must use the source and target only this gateway) → create the copy (waited for) → PATCH the policy `?updateMask=customProvider.authzExtension.resources` (waited for) → read back. Runs before other kinds, so a `set_enforcement` of the copy in the same request finds it (and is skipped if the copy failed). Undo: `revert` (PATCH back, delete the copy unless another policy uses it). The policy PATCH uses `?updateMask=customProvider.authzExtension.resources,labels` with the current labels re-sent (a PATCH without labels in the mask clears them), and the read-back checks the labels are unchanged. A `set_enforcement` of the copy a dedicate created in the same request gets no undo of its own (the revert deletes the copy); and a `set_enforcement` of a copy that a revert in the same request deletes is skipped (it still runs when the copy is kept because another policy uses it). The writer allows only these two PATCH masks, with bodies limited to those fields.
 - **iam_project_grant:** project getIamPolicy → add (or remove) the member in the Model Armor roles only → setIamPolicy with the etag (retried on a conflict); read back. The writer refuses any other change to the project policy.
+- **registry_service:** create: GET the Service (same URLs: `skipped`, other URLs: `failed`) → POST `.../services?serviceId=ID` (long-running, waited for) → GET until `registryResource` is set (within the operation timeout, at most 2 minutes) → read back the interfaces (same url + protocolBinding pairs) → `verified` ("registered with 2 URLs …; entry agentregistry-…"). Runs before every other kind, so a grant on `destination.pending_service` in the same request runs after it, with the destination filled in from `registryResource` (its undo names the real entry); if the create failed the grant is `skipped` ("Not attempted"). Undo: the delete. Delete: GET the Service (not there: `skipped`; an A2A agent entry: `failed`) → DELETE (long-running, waited for) → read back NOT_FOUND. Runs last. Undo: a create with the body read before the delete (display name, description, interfaces, tool spec); the entry's IAP grants don't come back.
+
+Writer allowlist (`gcp/writer.py`), besides the calls above: `POST https://agentregistry.googleapis.com/v1/projects/P/locations/R/services?serviceId=ID` (body checked: only `displayName`, `description`, `interfaces` [≥ 1, each exactly `{url: https://…, protocolBinding: JSONRPC|GRPC|HTTP_JSON}`, no wildcard] and exactly one of `endpointSpec {type: NO_SPEC}` / `mcpServerSpec {type: NO_SPEC | TOOL_SPEC, content}`; never `agentSpec`) and `DELETE https://agentregistry.googleapis.com/v1/projects/P/locations/R/services/ID`. No PATCH. Permissions (`/auth` `writable.registry_service`): `agentregistry.services.create` and `agentregistry.services.delete` in the gateway project, both in `roles/agentregistry.editor` (checked with `gcloud iam roles describe`).
 
 Every applied intent returns its inverse in `undo`, which the UI keeps as an "Undo last apply" list. An apply log is appended to `~/.policy-studio/apply-log.jsonl` (locally).

@@ -134,6 +134,20 @@ MCPS = [
     {"name": MCP_RO, "displayName": "Directory MCP", "tools": [{"name": "lookup", "annotations": {"readOnlyHint": True}}]},
 ]
 ENDPOINTS = [{"name": EP, "displayName": "Weather API", "interfaces": [{"url": "https://api.weather.example"}]}]
+# Writable Agent Registry Services behind two of the entries (Directory MCP and the agents have none here).
+SVC_TICKETS = f"projects/{P}/locations/{R}/services/tickets-mcp"
+SVC_WEATHER = f"projects/{P}/locations/{R}/services/weather-api"
+SERVICES = [
+    {"name": SVC_TICKETS, "displayName": "Tickets MCP", "description": "ticketing",
+     "interfaces": [{"url": "https://tickets.example.com/mcp", "protocolBinding": "JSONRPC"}],
+     "mcpServerSpec": {"type": "TOOL_SPEC", "content": {"tools": [{"name": "list_tickets",
+                                                                   "annotations": {"readOnlyHint": True}}]}},
+     "registryResource": f"projects/{N}/locations/{R}/mcpServers/agentregistry-mcp"},
+    {"name": SVC_WEATHER, "displayName": "Weather API",
+     "interfaces": [{"url": "https://api.weather.example", "protocolBinding": "HTTP_JSON"}],
+     "endpointSpec": {"type": "NO_SPEC"},
+     "registryResource": f"projects/{N}/locations/{R}/endpoints/agentregistry-ep"},
+]
 
 IAP_POLICIES = {
     "agents/agentregistry-aaa": {"bindings": [{"role": "roles/iap.egressor", "members": ["allUsers", principal("111")]}]},
@@ -208,6 +222,8 @@ class FakeRest:
                                                                "iap.googleapis.com")]}
         if f"/projects/{P}/" not in url and f"/projects/{N}/" not in url:
             return []
+        if key == "services" and "agentregistry" in url:
+            return copy.deepcopy(SERVICES)
         if self.networking:
             data["reasoningEngines"] = ENGINES + NET_ENGINES
             data["agentGateways"] = GATEWAYS + NET_GATEWAYS
@@ -259,8 +275,12 @@ class FakeWriteGcp(FakeRest):
     operation needs before it is done.
     """
 
-    def __init__(self, fail: dict[str, int] | None = None, etag_conflicts: int = 0, op_polls: int = 1):
+    def __init__(self, fail: dict[str, int] | None = None, etag_conflicts: int = 0, op_polls: int = 1,
+                 projection_lag: int = 0):
         super().__init__(fail)
+        self.services = {x["name"].rsplit("/", 1)[-1]: copy.deepcopy(x) for x in SERVICES}
+        self.projection_lag = projection_lag       # GETs of a new Service before registryResource is filled
+        self._lag: dict[str, int] = {}
         self.iap = {k: {**copy.deepcopy(v), "etag": "e0"} for k, v in IAP_POLICIES.items()}
         self.engines = {e["name"]: copy.deepcopy(e) for e in ENGINES}
         self.policies = {p["name"].rsplit("/", 1)[-1]: copy.deepcopy(p) for p in POLICIES}
@@ -285,6 +305,20 @@ class FakeWriteGcp(FakeRest):
 
     # --- reads
     def get(self, url: str, params: dict | None = None, ok404: bool = False) -> Any:
+        if "agentregistry" in url and "/services/" in url and "/operations/" not in url:
+            self.calls.append(("GET", url))
+            self._maybe_fail(url)
+            sid = url.rsplit("/", 1)[-1]
+            svc = self.services.get(sid)
+            if svc is None:
+                if ok404:
+                    return None
+                raise GcpError(404, "not found", url)
+            svc = copy.deepcopy(svc)
+            if self._lag.get(sid, 0) > 0:
+                self._lag[sid] -= 1
+                svc.pop("registryResource", None)
+            return svc
         if "/operations/" in url:
             self.calls.append(("GET", url))
             name = url.split("/v1/", 1)[1]
@@ -318,6 +352,21 @@ class FakeWriteGcp(FakeRest):
         return super().get(url, params, ok404)
 
     def list_all(self, url: str, key: str, params: dict | None = None) -> list[dict]:
+        if key == "services" and "agentregistry" in url:
+            self.calls.append(("LIST", url))
+            return copy.deepcopy(list(self.services.values()))
+        if key in ("mcpServers", "endpoints") and "agentregistry" in url:
+            # projections follow the Services: a deleted one's entry goes, a created one's appears
+            live = {x.get("registryResource", "").rsplit("/", 1)[-1]: x for x in self.services.values()}
+            static = {x["registryResource"].rsplit("/", 1)[-1] for x in SERVICES}
+            out = [x for x in super().list_all(url, key, params)
+                   if x["name"].rsplit("/", 1)[-1] in live or x["name"].rsplit("/", 1)[-1] not in static]
+            have = {x["name"].rsplit("/", 1)[-1] for x in out}
+            for eid, svc in live.items():
+                if eid and eid not in have and svc["registryResource"].split("/")[-2] == key:
+                    out.append({"name": f"projects/{P}/locations/{R}/{key}/{eid}", "displayName": svc["displayName"],
+                                "interfaces": copy.deepcopy(svc["interfaces"])})
+            return out
         if key == "authzPolicies":
             self.calls.append(("LIST", url))
             return copy.deepcopy(list(self.policies.values()))
@@ -363,6 +412,22 @@ class FakeWriteGcp(FakeRest):
             self._n += 1
             self.project_policy = {**copy.deepcopy(pol), "etag": f"p{self._n}"}
             return copy.deepcopy(self.project_policy)
+        if method == "POST" and "agentregistry" in url and "/services?serviceId=" in url:
+            sid = url.split("serviceId=", 1)[1]
+            base = url.split("/v1/", 1)[1].split("?", 1)[0]
+            if sid in self.services:
+                raise GcpError(409, "already exists", url)
+            coll = "mcpServers" if "mcpServerSpec" in json else "endpoints"
+            self.services[sid] = {"name": f"{base}/{sid}", **copy.deepcopy(json),
+                                  "registryResource": f"projects/{N}/locations/{R}/{coll}/agentregistry-{sid}"}
+            self._lag[sid] = self.projection_lag
+            return self._op(base.rsplit("/services", 1)[0])
+        if method == "DELETE" and "agentregistry" in url and "/services/" in url:
+            sid = url.rsplit("/", 1)[-1]
+            svc = self.services.pop(sid)
+            rr = svc.get("registryResource", "")
+            self.iap.pop("/".join(rr.split("/")[-2:]), None)       # the entry's IAP policy goes with it
+            return self._op(url.split("/v1/", 1)[1].rsplit("/services", 1)[0])
         if method == "POST" and "/templates?templateId=" in url:
             base = url.split("/v1/", 1)[1].split("?", 1)[0]
             name = f"{base}/{url.split('templateId=', 1)[1]}"

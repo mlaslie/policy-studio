@@ -15,6 +15,7 @@ import { NO_IDENTITY_REASON } from "../components/Redeploy";
 import { accessFromCondition } from "../lib/grants";
 import { modifyWarning } from "../lib/apply";
 import { TIMING, isMeasured, storedText } from "../lib/timing";
+import { registryPreflight, serviceOf } from "../lib/registry";
 
 const clone = <T,>(x: T): T => JSON.parse(JSON.stringify(x));
 
@@ -39,7 +40,51 @@ const sameCond = (a: Binding["condition"], b: Binding["condition"]) => normExpr(
 const short = (n: string | undefined) => (n ?? "").split("/").pop() ?? "";
 const extFull = (source: string, name: string) => source.replace(/\/authzExtensions\/[^/]+$/, `/authzExtensions/${name}`);
 
+/** The entry a registry Service projects, as an inventory name (project id form, like the mock's entries). */
+const entryName = (w: World, rr: string) => rr.replace(/^projects\/[^/]+\//, `projects/${w.GP}/`);
+
+/** A grant on an entry a create in the same request registered: its destination, now that the entry has an id. */
+function resolvePending(w: World, i: Intent): Intent | null {
+  const sid = i.destination?.pending_service;
+  if (!sid) return i;
+  const svc = serviceOf(w.inventory, sid);
+  if (!svc?.registry_resource) return null;
+  const name = entryName(w, svc.registry_resource);
+  return { ...i, destination: { kind: svc.kind === "mcp_server" ? "mcp_server" : "endpoint", id: short(name), name, label: i.destination!.label } };
+}
+
 function mutate(w: World, i: Intent) {
+  if (i.kind === "registry_service") {
+    const p = i.params ?? {};
+    const inv = w.inventory;
+    inv.services ??= [];
+    const svc = inv.services.find((x) => x.id === p.service_id);
+    if (p.delete) {
+      if (!svc) return;
+      const name = entryName(w, svc.registry_resource);
+      inv.services = inv.services.filter((x) => x !== svc);
+      inv.mcp_servers = inv.mcp_servers.filter((x) => x.name !== name);
+      inv.endpoints = inv.endpoints.filter((x) => x.name !== name);
+      delete inv.access[name]; // its IAP policy goes with it
+      return;
+    }
+    if (svc) return;
+    const coll = p.kind === "mcp_server" ? "mcpServers" : "endpoints";
+    // a new id per create, like the registry (an undo of a delete gives a new entry); from the intent id, so a replay
+    // of the applied intents gives the same one
+    const eid = `agentregistry-${p.service_id}-${i.id.replace(/[^a-z0-9]/gi, "").slice(-6).toLowerCase()}`;
+    const name = `projects/${w.GP}/locations/${w.R}/${coll}/${eid}`;
+    const interfaces = (p.interfaces ?? []).map((x) => ({ ...x }));
+    const urls = interfaces.map((x) => x.url);
+    const svcName = `projects/${w.GP}/locations/${w.R}/services/${p.service_id}`;
+    inv.services.push({ name: svcName, id: p.service_id ?? "", kind: p.kind ?? "endpoint", display_name: p.display_name || (p.service_id ?? ""), description: p.description ?? "", interfaces, registry_resource: name.replace(/^projects\/[^/]+\//, `projects/${MOCK_NUMBER}/`), tool_spec: p.tool_spec ?? null });
+    if (p.kind === "mcp_server") {
+      const tools = ((p.tool_spec?.tools ?? []) as { name: string; description?: string; annotations?: Record<string, unknown> }[]).map((t) => ({ name: t.name, description: t.description ?? "", read_only: !!t.annotations?.readOnlyHint, destructive: !!t.annotations?.destructiveHint, annotations: t.annotations ?? {} }));
+      inv.mcp_servers.push({ name, id: eid, display_name: p.display_name || (p.service_id ?? ""), url: urls[0], urls, service: svcName, tools });
+    } else inv.endpoints.push({ name, id: eid, display_name: p.display_name || (p.service_id ?? ""), url: urls[0] ?? "", urls, service: svcName });
+    inv.access[name] = [];
+    return;
+  }
   if (i.kind === "set_enforcement") {
     const x = w.iapExts.find((e) => short(e.name) === short(i.extension) || (!i.extension && e.gateways.includes(i.gateway?.name ?? "")));
     if (x && i.mode) x.mode = i.mode;
@@ -64,6 +109,11 @@ function mutate(w: World, i: Intent) {
   if (i.kind === "modify") {
     const res = i.destination?.name ?? "";
     w.inventory.access[res] = modifyBindings(w.inventory.access[res] ?? [], i).bindings;
+    return;
+  }
+  if ((i.kind === "grant" || i.kind === "revoke") && i.destination?.pending_service) {
+    const r = resolvePending(w, i);
+    if (r) mutate(w, r);
     return;
   }
   if (i.kind === "grant" || i.kind === "revoke") {
@@ -327,11 +377,15 @@ export function preflight(ctx: Ctx, intents: Intent[]): PreflightResult {
   const seen = new Map<string, string>();
   const extStaged = intents.some((i) => i.kind === "model_armor_extension" && !i.params?.delete);
   const staged = intents.filter((i) => i.kind === "model_armor_extension" && !i.params?.delete).map((i) => `projects/${i.params?.project || w.GP}/locations/${ctx.region}/authzExtensions/${i.params?.name}`);
+  const reg = registryPreflight(intents, w.inventory, ctx.region);
   const items: PreflightItem[] = intents.map((i) => {
     const k = intentKey(i);
     if (seen.has(k)) return { intent_id: i.id, status: "duplicate", duplicate_of: seen.get(k), reason: `Same change as ${seen.get(k)}; applied once.` };
     seen.set(k, i.id);
     if (a.writable?.[i.kind] === false) return { intent_id: i.id, status: "blocked", fix: "permission", reason: `You don't have permission for this kind of change in ${ctx.project} (see the “can write” check on Context for the role to ask for).` };
+    const r = reg.get(i.id);
+    if (r?.status === "blocked") return { intent_id: i.id, status: "blocked", fix: r.fix ?? "", reason: r.reason };
+    if (i.kind === "registry_service") return { intent_id: i.id, status: "ok", ...(r?.warning ? { warning: r.warning } : {}) };
     if (i.kind === "modify") {
       // Like the backend: the same access, or a grant that isn't there any more, would certainly fail.
       const { outcome } = modifyBindings(w.inventory.access[i.destination?.name ?? ""] ?? [], i);
@@ -390,7 +444,7 @@ export function auth(ctx: Ctx): AuthInfo {
   const P = ctx.project || "my-demo-project";
   const acct = "alex.admin@example.com";
   const GP = ctx.gateway_project || P;
-  const all = (v: boolean) => ({ grant: v, revoke: v, modify: v, bind_gateway: v, unbind_gateway: v, model_armor_on: v, model_armor_off: v });
+  const all = (v: boolean) => ({ grant: v, revoke: v, modify: v, bind_gateway: v, unbind_gateway: v, model_armor_on: v, model_armor_off: v, registry_service: v });
   if (f.mode === "generate")
     return {
       mode: "generate",
@@ -480,14 +534,15 @@ const DESTRUCTIVE = new Set<Intent["kind"]>(["revoke", "unbind_gateway", "model_
 const SETUP = new Set<Intent["kind"]>(["model_armor_template", "model_armor_extension", "iam_project_grant"]);
 const destructive = (i: Intent) =>
   DESTRUCTIVE.has(i.kind) ||
-  removesAll(i) || (SETUP.has(i.kind) && !!i.params?.delete) || (i.kind === "set_enforcement" && i.mode === "DRY_RUN") || (i.kind === "dedicate_extension" && !!i.revert);
-// Like the backend: setup creates first, then dedicated IAP extensions, then the cart order, then reverts, then setup deletes in reverse.
+  removesAll(i) || ((SETUP.has(i.kind) || i.kind === "registry_service") && !!i.params?.delete) || (i.kind === "set_enforcement" && i.mode === "DRY_RUN") || (i.kind === "dedicate_extension" && !!i.revert);
+// Like the backend: registry entries first, setup creates, then dedicated IAP extensions, then the cart order, then
+// reverts, then setup deletes in reverse, then registry entry deletes.
 const runOrder = (i: Intent) =>
   i.params?.delete
-    ? ({ iam_project_grant: 6, model_armor_extension: 7, model_armor_template: 8 } as Record<string, number>)[i.kind] ?? 4
+    ? ({ iam_project_grant: 6, model_armor_extension: 7, model_armor_template: 8, registry_service: 9 } as Record<string, number>)[i.kind] ?? 4
     : i.kind === "dedicate_extension" && i.revert
       ? 5
-      : ({ model_armor_template: 0, model_armor_extension: 1, iam_project_grant: 2, dedicate_extension: 3 } as Record<string, number>)[i.kind] ?? 4;
+      : ({ registry_service: -1, model_armor_template: 0, model_armor_extension: 1, iam_project_grant: 2, dedicate_extension: 3 } as Record<string, number>)[i.kind] ?? 4;
 
 const exactOf = (c: Binding["condition"]): NonNullable<Intent["access"]> => (c?.expression.trim() ? { mode: "custom", expression: c.expression, title: c.title } : { mode: "all" });
 
@@ -548,6 +603,12 @@ function inverse(w: World, i: Intent): Intent | Intent[] | null {
     }
     case "dedicate_extension":
       return { ...i, id: id(), revert: !i.revert };
+    case "registry_service": {
+      if (!i.params?.delete) return { ...i, id: id(), params: { ...i.params, delete: true } };
+      // undo of a delete: the same body, read before the delete (a new entry: its grants don't come back)
+      const svc = serviceOf(w.inventory, i.params.service_id ?? "");
+      return { ...i, id: id(), params: { kind: svc?.kind === "mcp_server" ? "mcp_server" : "endpoint", service_id: svc?.id ?? i.params.service_id, display_name: svc?.display_name ?? i.params.display_name, ...(svc?.description ? { description: svc.description } : {}), interfaces: svc?.interfaces ?? i.params.interfaces, ...(svc?.tool_spec ? { tool_spec: svc.tool_spec } : {}) } };
+    }
   }
 }
 
@@ -577,8 +638,22 @@ export async function* applyStream(ctx: Ctx, intents: Intent[], confirm: ApplyCo
   // dedicate in this request created gets no undo (the dedicate's revert undoes both).
   const reverted = new Set(intents.filter((i) => i.kind === "dedicate_extension" && i.revert).map((i) => i.new_name));
   const created = new Set<string>();
-  for (const [n, i] of [...intents].sort((a, b) => runOrder(a) - runOrder(b)).entries()) {
+  const failedReg = new Set<string>();
+  for (let [n, i] of [...intents].sort((a, b) => runOrder(a) - runOrder(b)).entries()) {
     const w = world(ctx);
+    if (i.destination?.pending_service) {
+      // Like the backend: the grant uses the id the registry gave the entry created earlier in this request.
+      const r = resolvePending(w, i);
+      yield { intent_id: i.id, state: "running", detail: "Applying…" };
+      if (!r) {
+        await sleep(300, signal);
+        if (failedReg.has(i.destination.pending_service)) counts.skipped++;
+        else counts.failed++;
+        yield { intent_id: i.id, state: failedReg.has(i.destination.pending_service) ? "skipped" : "failed", detail: failedReg.has(i.destination.pending_service) ? `Not attempted: the entry ${i.destination.pending_service} wasn't registered` : `The entry ${i.destination.pending_service} isn't registered by this request; Sync and grant on it again` };
+        continue;
+      }
+      i = r;
+    }
     const d = mockDiff(w, [i]).items[0];
     yield { intent_id: i.id, state: "running", detail: "Applying…" };
     if (i.kind === "set_enforcement" && reverted.has(short(i.extension))) {
@@ -611,12 +686,12 @@ export async function* applyStream(ctx: Ctx, intents: Intent[], confirm: ApplyCo
       yield {
         intent_id: i.id,
         state: "running",
-        detail: i.kind === "set_enforcement" || i.kind === "dedicate_extension" ? "Waiting for the authz extension / policy operation…" : i.kind === "model_armor_extension" ? "Waiting for the authz extension operation…" : i.kind.startsWith("model_armor") ? "Waiting for the authz policy operation…" : "Waiting for the agent update operation…",
+        detail: i.kind === "registry_service" ? "Waiting for the registry operation…" : i.kind === "set_enforcement" || i.kind === "dedicate_extension" ? "Waiting for the authz extension / policy operation…" : i.kind === "model_armor_extension" ? "Waiting for the authz extension operation…" : i.kind.startsWith("model_armor") ? "Waiting for the authz policy operation…" : "Waiting for the agent update operation…",
         operation: op,
       };
     if (lro) {
       // Like the backend: repeated "done" + progress events while the operation is polled.
-      const total = f.fast ? 1200 : i.kind.startsWith("model_armor") ? 6000 : 7000;
+      const total = f.fast ? 1200 : i.kind === "registry_service" ? 2500 : i.kind.startsWith("model_armor") ? 6000 : 7000;
       const t0 = Date.now();
       while (Date.now() - t0 < total) {
         await sleep(Math.min(1500, total - (Date.now() - t0)), signal);
@@ -626,6 +701,7 @@ export async function* applyStream(ctx: Ctx, intents: Intent[], confirm: ApplyCo
     } else await sleep(1100, signal);
     if (f.fail && n === 1) {
       counts.failed++;
+      if (i.kind === "registry_service") failedReg.add(i.params?.service_id ?? "");
       // Friendly text with the raw Google Cloud error kept, like the backend.
       yield i.kind === "bind_gateway"
         ? { intent_id: i.id, state: "failed", detail: NO_IDENTITY_REASON, raw_error: "HTTP 400: Reasoning Engine with agent_gateway_config must use AGENT_IDENTITY identity type.", operation: op }
@@ -642,14 +718,22 @@ export async function* applyStream(ctx: Ctx, intents: Intent[], confirm: ApplyCo
     const undo = fresh ? null : inverse(w, i);
     if (i.kind === "dedicate_extension" && !i.revert && i.new_name) created.add(i.new_name);
     applied.push(structuredClone(i));
-    yield { intent_id: i.id, state: "done", detail: lro ? "Operation finished. Reading back…" : "setIamPolicy succeeded. Reading back…", operation: op };
+    yield { intent_id: i.id, state: "done", detail: lro ? "Operation finished. Reading back…" : "setIamPolicy succeeded. Reading back…", operation: op, ...(undo ? { undo } : {}) };
     await sleep(lro ? 1300 : 600, signal);
     counts.verified++;
     yield {
       intent_id: i.id,
       state: "verified",
       detail:
-        i.kind === "grant"
+        i.kind === "registry_service"
+          ? i.params?.delete
+            ? `Read back: ${i.params.service_id} is gone (not found). Undo registers it again as a new entry; its IAP grants don't come back.`
+            : (() => {
+                const svc = serviceOf(world(ctx).inventory, i.params?.service_id ?? "");
+                const n = (i.params?.interfaces ?? []).length;
+                return `Read back: ${i.params?.service_id} is registered with ${n} URL${n === 1 ? "" : "s"} (${(i.params?.interfaces ?? []).map((x) => x.url).join(", ")}); entry ${short(svc?.registry_resource)}.`;
+              })()
+        : i.kind === "grant"
           ? "Read back: the binding is there."
           : i.kind === "revoke"
             ? "Read back: the binding is gone."

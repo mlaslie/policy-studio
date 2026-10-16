@@ -37,6 +37,7 @@ const KIND_TONE: Record<Intent["kind"], "green" | "red" | "blue" | "amber" | "pu
   iam_project_grant: "purple",
   set_enforcement: "amber",
   dedicate_extension: "blue",
+  registry_service: "blue",
 };
 
 function useNow(active: boolean) {

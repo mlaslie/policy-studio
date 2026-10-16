@@ -33,12 +33,12 @@ export function privateEgressSummary(pe: PrivateEgress | null | undefined): stri
   return `Reaches ${pe.vpc ? `the VPC ${pe.vpc}` : "a VPC"} through its ${how}. ${doms}${mode}`;
 }
 
-/** Agent node chips: red "Own VPC access (bypasses gateway)" for a PSC interface, plus "Broken: PSC interface +
+/** Agent node chips: red "Direct VPC access (bypasses gateway)" for a PSC interface, plus "Broken: PSC interface +
  *  gateway" when it is also bound to an egress gateway. */
 export function pscChips(e: Pick<Engine, "psc_interface" | "gateways">): { text: string; tip: string }[] {
   const p = e.psc_interface;
   if (!p) return [];
-  const out = [{ text: "Own VPC access (bypasses gateway)", tip: pscSummary(p) }];
+  const out = [{ text: "Direct VPC access (bypasses gateway)", tip: pscSummary(p) }];
   if (e.gateways.egress)
     out.push({ text: "Broken: PSC interface + gateway", tip: "Google rejects an agent with both a PSC interface and a gateway binding; set by a later update, it can't reach Google APIs at all. Redeploy it without the PSC interface." });
   return out;
@@ -104,7 +104,7 @@ export function rulePscEngines(engines: EngineLike[]): Finding[] {
         severity: "high",
         resource: e.name,
         redeploy: REDEPLOY_NO_PSC,
-        title: `Own VPC access, bypasses the gateway: ${label}`,
+        title: `Direct VPC access, bypasses the gateway: ${label}`,
         detail: `${label} has its own private networking (a PSC interface into ${vpcPhrase(psc)}) and no egress gateway. Its calls into the VPC skip every check: no Agent Registry, no roles/iap.egressor grant and no gateway logs apply, so its grants in Policy Studio mean nothing for that traffic. Redeploy it without the PSC interface, with Agent Identity, bound to the egress gateway.`,
       });
     else

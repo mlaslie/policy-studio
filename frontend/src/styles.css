@@ -5874,3 +5874,74 @@ button.legend-item:hover {
   flex-basis: 100%;
   margin: 0;
 }
+
+/* ---------- Register a new destination (components/RegisterForm.tsx) ---------- */
+.reg-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-2);
+}
+.reg-title {
+  margin: 0;
+  font-size: 15px;
+}
+.choices.reg-kinds {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+}
+.reg-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.reg-row-line {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.reg-row-line input {
+  min-width: 0;
+}
+.reg-row-line select {
+  width: auto;
+  flex-shrink: 0;
+}
+.reg-hint {
+  margin-top: 3px;
+}
+.reg-hint-private {
+  color: var(--green);
+}
+.reg-tools {
+  width: 100%;
+  font-size: 12px;
+}
+.reg-entry-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+@media (max-width: 720px) {
+  .choices.reg-kinds {
+    grid-template-columns: 1fr;
+  }
+  .reg-row-line {
+    flex-wrap: wrap;
+  }
+}
+.reg-delete-confirm {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  border: 1px solid var(--red);
+  border-radius: 8px;
+  background: var(--red-weak);
+}

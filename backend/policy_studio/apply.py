@@ -16,6 +16,12 @@ what the generated commands do:
                      iam_project_grant: project getIamPolicy -> add (or remove) the member in the Model Armor roles
                        only -> setIamPolicy with the etag (retried on a conflict), read back.
                      Setup runs before everything else, deletes (undo) after Model Armor off, in reverse.
+  registry_service   create: POST .../services?serviceId=ID (long-running, waited for), then GET until the registry
+                       has projected it (registryResource) and check the interfaces. A grant on that entry in the same
+                       request (destination.pending_service) runs after it and uses the projected id. Undo = delete.
+                     delete: GET the Service (its body is the undo: a create with the same body), DELETE (long-running),
+                       read back NOT_FOUND. The entry's IAP grants go with it and don't come back on undo.
+                     Creates run first, deletes last (after the revokes and Model Armor deletes).
 
 Events: {intent_id, state: running|done|verified|failed|skipped, detail, operation?, undo?}, then
 {type: "done", summary}. Final results are appended to the apply log (settings.apply_log_path()).
@@ -42,21 +48,27 @@ from .conditions import exact_access, same_condition
 from .gcp.engines import gateways_of, tail
 from .gcp import model_armor as ma_mod
 from .preflight import blockers, duplicates, friendly
-from .gcp.rest import CRM, IAP, NETWORKSECURITY, NETWORKSERVICES, GcpError, aiplatform, err_text
-from .model import Access, Context, GatewayRef, Intent, SetupParams
-from .render import (PLACEHOLDER_EXT, MODE_LABEL, RenderEnv, bind_spec, ded_ext_url, ded_policy_url,
+from .gcp import registry as reg_mod
+from .gcp.rest import AGENTREGISTRY, CRM, IAP, NETWORKSECURITY, NETWORKSERVICES, GcpError, aiplatform, err_text
+from .model import DELETABLE_KINDS, Access, Context, GatewayRef, Intent, RegistryInterfaceIn, SetupParams
+from .render import (PLACEHOLDER_EXT, MODE_LABEL, Blocked, RenderEnv, bind_spec, ded_ext_url, ded_policy_url,
                      ded_spec, enf_spec, engine_body, engine_full, engine_url, ext_copy, ext_mode, ext_spec, ext_url,
                      iam_spec, ma_body, ma_spec, ma_template_url, ma_url, mode_metadata, proj_iam_spec, provider_body,
-                     short, template_spec)
+                     reg_spec, reg_url, short, template_spec)
 
 DESTRUCTIVE = {"revoke", "unbind_gateway", "model_armor_off"}
 SETUP_KINDS = ("model_armor_template", "model_armor_extension", "iam_project_grant")
 # Run order: setup creates first (template -> extension -> roles), then dedicated IAP extensions (so a
 # set_enforcement of the copy finds it), then everything else in cart order, then reverts of dedicated extensions,
 # then setup deletes (roles -> extension -> template), so Model Armor off runs before its extension is deleted.
-RUN_ORDER = {"model_armor_template": 0, "model_armor_extension": 1, "iam_project_grant": 2, "dedicate_extension": 3}
+# Registry entries are created before anything (a grant in the same request may name the new entry) and deleted last
+# (after the revokes on them).
+RUN_ORDER = {"registry_service": -1, "model_armor_template": 0, "model_armor_extension": 1, "iam_project_grant": 2,
+             "dedicate_extension": 3}
 REVERT_RUN_ORDER = 5
-DELETE_RUN_ORDER = {"iam_project_grant": 6, "model_armor_extension": 7, "model_armor_template": 8}
+DELETE_RUN_ORDER = {"iam_project_grant": 6, "model_armor_extension": 7, "model_armor_template": 8,
+                    "registry_service": 9}
+PROJECTION_KIND = {"mcpServers": "mcp_server", "endpoints": "endpoint", "agents": "agent"}
 
 
 def run_order(it: Intent) -> int:
@@ -68,8 +80,8 @@ def run_order(it: Intent) -> int:
 
 
 def is_destructive(raw: Any) -> bool:
-    """Revokes, unbinds, Model Armor off, setup deletes, dry run (stops blocking), reverting a dedicated IAP
-    extension (deletes it) and the remove-all form of modify (bindings removed, none added)."""
+    """Revokes, unbinds, Model Armor off, setup and registry entry deletes, dry run (stops blocking), reverting a
+    dedicated IAP extension (deletes it) and the remove-all form of modify (bindings removed, none added)."""
     if not isinstance(raw, dict):
         return False
     if raw.get("kind") in DESTRUCTIVE:
@@ -80,7 +92,7 @@ def is_destructive(raw: Any) -> bool:
         return raw.get("mode") == "DRY_RUN"
     if raw.get("kind") == "dedicate_extension":
         return bool(raw.get("revert"))
-    return raw.get("kind") in SETUP_KINDS and bool((raw.get("params") or {}).get("delete"))
+    return raw.get("kind") in DELETABLE_KINDS and bool((raw.get("params") or {}).get("delete"))
 MAX_ETAG_RETRIES = 3
 FINAL = {"done", "verified", "failed", "skipped"}
 
@@ -93,8 +105,8 @@ def check_confirm(ctx: Context, raw_intents: list[Any], confirm: dict[str, Any] 
         return f"confirm.project must equal the context project ({ctx.project})"
     destructive = [str(i.get("id", "?")) for i in raw_intents if is_destructive(i)]
     if destructive and confirm.get("acknowledge_destructive") is not True:
-        return ("revokes, unbinds, Model Armor off, setup deletes, dry run, reverting a dedicated extension and "
-                "removing all of a member's access need "
+        return ("revokes, unbinds, Model Armor off, setup deletes, registry entry deletes, dry run, reverting a "
+                "dedicated extension and removing all of a member's access need "
                 "confirm.acknowledge_destructive = true: "
                 + ", ".join(destructive))
     return None
@@ -215,6 +227,8 @@ class Applier:
         self.failed_extensions: set[str] = set()
         self.created_copies: set[str] = set()          # tails of IAP extensions a dedicate in this request created
         self.reverts: dict[str, Any] = {}               # copy tail -> DedSpec of a revert in this request
+        self.created_services: dict[str, tuple[str, str]] = {}   # service id -> (collection, entry id) once projected
+        self.failed_services: set[str] = set()          # service ids a create in this request didn't create
 
     # ---------------------------------------------------------- events
     def emit(self, intent_id: str, state: str, detail: str = "", **extra: Any) -> None:
@@ -297,7 +311,8 @@ class Applier:
                                "model_armor_extension": self._extension,
                                "iam_project_grant": self._project_iam,
                                "set_enforcement": self._set_enforcement,
-                               "dedicate_extension": self._dedicate}[it.kind]
+                               "dedicate_extension": self._dedicate,
+                               "registry_service": self._registry}[it.kind]
                     handler(it)
                 except Exception as e:  # noqa: BLE001  one failure never stops the others
                     self.emit(it.id, "failed", err_text(e))
@@ -360,6 +375,20 @@ class Applier:
             return self.emit(it.id, "failed", "No source principal")
         if not it.destination:
             return self.emit(it.id, "failed", "No destination")
+        pending = (it.destination.pending_service or "").strip()
+        if pending:
+            got = self.created_services.get(pending)
+            if got is None:
+                if pending in self.failed_services:
+                    return self.emit(it.id, "skipped", f"Not attempted: the entry {pending} wasn't registered")
+                return self.emit(it.id, "failed", f"The entry {pending} isn't registered by this request, or the "
+                                                  "registry hasn't assigned its id yet; Sync and grant on it again")
+            coll, eid = got
+            dest = it.destination.model_copy(update={
+                "kind": PROJECTION_KIND.get(coll, it.destination.kind), "id": eid, "pending_service": None,
+                "name": f"projects/{self.env.gw_project}/locations/{self.env.region}/{coll}/{eid}"})
+            it = it.model_copy(update={"destination": dest})
+            self._intents[it.id] = it
         sp = iam_spec(it, self.env, [])
         if "PROJECT_NUMBER" in sp.resource:
             return self.emit(it.id, "failed", "Couldn't resolve the project number of the Agent Registry project")
@@ -707,6 +736,92 @@ class Applier:
         self.emit(it.id, "verified", f"Read back: {sp.member.split(':', 1)[-1]} "
                   + ("holds " if add else "no longer holds ") + ", ".join(changed), undo=undo)
 
+
+    # ---------------------------------------------------------- Agent Registry entries
+    def _projected(self, url: str) -> Optional[dict]:
+        """GET the Service until the registry has projected it (registryResource), within the operation timeout."""
+        deadline = time.monotonic() + min(self.op_timeout, 120.0)
+        svc = self.rest.get(url, ok404=True)
+        while svc and not svc.get("registryResource") and time.monotonic() < deadline:
+            time.sleep(self.poll_interval or 0.01)
+            svc = self.rest.get(url, ok404=True)
+        return svc
+
+    def _remember(self, sid: str, svc: dict) -> None:
+        rr = svc.get("registryResource") or ""
+        if rr.count("/") >= 1:
+            coll, eid = rr.split("/")[-2:]
+            self.created_services[sid] = (coll, eid)
+
+    def _registry(self, it: Intent) -> None:
+        try:
+            sp = reg_spec(it, self.env, [])
+        except Blocked as e:
+            if not it.is_delete and it.params and it.params.service_id:
+                self.failed_services.add(it.params.service_id.strip())
+            return self.emit(it.id, "failed", str(e))
+        url = reg_url(sp, False)
+        live = self.rest.get(url, ok404=True)
+        urls = ", ".join(i["url"] for i in sp.body["interfaces"])
+        if sp.op == "create":
+            if live:
+                if reg_mod.same_interfaces(live.get("interfaces"), sp.body["interfaces"]):
+                    self._remember(sp.service_id, self._projected(url) or live)
+                    return self.emit(it.id, "skipped", f"{sp.service_id} is already registered with these URLs")
+                self.failed_services.add(sp.service_id)
+                return self.emit(it.id, "failed", f"A registry entry {sp.service_id} already exists with other URLs; "
+                                                  "pick another id")
+            self.emit(it.id, "running", f"Registering {sp.display_name} ({sp.service_id}): {urls}")
+            try:
+                op = self.writer.create_registry_service(reg_url(sp, True), sp.body) or {}
+            except Exception:
+                self.failed_services.add(sp.service_id)
+                raise
+            undo = self._setup_undo(it)
+            self.emit(it.id, "done", "Registry entry creation started", operation=op.get("name"), undo=undo)
+            ok, msg = self._wait(it.id, op, AGENTREGISTRY, "Registry entry creation")
+            if ok is not True:
+                self.failed_services.add(sp.service_id)
+                return self.emit(it.id, "failed" if ok is False else "done", msg, operation=op.get("name"), undo=undo)
+            back = self._projected(url)
+            if not back:
+                self.failed_services.add(sp.service_id)
+                return self.emit(it.id, "failed", f"Read back: {sp.service_id} is missing", undo=undo)
+            if not reg_mod.same_interfaces(back.get("interfaces"), sp.body["interfaces"]):
+                self.failed_services.add(sp.service_id)
+                got = ", ".join(f"{i.get('url')} ({i.get('protocolBinding')})" for i in back.get("interfaces") or [])
+                return self.emit(it.id, "failed", f"Read back: {sp.service_id}'s URLs are {got or 'none'}, expected "
+                                                  f"{urls}", undo=undo)
+            self._remember(sp.service_id, back)
+            rr = back.get("registryResource") or ""
+            n = len(sp.body["interfaces"])
+            return self.emit(it.id, "verified", f"Read back: {sp.service_id} is registered with {n} URL"
+                             f"{'s' if n != 1 else ''} ({urls})" + (f"; entry {short(rr)}" if rr else
+                                                                     "; the registry hasn't assigned the entry id yet"),
+                             operation=op.get("name"), undo=undo)
+        if not live:
+            return self.emit(it.id, "skipped", f"No registry entry {sp.service_id}")
+        if reg_mod.service_kind(live) == "agent":
+            return self.emit(it.id, "failed", f"{sp.service_id} is an A2A agent entry; Policy Studio only deletes the "
+                                              "API endpoints and MCP servers it can re-create")
+        cur = reg_mod.parse_service(live)
+        undo = it.model_copy(update={"id": f"undo-{it.id}", "params": (it.params or SetupParams()).model_copy(update={
+            "delete": False, "kind": cur.kind, "service_id": cur.id, "display_name": cur.display_name,
+            "description": cur.description or None, "tool_spec": cur.tool_spec,
+            "interfaces": [RegistryInterfaceIn(url=i.url, protocol_binding=i.protocol_binding)
+                           for i in cur.interfaces]})})
+        self.emit(it.id, "running", f"Deleting registry entry {cur.display_name} ({sp.service_id}); its IAP grants go "
+                                    "with it")
+        op = self.writer.delete_registry_service(url) or {}
+        self.emit(it.id, "done", "Registry entry deletion started", operation=op.get("name"), undo=undo)
+        ok, msg = self._wait(it.id, op, AGENTREGISTRY, "Registry entry deletion")
+        if ok is not True:
+            return self.emit(it.id, "failed" if ok is False else "done", msg, operation=op.get("name"), undo=undo)
+        if self.rest.get(url, ok404=True):
+            return self.emit(it.id, "failed", f"Read back: {sp.service_id} is still there", operation=op.get("name"),
+                             undo=undo)
+        self.emit(it.id, "verified", f"Read back: {sp.service_id} is gone (not found). Undo registers it again as a "
+                                     "new entry; its IAP grants don't come back", operation=op.get("name"), undo=undo)
 
     # ---------------------------------------------------------- IAP enforcement mode
     def _wait(self, intent_id: str, op: dict, base: str, what: str) -> tuple[Optional[bool], str]:

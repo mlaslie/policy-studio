@@ -4,6 +4,7 @@
 // preview and Apply agree on which binding a revoke removes. Review's /diff and /preflight stay the authority.
 import type { Binding, Gateway, Intent, Inventory, ModelArmorResp } from "../api/types";
 import { ROLE, accessFroms, accessTos, conditionFor, intentEnglish, shortName } from "../lib/policy";
+import { entryOfService, pendingEntryName, serviceOf } from "../lib/registry";
 
 export interface MapState {
   inventory: Inventory;
@@ -89,6 +90,31 @@ function apply(s: MapState, i: Intent): string[] | null {
       if (!hit.length || !i.mode) return null;
       for (const g of hit) if (g.enforcement) g.enforcement.mode = i.mode;
       return hit.map((g) => g.name);
+    }
+    case "registry_service": {
+      // A create: a pending destination (named pendingEntryName(id) until the registry assigns its id), with no
+      // grants; grants staged on it (destination.pending_service) land there. A delete: the entry and its grants go.
+      const p = i.params ?? {};
+      const sid = p.service_id ?? "";
+      if (p.delete) {
+        const e = entryOfService(inv, serviceOf(inv, sid));
+        if (!e) return null;
+        inv.mcp_servers = inv.mcp_servers.filter((x) => x.name !== e.name);
+        inv.endpoints = inv.endpoints.filter((x) => x.name !== e.name);
+        inv.services = (inv.services ?? []).filter((x) => x.id !== sid);
+        delete inv.access[e.name];
+        return [e.name];
+      }
+      const name = pendingEntryName(sid);
+      if ([...inv.mcp_servers, ...inv.endpoints].some((x) => x.name === name)) return [name];
+      const urls = (p.interfaces ?? []).map((x) => x.url);
+      const label = p.display_name || sid;
+      if (p.kind === "mcp_server") {
+        const tools = ((p.tool_spec?.tools ?? []) as { name: string; description?: string; annotations?: Record<string, unknown> }[]).map((t) => ({ name: t.name, description: t.description ?? "", read_only: !!t.annotations?.readOnlyHint, destructive: !!t.annotations?.destructiveHint, annotations: t.annotations ?? {} }));
+        inv.mcp_servers.push({ name, id: sid, display_name: label, url: urls[0], urls, tools });
+      } else inv.endpoints.push({ name, id: sid, display_name: label, url: urls[0] ?? "", urls });
+      inv.access[name] = [];
+      return [name];
     }
     case "model_armor_on":
     case "model_armor_off": {

@@ -200,7 +200,7 @@ def rule_psc_engines(engines: list[Any]) -> list[dict[str, Any]]:
         egress = (_get(e, "gateways") or {}).get("egress")
         if not egress:
             out.append({"rule": "N1", "severity": "high", "resource": name, "redeploy": REDEPLOY_NO_PSC,
-                        "title": f"Own VPC access, bypasses the gateway: {label}",
+                        "title": f"Direct VPC access, bypasses the gateway: {label}",
                         "detail": (f"{label} has its own private networking (a PSC interface into "
                                    f"{_vpc_phrase(psc)}) and no egress gateway. Its calls into the VPC skip every "
                                    "check: no Agent Registry, no roles/iap.egressor grant and no gateway logs apply, so "

@@ -64,6 +64,10 @@ EFFECT: dict[str, Effect] = {
     "model_armor_template": Effect(note="a Model Armor template change takes a few minutes (not measured)", **_SETUP),
     "model_armor_extension": Effect(note="a Model Armor extension change takes a few minutes (not measured)",
                                     **_SETUP),
+    # The create / delete operation itself takes seconds; the gateway then has to see the entry (or its absence).
+    "registry_service": Effect(after="in a few minutes", note="a registry entry is created or deleted in seconds, then "
+                               "takes a few minutes to reach the gateway (not measured); grants on a new entry follow "
+                               "IAM timing", min_m=0.5, typical_m=2, max_m=5, basis="estimate"),
 }
 
 WAIT = "Wait before testing."

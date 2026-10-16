@@ -1,7 +1,8 @@
 """Checks that run before Apply (and back the POST /preflight endpoint): duplicate intents, intents that will
 certainly fail (a bind of an engine that can't be bound, Model Armor on with no extension anywhere, a kind the
-caller can't write, a modify of a grant that isn't there or to the same access), and friendlier text for known Google
-Cloud errors. Pure functions over a RenderEnv (and the inventory, when given); no calls."""
+caller can't write, a modify of a grant that isn't there or to the same access, a registry entry with a bad or already
+registered URL or id), and friendlier text for known Google Cloud errors. Pure functions over a RenderEnv (and the
+inventory, when given); no calls."""
 from __future__ import annotations
 
 import json
@@ -11,10 +12,11 @@ from typing import Any, Optional
 from .conditions import EGRESSOR, compare_access_many, condition_for, same_condition
 from .diff import resource_key
 from .english import modify_change
+from .gcp import registry as reg_mod
 from .gcp.engines import REASON_IDENTITY, tail
 from .model import Intent, Inventory
-from .render import (PLACEHOLDER_EXT, Blocked, RenderEnv, dedicate_names, enf_spec, engine_full, engine_info_for,
-                     english_list, gateway_full, ma_spec, short)
+from .render import (A2A_OUT_OF_SCOPE, GRANTS_LOST, PLACEHOLDER_EXT, Blocked, RenderEnv, dedicate_names, enf_spec,
+                     engine_full, engine_info_for, english_list, find_service, gateway_full, ma_spec, short)
 
 KIND_LABEL = {"grant": "grants", "revoke": "revokes", "modify": "changing grants", "bind_gateway": "gateway binds",
               "unbind_gateway": "gateway unbinds", "model_armor_on": "turning Model Armor on",
@@ -22,7 +24,8 @@ KIND_LABEL = {"grant": "grants", "revoke": "revokes", "modify": "changing grants
               "model_armor_extension": "creating Model Armor extensions",
               "iam_project_grant": "granting the service agent roles",
               "set_enforcement": "changing a gateway's enforcement mode",
-              "dedicate_extension": "giving a gateway its own IAP extension"}
+              "dedicate_extension": "giving a gateway its own IAP extension",
+              "registry_service": "registering or deleting Agent Registry entries"}
 
 
 # ------------------------------------------------------------------ duplicates
@@ -40,7 +43,7 @@ def intent_key(it: Intent) -> str:
     if s:
         key["source"] = s.principal
     if d:
-        key["destination"] = [d.kind, d.id or short(d.name)]
+        key["destination"] = [d.kind, d.id or short(d.name)] + ([d.pending_service] if d.pending_service else [])
     if a:
         key["access"] = [a.mode, sorted(t for t in (a.tools or []) if t), a.expression or "", a.title]
     f = it.access_from
@@ -82,6 +85,7 @@ def blockers(intents: list[Intent], env: RenderEnv, writable: Optional[dict[str,
     Model Armor extension staged in the same request counts. `inv` (optional): the current inventory, to check that
     the grant a modify changes is there. fix: ma_setup | redeploy | permission | already."""
     out: dict[str, dict[str, str]] = {}
+    staged_urls: dict[str, str] = {}             # URL -> service id of an earlier staged create
     for it in intents:
         if writable and writable.get(it.kind) is False:
             out[it.id] = {"reason": f"You don't have permission for {KIND_LABEL.get(it.kind, it.kind)} in "
@@ -111,7 +115,80 @@ def blockers(intents: list[Intent], env: RenderEnv, writable: Optional[dict[str,
             b = _modify_blocker(it, env, inv)
             if b:
                 out[it.id] = b
+        if it.kind == "registry_service":
+            b = _registry_blocker(it, env, staged_urls)
+            if b:
+                out[it.id] = b
+    creates = {(i.params.service_id or "").strip(): i.id for i in intents
+               if i.kind == "registry_service" and i.params and not i.params.delete}
+    for it in intents:
+        pending = (it.destination.pending_service or "").strip() if it.destination else ""
+        if it.id in out or not pending or it.kind not in ("grant", "revoke", "modify"):
+            continue
+        if pending not in creates:
+            out[it.id] = {"reason": f"The entry {pending} isn't registered by an item in this request, so there's "
+                                    "nothing to grant on yet. Stage “Register a new destination” with it.", "fix": ""}
+        elif creates[pending] in out:
+            out[it.id] = {"reason": f"Not attempted: registering {pending} is blocked "
+                                    f"({out[creates[pending]]['reason']})", "fix": ""}
     return out
+
+
+def _registry_blocker(it: Intent, env: RenderEnv, staged_urls: dict[str, str]) -> Optional[dict[str, str]]:
+    """registry_service: the region, the kind, every URL (https, no wildcard, not registered by another entry in the
+    region or by an earlier item), the service id (the API's rules, not taken); a delete of an entry that isn't
+    there."""
+    p = it.params
+    if p is None:
+        return {"reason": "No registry entry parameters.", "fix": ""}
+    if not reg_mod.SINGLE_REGION_RE.match(env.region or ""):
+        return {"reason": f"Agent Registry entries for the gateway live in its region; {env.region or 'no region'} "
+                          "isn't a single region (us / eu / global multi-regions aren't used by Agent Gateway). "
+                          "Pick the gateway's region on Context.", "fix": ""}
+    if (p.kind or "") == "agent":
+        return {"reason": A2A_OUT_OF_SCOPE, "fix": ""}
+    if (p.kind or "") not in ("endpoint", "mcp_server"):
+        return {"reason": "Pick what to register: an API endpoint or an MCP server.", "fix": ""}
+    sid = (p.service_id or "").strip()
+    if not reg_mod.SERVICE_ID_RE.match(sid):
+        return {"reason": f"The service id {sid!r} isn't valid: 4–63 lowercase letters, digits and hyphens, starting "
+                          "with a letter and not ending with a hyphen." if sid else "No service id.", "fix": ""}
+    existing = find_service(env, sid)
+    if p.delete:
+        if env.registry is not None and existing is None:
+            return {"reason": f"There is no registry entry {sid} in {env.region} (deleted already?). Sync and check.",
+                    "fix": "already"}
+        if existing is not None and existing.kind == "agent":
+            return {"reason": A2A_OUT_OF_SCOPE, "fix": ""}
+        return None
+    if env.registry is not None and existing is not None:
+        return {"reason": f"A registry entry with the id {sid} already exists in {env.region} "
+                          f"({existing.display_name}); pick another id.", "fix": ""}
+    ifs = [i for i in p.interfaces or [] if (i.url or "").strip()]
+    if not ifs:
+        return {"reason": "Add at least one URL the agents call.", "fix": ""}
+    seen: set[str] = set()
+    for i in ifs:
+        url = i.url.strip()
+        prob = reg_mod.url_problem(url)
+        if prob:
+            return {"reason": prob[:1].upper() + prob[1:] + ".", "fix": ""}
+        if (i.protocol_binding or "").upper() not in reg_mod.BINDINGS:
+            return {"reason": f"The protocol for {url} must be one of {', '.join(reg_mod.BINDINGS)}.", "fix": ""}
+        key = reg_mod.norm_url(url)
+        if key in seen:
+            return {"reason": f"{url} is listed twice.", "fix": ""}
+        seen.add(key)
+        owner = env.registry_urls.get(key)
+        if owner:
+            return {"reason": f"Duplicate: {url} is already registered in {env.region} as {owner}. Grant on that "
+                              "entry instead, or delete it first.", "fix": "duplicate"}
+        if key in staged_urls and staged_urls[key] != sid:
+            return {"reason": f"Duplicate: {url} is also registered by {staged_urls[key]} earlier in this request.",
+                    "fix": "duplicate"}
+    for k in seen:
+        staged_urls.setdefault(k, sid)
+    return None
 
 
 def _modify_blocker(it: Intent, env: RenderEnv, inv: Optional[Inventory]) -> Optional[dict[str, str]]:
@@ -194,6 +271,11 @@ def advisories(intents: list[Intent], env: RenderEnv) -> dict[str, str]:
     extension), or a modify that widens access."""
     out: dict[str, str] = {}
     for it in intents:
+        if it.kind == "registry_service":
+            w = registry_warnings(it, env)
+            if w:
+                out[it.id] = " ".join(w)
+            continue
         if it.kind == "modify":
             d = it.destination
             rid = (d.id or short(d.name)) if d else ""
@@ -214,6 +296,35 @@ def advisories(intents: list[Intent], env: RenderEnv) -> dict[str, str]:
                           f"{'they' if len(sp.shared_with) > 1 else 'it'} switch"
                           f"{'' if len(sp.shared_with) > 1 else 'es'} to "
                           f"{'enforce' if sp.mode == 'ENFORCE' else 'dry run'} too.")
+    return out
+
+
+GOOGLE_API_HOST = ("googleapis.com", ".google.internal", "gcr.io", "pkg.dev")
+
+
+def registry_warnings(it: Intent, env: RenderEnv) -> list[str]:
+    """Fine to apply, but: only one of the two run.app URL forms (create); grants removed with the entry, and a
+    Google API host the bound agents need through the gateway (delete)."""
+    p = it.params
+    if p is None:
+        return []
+    if not p.delete:
+        hint = reg_mod.run_app_hint([i.url for i in p.interfaces or [] if i.url])
+        return [hint] if hint else []
+    sid = (p.service_id or "").strip()
+    existing = find_service(env, sid)
+    out: list[str] = []
+    n = env.registry_grants.get(existing.name) if existing else None
+    if n:
+        out.append(f"{n} grant{'s' if n != 1 else ''} on this entry will be removed with it ({GRANTS_LOST}).")
+    elif n is None:
+        out.append(f"Any grants on this entry are removed with it ({GRANTS_LOST}).")
+    urls = [i.url for i in (existing.interfaces if existing else p.interfaces or [])]
+    google = [u for u in urls if reg_mod.host_of(u).endswith(GOOGLE_API_HOST)]
+    if google:
+        out.append(f"{english_list(google)} {'is a Google API' if len(google) == 1 else 'are Google APIs'}: agents "
+                   "bound to the egress gateway call it through the gateway, so they lose access when this entry "
+                   "goes.")
     return out
 
 
