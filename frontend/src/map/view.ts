@@ -17,7 +17,8 @@
 // only state: clicking the group (or a picker or "Show on map" match inside it) ticks it, unticking it collapses the
 // group again. Lines into the collapsed group are merged per agent (and per kind: granted or default deny), with the
 // best verdict and a count; the table still lists every endpoint.
-import { DEST_SECTIONS, NOGW, PSEUDO, SECTION_LABEL, bestVerdict, type Chip, type Direction, type PEdge, type PNode, type PolicyGraph, type Verdict } from "./graph";
+import { mergePaths } from "../lib/paths";
+import { DEST_SECTIONS, NOGW, PSEUDO, SECTION_LABEL, bestVerdict, pathChip, type Chip, type Direction, type PEdge, type PNode, type PolicyGraph, type Verdict } from "./graph";
 
 /** The map opens on Agent-to-Anywhere. */
 export const DEFAULT_DIRECTION: Direction = "egress";
@@ -332,6 +333,11 @@ export const tableRows = (v: MapView): PEdge[] => v.rows;
 function googleGroupNode(ns: PNode[]): PNode {
   const unreadable = ns.filter((n) => n.unreadable).length;
   const chips: Chip[] = unreadable ? [{ text: unreadable > 1 ? `${unreadable} IAP policies couldn't be read` : "1 IAP policy couldn't be read", tone: "red" }] : [];
+  // the endpoints' "seen in traffic" counts added up (Private only when none of them was reached publicly)
+  const read = ns.find((n) => n.path !== undefined);
+  const path = read ? mergePaths(ns.map((n) => n.path)) : undefined;
+  const pc = pathChip(path, read?.pathWindow ?? "7d");
+  if (pc) chips.push(pc);
   const pending = ns.filter((n) => n.pending);
   return {
     id: GOOGLE_GROUP,
@@ -344,6 +350,7 @@ function googleGroupNode(ns: PNode[]): PNode {
     destKind: "endpoint",
     googleApi: true,
     grouped: ns.map((n) => n.id),
+    ...(read ? { path, pathWindow: read.pathWindow } : {}),
     search: `google apis ${ns.map((n) => n.search).join(" ")}`,
     pending: pending.length ? { text: pending.flatMap((n) => n.pending!.text.map((t) => `${n.label}: ${t}`)), intents: [...new Set(pending.flatMap((n) => n.pending!.intents))] } : undefined,
   };

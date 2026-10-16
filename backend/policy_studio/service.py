@@ -10,7 +10,7 @@ from typing import Any, Callable
 from . import audit as audit_mod, dryrun
 from .english import make_binding
 from .gcp import discovery, engines as eng_mod, gateways as gw_mod, logs as logs_mod, model_armor as ma_mod, \
-    networking as net_mod, registry as reg_mod
+    networking as net_mod, paths as paths_mod, registry as reg_mod
 from .gcp.rest import NETWORKSERVICES, Rest, client, err_text
 from .model import Context, Engine, Gateway, Inventory, Template
 
@@ -459,6 +459,70 @@ def gateway_logs_view(ctx: Context, gateway: str, since: str = "24h", limit: int
         out.update(notes=notes, errors=errors, synced_at=now_iso(), projects=projects, dry_run=dry)
         return out
     return cache.get((ctx.key(), "gateway_logs", gid, since, int(limit)), build, refresh)
+
+
+# ------------------------------------------------------------------ destination paths (seen in traffic)
+def destination_paths_view(ctx: Context, window: str = paths_mod.DEFAULT_WINDOW,
+                           refresh: bool = False) -> dict[str, Any]:
+    """GET /destination-paths: per registry entry, calls through the context's egress gateways that reached a private
+    upstream address (httpRequest.serverIp) versus a public one, over the window (gcp/paths.py). Each gateway is read
+    on its own: one it can't read (no logging.logEntries.list) gets `error`, never a failed request."""
+    span = paths_mod.parse_window(window)
+
+    def build() -> dict[str, Any]:
+        r = rest_for(ctx)
+        errors: list[str] = []
+        gws: list[Gateway] = []
+        try:
+            gws = [g for g in gateways_view(ctx)["gateways"] if g.type == "egress"]
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"read the gateways: {err_text(e)}")
+        names: dict[str, str] = {}
+        try:
+            inv = inventory_view(ctx)
+            for coll in (inv.agents, inv.mcp_servers, inv.endpoints):
+                for x in coll:
+                    names[eng_mod.tail(x.name)] = x.name
+        except Exception as e:  # noqa: BLE001  (keys stay the logged registry resources)
+            errors.append(f"read the inventory (entry names): {err_text(e)}")
+
+        def one(g: Gateway) -> dict[str, Any]:
+            row: dict[str, Any] = {"gateway": g.name, "id": g.id, "private_egress": g.private_egress is not None,
+                                   "scanned": 0, "truncated": False}
+            try:
+                got = paths_mod.fetch(r, [g.project or ctx.gw_project], g.id, span)
+            except Exception as e:  # noqa: BLE001  (403 without logging.logEntries.list, ...)
+                row["error"] = f"can't read the request logs: {err_text(e)}"
+                return {"row": row, "destinations": {}}
+            row.update(scanned=got["scanned"], truncated=got["truncated"], console_url=got["console_url"])
+            return {"row": row, "destinations": got["destinations"], "since": got["since"]}
+        results: list[dict[str, Any]] = []
+        if gws:
+            with ThreadPoolExecutor(max_workers=min(8, len(gws))) as pool:
+                results = list(pool.map(one, gws))
+        merged = paths_mod.merge([x["destinations"] for x in results])
+        rows = [x["row"] for x in results]
+        since = next((x["since"] for x in results if x.get("since")),
+                     (datetime.now(timezone.utc) - span).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        notes = ["From the gateway request logs: httpRequest.serverIp is the address the gateway connected to. Private "
+                 "(10/8, 172.16/12, 192.168/16, 100.64/10, fc00::/7) means the call went through the gateway's private "
+                 "egress. Only calls that were made count: denied ones have no serverIp."]
+        if any(m["path"] == "mixed" for m in merged.values()):
+            notes.append("Mixed paths: a destination reached at both private and public addresses. It usually has "
+                         "several hostnames (only some resolve into the VPC) or its DNS changed inside the window.")
+        failed = [x for x in rows if x.get("error")]
+        if failed:
+            errors += [f"{x['id']}: {x['error']}" for x in failed]
+            notes.append("Some gateways' request logs couldn't be read, so their destinations have no label. Reading "
+                         "them needs logging.logEntries.list (roles/logging.viewer) on the gateway's project.")
+        truncated = any(x["truncated"] for x in rows)
+        if truncated:
+            notes.append(f"Only the newest {paths_mod.CAP} calls per gateway were counted; older ones in the window "
+                         "were left out.")
+        return {"window": paths_mod.window_text(span), "since": since, "gateways": rows,
+                "destinations": {names.get(k, k): v for k, v in merged.items()}, "truncated": truncated,
+                "notes": notes, "errors": errors, "synced_at": now_iso()}
+    return cache.get((ctx.key(), "destination_paths", paths_mod.window_text(span)), build, refresh)
 
 
 # ------------------------------------------------------------------ credentials (P3)

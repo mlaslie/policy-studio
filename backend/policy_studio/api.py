@@ -15,6 +15,7 @@ from .gcp import gateways as gw_mod
 from .gcp.discovery import defaults as discovery_defaults
 from .gcp.engines import tail
 from .gcp.logs import parse_since
+from .gcp.paths import parse_window
 from .gcp.rest import err_text
 from .model import (ENFORCEMENT_KINDS, SETUP_KINDS, ApplyRequest, Context, DiffItem, Intent, IntentsRequest,
                     Inventory, RenderItem, RenderResult)
@@ -128,6 +129,19 @@ def gateway_logs(gateway: str, project: str = "", region: str = "", gateway_proj
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
     return _guard(service.gateway_logs_view, ctx, gateway.strip(), since or "24h", limit, bool(refresh))
+
+
+@router.get("/destination-paths")
+def destination_paths(project: str = "", region: str = "", gateway_project: str = "", window: str = "7d",
+                      ge_app: str = "", ge_location: str = "us", refresh: int = 0) -> dict[str, Any]:
+    """Read-only: per registry entry, calls through the egress gateways that reached a private upstream address
+    versus a public one over the window (gateway request logs, httpRequest.serverIp). Windows over 30d are capped."""
+    ctx = _ctx(project, region, gateway_project, ge_app, ge_location)
+    try:
+        parse_window(window or "7d")
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return _guard(service.destination_paths_view, ctx, window or "7d", bool(refresh))
 
 
 # ------------------------------------------------------------------ render / diff

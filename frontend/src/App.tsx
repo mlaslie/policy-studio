@@ -66,7 +66,7 @@ function TopBar() {
         </Tip>
         <Tip
           placement="bottom"
-          tip={`Re-read gateways, Model Armor, Agent Registry and IAM from Google Cloud (bypasses the 30-second cache).${!ctx.project ? " Unavailable: set a project first." : syncing ? " Sync is already running." : ""}`}
+          tip={`Re-read gateways, Model Armor, Agent Registry and IAM from Google Cloud (bypasses the 30-second cache), and the last 7 days of gateway traffic for the path labels (in the background).${!ctx.project ? " Unavailable: set a project first." : syncing ? " Sync is already running." : ""}`}
         >
         <button className="btn btn-tonal sync-btn" onClick={() => sync(true)} disabled={syncing || !ctx.project}>
           <RefreshIcon size={16} className={syncing ? "spin" : ""} />

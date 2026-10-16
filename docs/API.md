@@ -40,6 +40,7 @@ Every request carries the context as query params (GET) or a `context` object (P
 | POST | `/api/studio/diff` | `{context, intents: [Intent]}` → `{items: [DiffItem]}` |
 | POST | `/api/studio/preflight` | `{context, intents: [Intent]}` → `{items: [PreflightItem]}` (read-only; the checks `/apply` enforces) |
 | GET | `/api/studio/gateway-logs?gateway=&since=24h&limit=200` | `GatewayLogs` (read-only Cloud Logging `entries:list`; see below) |
+| GET | `/api/studio/destination-paths?window=7d` | `DestinationPaths` ("seen in traffic" path labels; read-only Cloud Logging `entries:list`; see below) |
 
 GET responses are cached for 30 s per context. `?refresh=1` bypasses the cache; the **Sync** button uses it. Partial failures appear per item as `error: "…"` and never fail the whole request. A failure of the whole request (no credentials, network) is HTTP 502 `{detail}`.
 
@@ -364,6 +365,35 @@ GatewayLogs = { gateway, since /* RFC 3339 */, filter, console_url, notes: [str]
   //   merged by insertId, so entries can exceed `limit`. truncated stays true (older platform calls were left out);
   //   checked_truncated says whether the non-platform entries were capped too. notes say which entries were left out.
   // Needs logging.logEntries.list (roles/logging.viewer).
+DestinationPaths = { window /* "7d"; m / h / d, capped at "30d" (the _Default bucket's retention) */,
+                     since /* RFC 3339 */,
+                     gateways: [{ gateway /* full name */, id, private_egress: boolean, scanned /* entries read */,
+                                  truncated, console_url?, error? /* "can't read the request logs: <HTTP error>" */ }],
+                     destinations: { [entry name]: DestinationPath }  /* an entry with no calls is absent */,
+                     truncated /* some gateway hit the cap */, notes: [str], errors: [str], synced_at }
+DestinationPath = { private, public, unknown /* call counts by upstream address */, last_seen, last_private,
+                    last_public /* RFC 3339 or null */, path: "private" | "public" | "mixed" | null,
+                    hosts: [str] /* up to 5 hostnames the calls named */,
+                    by_gateway: { [gateway full name]: {private, public, unknown, last_seen} } }
+  // Phase N-4 of PRIVATE_NETWORKING_PLAN.md. Its own endpoint, not an Inventory field: it reads up to a week of logs
+  // (seconds on a busy gateway), so the inventory isn't held up by it and each can be refreshed alone. The UI reads it
+  // with Sync, in the background. Cached 30 s like the other GETs (refresh=1 bypasses it).
+  // Per egress gateway of the context, one entries:list (newest first, pages of 1000, at most 5000 entries:
+  // truncated past that) with a partial response (fields=entries(timestamp,httpRequest(serverIp,status),jsonPayload),
+  // nextPageToken; jsonPayload is a Struct, so its subfields can't be selected):
+  //   <the gateway-logs filter> AND httpRequest.serverIp:* AND jsonPayload.agentGatewayInfo.agentRegistryResource:*
+  // so only calls that connected somewhere and name a registry entry are read (denied calls have no serverIp; the
+  // platform's 240.0.0.2 calls name none). Seen live: httpRequest.serverIp is the upstream IP:port the gateway connected
+  // to, a private address (10.x.x.x:443, the PSC endpoint) through private egress, public for Google APIs under
+  // PRIVATE_RANGES_ONLY. Entries are keyed by agentRegistryResource (logged by project number) and matched to the
+  // inventory's entry names (by project id); one not in the inventory keeps the logged name.
+  // classify_ip: private = 10/8, 172.16/12, 192.168/16, 100.64/10 (CGNAT), fc00::/7 (an IPv4-mapped IPv6 address
+  // counts as its IPv4 address); public = globally routable; unknown = the rest (loopback, link-local, 240.0.0.0/4,
+  // documentation ranges, not an address). path: mixed when both private and public > 0, private / public when only
+  // that one, null otherwise. Labels: "Private (seen in traffic)", "Public (seen in traffic)", "Mixed paths" (several
+  // hostnames, only some resolving into the VPC, or DNS changed inside the window), none for null.
+  // Needs logging.logEntries.list (roles/logging.viewer) on each gateway's project; a gateway that can't be read gets
+  // `error` (and a note), never a failed request. Shared cases: backend/tests/fixtures/path_cases.json.
 ```
 
 ## Conditions

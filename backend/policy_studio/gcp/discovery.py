@@ -44,7 +44,8 @@ PERMISSIONS: list[tuple[str, str, str, bool]] = [
     ("modelarmor.templates.list", "read Model Armor templates and filters", "roles/modelarmor.viewer", False),
     ("resourcemanager.projects.getIamPolicy", "check the gateway service agents' Model Armor roles",
      "roles/browser", False),
-    ("logging.logEntries.list", "read gateway request logs (dry-run “would have been denied”)",
+    ("logging.logEntries.list", "read gateway request logs (dry-run “would have been denied”, “seen in traffic” "
+     "paths)",
      "roles/logging.viewer", False),
     ("networkservices.agentConnectivityTemplates.get", "read a gateway's connectivity template (private egress: VPC, "
      "domains, egress mode)", "roles/networkservices.viewer", False),

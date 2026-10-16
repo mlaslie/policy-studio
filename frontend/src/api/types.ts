@@ -440,6 +440,33 @@ export type GatewayLogsResp = {
   /** The gateway is an egress gateway in dry run, so allowed entries were checked against the grants. */
   dry_run?: boolean;
 };
+/** GET /destination-paths: calls through the egress gateways, per registry entry, by the upstream address the gateway
+ *  connected to (httpRequest.serverIp): private (RFC 1918, 100.64/10, fc00::/7), public, or unknown (neither). */
+export type PathKind = "private" | "public" | "mixed";
+export type PathCounts = { private: number; public: number; unknown: number; last_seen: string | null };
+export type DestinationPath = PathCounts & {
+  last_private: string | null;
+  last_public: string | null;
+  /** private / public / mixed; null when no call reached a private or public address. */
+  path: PathKind | null;
+  /** Up to 5 hostnames the calls named (several, or a DNS change, explain a mixed path). */
+  hosts: string[];
+  /** Per egress gateway (full name). */
+  by_gateway: Record<string, PathCounts>;
+};
+export type DestinationPathsResp = {
+  /** "7d" (capped at 30d). */
+  window: string;
+  since: string;
+  gateways: { gateway: string; id: string; private_egress: boolean; scanned: number; truncated: boolean; console_url?: string; error?: string }[];
+  /** Keyed by the inventory's entry name (agents, MCP servers, endpoints). A destination with no calls is absent. */
+  destinations: Record<string, DestinationPath>;
+  /** Some gateway hit the per-gateway cap (5000 calls): older calls of the window weren't counted. */
+  truncated: boolean;
+  notes: string[];
+  errors: string[];
+  synced_at?: string;
+};
 export type PreflightResult = { items: PreflightItem[] };
 export type ApplyDoneEvent = { type: "done"; summary?: unknown };
 export type ApplyEvent = ApplyItemEvent | ApplyDoneEvent;

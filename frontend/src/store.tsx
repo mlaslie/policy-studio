@@ -2,7 +2,7 @@
 // builder hand-off, the Learn panel and toasts. One React context; no external state library.
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "./api/client";
-import type { ApplyConfirm, AuditResp, AuthInfo, ContextInfo, Ctx, GatewaysResp, Intent, Inventory, ModelArmorResp } from "./api/types";
+import type { ApplyConfirm, AuditResp, AuthInfo, ContextInfo, Ctx, DestinationPathsResp, GatewaysResp, Intent, Inventory, ModelArmorResp } from "./api/types";
 import { sameChange, toList, type ApplyRun } from "./lib/apply";
 import { load, save } from "./lib/util";
 import { addSettling, loadSettling, pruneSettling, saveSettling, sessionStore, settleEntry, type SettleEntry } from "./lib/settling";
@@ -53,6 +53,9 @@ type Studio = {
   modelArmor: Loadable<ModelArmorResp>;
   inventory: Loadable<Inventory>;
   audit: Loadable<AuditResp>;
+  /** GET /destination-paths: "seen in traffic" path labels (a week of gateway request logs). Read by Sync in the
+   *  background: Sync doesn't wait for it, and the labels show once it's in. */
+  paths: Loadable<DestinationPathsResp>;
   syncing: boolean;
   syncedAt: number | null;
   sync: (refresh?: boolean, c?: Ctx) => Promise<void>;
@@ -128,6 +131,7 @@ export function StudioProvider({ children }: { children: ReactNode }) {
   const [modelArmor, setModelArmor] = useState(empty<ModelArmorResp>);
   const [inventory, setInventory] = useState(empty<Inventory>);
   const [audit, setAudit] = useState(empty<AuditResp>);
+  const [paths, setPaths] = useState(empty<DestinationPathsResp>);
   const [syncing, setSyncing] = useState(false);
   const [syncedAt, setSyncedAt] = useState<number | null>(null);
   const [cart, setCart] = useState<Intent[]>(() => load<Intent[]>("studio.cart", []));
@@ -195,6 +199,8 @@ export function StudioProvider({ children }: { children: ReactNode }) {
     const cx = c ?? ctxRef.current;
     if (!cx.project || !cx.region) return;
     setSyncing(true);
+    // The traffic labels read a week of request logs (seconds on a busy gateway): not awaited, so Sync isn't held up.
+    void into(setPaths, api.destinationPaths(cx, "7d", refresh));
     await Promise.all([
       into(setCtxInfo, api.context(cx, refresh)),
       into(setGateways, api.gateways(cx, refresh)),
@@ -446,14 +452,14 @@ export function StudioProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo<Studio>(
     () => ({
-      ctx, setCtx, ctxInfo, gateways, modelArmor, inventory, audit, syncing, syncedAt, sync,
+      ctx, setCtx, ctxInfo, gateways, modelArmor, inventory, audit, paths, syncing, syncedAt, sync,
       cart, addIntents, updateIntent, removeIntent, duplicateIntent, clearCart,
       step, goto, draft, openBuilder, reviewFocus, openReview,
       learnOpen, setLearnOpen, glossaryTerm, showTerm, toasts, toast,
       auth, refreshAuth, applyFocus, openApply, run, history, startApply, cancelApply, dismissRun, showRun, settling, stageUndo,
       maSetupOpen, openMaSetup, setMaSetupOpen, mapFocus, openMap, clearMapFocus,
     }),
-    [mapFocus, openMap, clearMapFocus, maSetupOpen, openMaSetup, auth, refreshAuth, applyFocus, openApply, run, history, startApply, cancelApply, dismissRun, showRun, settling, stageUndo, ctx, setCtx, ctxInfo, gateways, modelArmor, inventory, audit, syncing, syncedAt, sync, cart, addIntents, updateIntent, removeIntent, duplicateIntent, clearCart, step, goto, draft, openBuilder, reviewFocus, openReview, learnOpen, setLearnOpen, glossaryTerm, showTerm, toasts, toast],
+    [mapFocus, openMap, clearMapFocus, maSetupOpen, openMaSetup, auth, refreshAuth, applyFocus, openApply, run, history, startApply, cancelApply, dismissRun, showRun, settling, stageUndo, ctx, setCtx, ctxInfo, gateways, modelArmor, inventory, audit, paths, syncing, syncedAt, sync, cart, addIntents, updateIntent, removeIntent, duplicateIntent, clearCart, step, goto, draft, openBuilder, reviewFocus, openReview, learnOpen, setLearnOpen, glossaryTerm, showTerm, toasts, toast],
   );
   return <Ctx_.Provider value={value}>{children}</Ctx_.Provider>;
 }

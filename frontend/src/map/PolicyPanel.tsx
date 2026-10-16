@@ -8,7 +8,7 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboa
 import type { Engine, Gateway, Intent, Inventory } from "../api/types";
 import { api } from "../api/client";
 import { useLookup, useStudio } from "../store";
-import { Badge, Callout, Disclosure, KindIcon } from "../components/ui";
+import { Badge, Callout, Disclosure, KindIcon, Term } from "../components/ui";
 import { CodeView } from "../components/CodeView";
 import { CopyButton } from "../components/Glass";
 import { Tip } from "../components/Tooltip";
@@ -28,6 +28,8 @@ import { PENDING_WORD, VERDICT_LABEL, VIA_LABEL, lineFrom } from "./toFlow";
 import { pendingText } from "./diff";
 import { allowFor, bindFor, ingressInfo, isGroupGrant, limitToAgent, modifyFor, reachedBy, reasonGrant, revokeFor, sameAccess } from "./actions";
 import { stageTip } from "../lib/timing";
+import { PathBadge } from "../components/PathBadge";
+import { pathRow, pathThrough } from "../lib/paths";
 
 type Props = {
   edge: PEdge | null;
@@ -114,6 +116,20 @@ export default function PolicyPanel({ edge, node, inv, gateways, nodeOf, label, 
 }
 
 // ------------------------------------------------------------------ a line
+/** The Path row: where this destination's calls went through the line's gateway (all gateways for a pseudo caller),
+ *  seen in the request logs over the window. */
+function PathValue({ dest, gateway, direct }: { dest: PNode; gateway: string | null; direct: boolean }) {
+  const { paths } = useStudio();
+  if (direct) return <>Not in any gateway's logs: no gateway in the path</>;
+  if (dest.path === undefined) return <span className="muted">{paths.loading ? "Reading the gateway logs…" : paths.error ? `Traffic couldn't be read: ${paths.error}` : "Traffic not read yet (Sync reads it)"}</span>;
+  const c = pathThrough(dest.path, gateway);
+  return (
+    <>
+      <PathBadge path={c} window={dest.pathWindow ?? "7d"} /> <span className="small">{pathRow(c, dest.pathWindow)}</span>
+    </>
+  );
+}
+
 function EdgeDetails({ edge, inv, gateways, nodeOf, label }: { edge: PEdge; inv: Inventory; gateways: Gateway[]; nodeOf: (id: string) => PNode | undefined; label: (id: string) => string }) {
   const openGateway = useOpenGateway();
   // a line into the collapsed Google APIs group stands for one line per endpoint
@@ -169,6 +185,16 @@ function EdgeDetails({ edge, inv, gateways, nodeOf, label }: { edge: PEdge; inv:
             <>
               <dt>Model Armor</dt>
               <dd>{ma?.enabled ? `On${ma.dryRun ? " (dry run: screening, not blocking)" : ""}${ma.template ? `, template ${ma.template}` : ""}` : "Off: content isn't screened"}</dd>
+            </>
+          )}
+          {dest?.destKind && dest.destKind !== "registry" && (
+            <>
+              <dt>
+                <Term k="seen-in-traffic">Path</Term>
+              </dt>
+              <dd data-testid="path-row">
+                <PathValue dest={dest} gateway={edge.caller?.startsWith("pseudo:") ? null : (edge.gateway ?? null)} direct={!edge.gateway && !edge.caller?.startsWith("pseudo:")} />
+              </dd>
             </>
           )}
           {gwNode?.shared?.length ? (

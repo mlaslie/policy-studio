@@ -274,6 +274,17 @@ connectivity templates are created). It shows two things that matter to who can 
   (bypasses gateway)" chip.
 - **Egress gateways with private egress** (a connectivity template, or the older inline `networkConfig`): the VPC,
   private domains and egress mode, on the gateway card and as a "Private egress · VPC" chip on the map.
+- **Destination paths seen in traffic**: over the last 7 days of each egress gateway's request logs
+  (`GET /api/studio/destination-paths`, read-only), the address the gateway connected to (`httpRequest.serverIp`)
+  says where each destination's calls actually went. A destination is **Private (seen in traffic)** when calls reached
+  a private address (10/8, 172.16/12, 192.168/16, 100.64/10, fc00::/7: the gateway's private egress), **Public (seen in
+  traffic)** when they only reached public ones, and **Mixed paths** for both (several hostnames, only some resolving
+  into the VPC, or a DNS change inside the window). No calls, no label; denied calls don't count. The tooltip has the
+  counts, the window and when it was last seen. It shows in Inventory (a badge on agents and MCP servers, a Path
+  column for APIs), as a lock "Private" or a "Mixed paths" chip on the map's destination cards (public is the default,
+  so it gets no chip), and as a Path row in a line's panel (that line's gateway only). **Sync** reads it, in the
+  background, so Sync isn't held up by the log read. It needs `roles/logging.viewer`; without it the labels are just
+  missing.
 
 The audit adds N1–N5 (PSC interface without / with a gateway, inline networkConfig, unreadable template, egress mode
 `ALL_TRAFFIC`), with redeploy or step-by-step guidance. Details: [docs/PRIVATE_NETWORKING_PLAN.md](docs/PRIVATE_NETWORKING_PLAN.md).
@@ -312,7 +323,7 @@ later check can compare.
 Read access: the Context step lists what your credentials can read (`testIamPermissions`) with the role and the
 command to grant it. Reading needs roughly: `roles/browser`, `roles/serviceusage.serviceUsageViewer`, `roles/networkservices.viewer`,
 `roles/networksecurity.viewer`, `roles/aiplatform.viewer`, `roles/agentregistry.viewer`, `roles/modelarmor.viewer`,
-`roles/logging.viewer` (gateway request logs) and an IAP role that can read IAM policies (`roles/iap.admin` includes
+`roles/logging.viewer` (gateway request logs and the path labels) and an IAP role that can read IAM policies (`roles/iap.admin` includes
 it). Private networking reads `networkservices.agentConnectivityTemplates.get` / `list` (`roles/networkservices.viewer`)
 and, optionally, `compute.networkAttachments.get` (`roles/compute.networkViewer`, for the VPC name).
 

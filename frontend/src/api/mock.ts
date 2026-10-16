@@ -16,6 +16,7 @@ import { accessFromCondition } from "../lib/grants";
 import { modifyWarning } from "../lib/apply";
 import { TIMING, isMeasured, storedText } from "../lib/timing";
 import { registryPreflight, serviceOf } from "../lib/registry";
+import { destinationPaths as pathsOf } from "./mockPaths";
 
 const clone = <T,>(x: T): T => JSON.parse(JSON.stringify(x));
 
@@ -252,6 +253,11 @@ function mockCheck(w: World, caller: { display_name: string; principal: string }
   }
   if (limited.length) return ["would_deny", `${caller.display_name}'s roles/iap.egressor grant on ${dest} is limited (${limited.join("; ")}) and doesn't cover ${tool ?? "this call"}.`];
   return ["would_deny", `${caller.display_name} holds no roles/iap.egressor grant on ${dest} (or on the whole Agent Registry).`];
+}
+
+/** Mirrors GET /destination-paths (mockPaths.ts: a week of fake request log entries, aggregated like the backend). */
+export function destinationPaths(ctx: Ctx, window = "7d") {
+  return clone(pathsOf(world(ctx), window));
 }
 
 /** Mirrors GET /gateway-logs. Every call is logged as allowed on a dry-run gateway (as Google does); would-deny is

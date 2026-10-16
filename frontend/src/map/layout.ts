@@ -45,15 +45,17 @@ export const innerW = (k: PNodeKind) => W[k] - 28 - 2 * (BORDER[k] ?? 1);
 /** Room for the title and subtitle: the inner width less the icon tile (36px and a 10px gap) and, when the card shows
  *  the selected agent's verdict, its dot (10px and a 10px gap). */
 export const titleRoom = (k: PNodeKind, dot = false) => innerW(k) - 46 - (dot ? 20 : 0);
-/** A chip's padding (9px a side), the clock on a staged one (11px and a 4px gap), the gap between chips, and a row of
+/** A chip's padding (9px a side), the clock on a staged one or the icon on a "Private" one (11px and a 4px gap each),
+ *  the gap between chips, and a row of
  *  chips (11.5px text at line-height 1.4, 2px padding a side) — styles.css .chip. */
 const CHIP_PAD = 18;
 const CLOCK = 15;
 export const CHIP_GAP = 6;
 export const CHIP_H = 20;
 /** A chip as the card draws it: the short label (labels.ts chipLabel), shortened further if it still doesn't fit. */
-export const chipShown = (c: Pick<Chip, "text" | "pending">, k: PNodeKind, measure: Measure = measureText) => fitText(chipLabel(c.text), innerW(k) - CHIP_PAD - (c.pending ? CLOCK : 0), FIT.chip, "end", measure);
-const chipW = (c: Chip, k: PNodeKind, measure: Measure) => measure(chipShown(c, k, measure).text, fontOf(FIT.chip)) + CHIP_PAD + (c.pending ? CLOCK : 0);
+const extras = (c: Pick<Chip, "pending" | "icon">) => (c.pending ? CLOCK : 0) + (c.icon ? CLOCK : 0);
+export const chipShown = (c: Pick<Chip, "text" | "pending" | "icon">, k: PNodeKind, measure: Measure = measureText) => fitText(chipLabel(c.text), innerW(k) - CHIP_PAD - extras(c), FIT.chip, "end", measure);
+const chipW = (c: Chip, k: PNodeKind, measure: Measure) => measure(chipShown(c, k, measure).text, fontOf(FIT.chip)) + CHIP_PAD + extras(c);
 /** A skill pill: the "SKILL" tag (9.5px bold caps, 4px padding a side, 0.4px letter spacing), a 5px gap, the name, and
  *  the pill's padding (3px and 7px) and border. */
 const SKILL_FONT: FitStyle = { size: 9.5, min: 9.5, weight: 700 };

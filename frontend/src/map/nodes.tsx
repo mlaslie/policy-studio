@@ -4,7 +4,7 @@
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 import { createContext, memo, useContext, useSyncExternalStore } from "react";
 import type { CSSProperties, ReactNode } from "react";
-import { ApiIcon, ArrowIcon, ClockIcon, CloudIcon, GatewayIcon, PersonIcon, PinIcon, RegistryIcon, RobotIcon, ServerIcon, ShieldIcon, WarnIcon } from "../components/Icons";
+import { ApiIcon, ArrowIcon, ClockIcon, CloudIcon, GatewayIcon, LockIcon, PersonIcon, PinIcon, RegistryIcon, RobotIcon, ServerIcon, ShieldIcon, WarnIcon } from "../components/Icons";
 import { FIT, fitText, fontEpoch, onFontEpoch, type Cut, type FitStyle } from "./fit";
 import type { Chip, PNodeKind } from "./graph";
 import { W, chipShown, skillRoom, titleRoom, toolLabelW, toolPillW, toolRoom } from "./layout";
@@ -89,6 +89,7 @@ function Chips({ chips, kind }: { chips?: Chip[]; kind: PNodeKind }) {
         return (
           <span key={c.text} className={`chip chip-${c.tone} ${c.pending ? "chip-pending" : ""}`} title={tip}>
             {c.pending && <ClockIcon size={11} />}
+            {c.icon === "lock" && <LockIcon size={11} />}
             <span className="chip-text">
               <Shown text={shown} full={c.text} />
             </span>

@@ -13,12 +13,13 @@
 // denied). With Inherited grants off, a destination reached only through an inherited grant gets no line (it isn't
 // denied), and an MCP tool allowed only through one is set aside (ToolSplit.inherited) instead of being denied. The
 // Agent Registry node stands for registry-wide grants, not a destination: never a default-deny line, never counted.
-import type { Access, Binding, ContextInfo, Ctx, EnforcementMode, Engine, Gateway, Inventory, ModelArmorResp } from "../api/types";
+import type { Access, Binding, ContextInfo, Ctx, DestinationPath, DestinationPathsResp, EnforcementMode, Engine, Gateway, Inventory, ModelArmorResp } from "../api/types";
 import { ROLE, accessFromCondition } from "../lib/policy";
 import { ENGINE_PRINCIPAL_RE, EVERYONE, PROJECT_AGENTS_RE, conditionAllows, evaluateTools, isReadOnlyHint, memberMatches, parseTools } from "./evaluate";
 import { CLIENT, NOGW, PSEUDO, pseudoOf } from "./ids";
 import { endpointLabel, isGoogleApi } from "./labels";
 import { privateEgressChip, privateEgressSummary, pscChips } from "../lib/networking";
+import { PATH_CHIP, PATH_TONE, pathTip } from "../lib/paths";
 
 export { CLIENT, NOGW, PSEUDO };
 
@@ -53,8 +54,8 @@ export type Via = "member" | "project_agents" | "public" | "registry_wide" | "ot
 export type ResourceKind = "agent" | "mcp_server" | "endpoint" | "registry";
 export type Column = "callers" | "gateways" | "dests" | "sink";
 export type Tone = "neutral" | "blue" | "red" | "green" | "amber" | "orange";
-/** pending: a staged change (drawn with a clock). */
-export type Chip = { text: string; tone: Tone; title?: string; pending?: boolean };
+/** pending: a staged change (drawn with a clock). icon: drawn before the text ("lock": a private path seen in traffic). */
+export type Chip = { text: string; tone: Tone; title?: string; pending?: boolean; icon?: "lock" };
 export type Pending = "add" | "remove" | "change";
 /** inherited: tools only an inherited grant allows (or might), set aside on a line drawn with Inherited grants off:
  *  neither drawn as allowed nor as denied. */
@@ -114,6 +115,11 @@ export interface PNode {
   displayName?: string;
   url?: string;
   googleApi?: boolean;
+  /** Destination (egress map): its calls through the egress gateways by upstream address, from /destination-paths
+   *  (undefined = not read; absent from the response = no calls). The private / mixed chip and the panel's Path row. */
+  path?: DestinationPath | null;
+  /** The window `path` covers ("7d"). */
+  pathWindow?: string;
   /** Lowercase label + id + sub, for search. */
   search: string;
   /** Set by the view (view.ts), not the graph. MCP: the tool rows drawn when Show: Allows / Denies leaves out some (the
@@ -182,6 +188,16 @@ export interface GraphInput {
   direction: Direction;
   /** Add group / public / registry-wide grants to each agent's lines (default true). */
   inherited?: boolean;
+  /** GET /destination-paths: "seen in traffic" chips on the egress map's destinations (optional). */
+  paths?: DestinationPathsResp | null;
+}
+
+/** A destination's "seen in traffic" chip: a lock and "Private", or "Mixed paths"; none for public only or no calls. */
+export function pathChip(p: DestinationPath | null | undefined, window: string): Chip | null {
+  const kind = p?.path ?? null;
+  const text = kind ? PATH_CHIP[kind] : undefined;
+  if (!p || !kind || !text) return null;
+  return { text, tone: PATH_TONE[kind] === "amber" ? "amber" : "blue", title: `${kind === "private" ? "Private (seen in traffic)" : "Mixed paths (seen in traffic)"}\n${pathTip(p, window)}`, ...(kind === "private" ? { icon: "lock" as const } : {}) };
 }
 
 /** The tooltip of an ingress gateway's IAP policy (§6.3, open question 3). */
@@ -366,7 +382,10 @@ function buildEgress(input: GraphInput): PolicyGraph {
   const addDest = (id: string, kind: ResourceKind, pk: PNodeKind, section: string, label: string, sub: string, extra: Partial<PNode>, tools: Record<string, boolean> | null) => {
     const unreadable = inv.access_errors?.[id];
     const chips: Chip[] = unreadable ? [{ text: "IAP policy couldn't be read", tone: "red", title: unreadable }] : [];
-    const node: PNode = { id, kind: pk, label, sub, column: "dests", section, chips, destKind: kind, unreadable, search: `${label} ${short(id)} ${sub}`.toLowerCase(), ...extra };
+    const path = input.paths ? (input.paths.destinations[id] ?? null) : undefined;
+    const pc = kind === "registry" ? null : pathChip(path, input.paths?.window ?? "7d");
+    if (pc) chips.push(pc);
+    const node: PNode = { id, kind: pk, label, sub, column: "dests", section, chips, destKind: kind, unreadable, search: `${label} ${short(id)} ${sub}`.toLowerCase(), ...(path !== undefined && kind !== "registry" ? { path, pathWindow: input.paths!.window } : {}), ...extra };
     nodes.push(node);
     dests.push({ id, kind, label, node, tools });
   };

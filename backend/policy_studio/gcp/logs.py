@@ -209,8 +209,10 @@ def count(entries: list[dict[str, Any]]) -> dict[str, int]:
     return counts
 
 
-def _list(r: Rest, projects: list[str], flt: str, cap: int) -> tuple[list[dict], bool]:
-    """Up to `cap` entries matching `flt`, newest first, in at most MAX_PAGES pages. (entries, more were left out)"""
+def _list(r: Rest, projects: list[str], flt: str, cap: int, fields: str = "") -> tuple[list[dict], bool]:
+    """Up to `cap` entries matching `flt`, newest first, in at most MAX_PAGES pages. (entries, more were left out)
+    `fields`: a partial response (the system parameter), e.g. "entries(timestamp,jsonPayload),nextPageToken"."""
+    url = f"{LOGGING}/entries:list" + (f"?fields={quote(fields, safe='(),/')}" if fields else "")
     entries: list[dict] = []
     token: Optional[str] = None
     for _ in range(MAX_PAGES):
@@ -218,7 +220,7 @@ def _list(r: Rest, projects: list[str], flt: str, cap: int) -> tuple[list[dict],
                                 "orderBy": "timestamp desc", "pageSize": min(cap - len(entries), 1000)}
         if token:
             body["pageToken"] = token
-        res = r.post(f"{LOGGING}/entries:list", json=body) or {}
+        res = r.post(url, json=body) or {}
         entries += res.get("entries") or []
         token = res.get("nextPageToken")
         if not token or len(entries) >= cap:

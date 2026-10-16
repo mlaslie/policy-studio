@@ -107,6 +107,11 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
     short: "The egress gateway can reach destinations inside a VPC, still checked by IAP.",
     long: "With a connectivity template (or inline networkConfig) the egress gateway reaches private destinations in a VPC, such as internal Cloud Run services or on-prem APIs. Unlike an agent's own PSC interface, these calls still go through the gateway: registry, roles/iap.egressor grants and gateway logs all apply. Without it, the gateway has public egress only.",
   },
+  "seen-in-traffic": {
+    term: "Path (seen in traffic)",
+    short: "Where a destination's calls actually went: a private or a public address, from the gateway logs.",
+    long: "Each gateway request log entry records the address the gateway connected to (httpRequest.serverIp). Over the last 7 days, a destination is Private (seen in traffic) when calls reached it at a private address (10/8, 172.16/12, 192.168/16, 100.64/10, fc00::/7), which means through the gateway's private egress, and Public (seen in traffic) when they only reached public ones. Mixed paths means both: usually several hostnames, only some of them resolving into the VPC, or a DNS change inside the window. No label means no calls were seen. Denied calls don't count (they never connect). Sync reads it.",
+  },
   runtime: {
     term: "Agent Runtime engine",
     short: "A deployed agent on Vertex AI Agent Runtime (a 'reasoning engine').",

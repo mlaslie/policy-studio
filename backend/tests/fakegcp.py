@@ -242,7 +242,7 @@ class FakeRest:
                                                                                        ".update", "setIamPolicy"))]}
         if url.endswith(":getAncestry"):
             return {"ancestor": [{"resourceId": {"type": "organization", "id": ORG}}]}
-        if url.endswith("/v2/entries:list"):
+        if url.split("?")[0].endswith("/v2/entries:list"):
             self.log_requests.append(copy.deepcopy(json))
             flt = json.get("filter", "")
             src = self.platform_entries if "httpRequest.requestUrl:" in flt else self.log_entries
@@ -379,7 +379,7 @@ class FakeWriteGcp(FakeRest):
         return super().list_all(url, key, params)
 
     def post(self, url: str, json: Any = None, ok404: bool = False) -> Any:
-        if url.endswith("/v2/entries:list"):
+        if url.split("?")[0].endswith("/v2/entries:list"):
             return FakeRest.post(self, url, json, ok404)
         if url.endswith(":testIamPermissions"):
             assert url.split("?")[0].endswith(READ_ONLY_POSTS)

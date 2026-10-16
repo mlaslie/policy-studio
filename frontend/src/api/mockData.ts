@@ -13,7 +13,8 @@
 // Private networking (detection only): corp-egress reaches corp-vpc through a connectivity template (us-central1:
 // the older inline networkConfig, N3; europe-west1: a template Policy Studio can't read, N4; us-west1: west-egress
 // sends ALL_TRAFFIC into the VPC, N5); simple-agent-with-psc has its own PSC interface and no gateway (N1); Ops
-// Copilot has a PSC interface and an egress binding (N2, broken). Region us-west1 is the scale scenario (mockScale.ts): about 50 agents and 500 grants, two egress gateways
+// Copilot has a PSC interface and an egress binding (N2, broken). Seen in traffic (mockPaths.ts): Tickets MCP
+// private through corp-egress's template, HR Directory MCP public, Knowledge Base Agent mixed. Region us-west1 is the scale scenario (mockScale.ts): about 50 agents and 500 grants, two egress gateways
 // (one in dry run), and corp-ingress with Model Armor on (screened Client-to-Agent lines).
 import type { AuditResp, Binding, ContextInfo, Ctx, EnforcementMode, Finding, Gateway, Grant, Inventory, MaSetup, McpTool, ModelArmorResp, RegistryService, ServiceAgent, Template, TemplateFilters } from "./types";
 import { READ_ONLY_EXPR, ROLE, toolsExpr } from "../lib/policy";

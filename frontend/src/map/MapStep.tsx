@@ -193,7 +193,7 @@ function resolveEdge(edges: PEdge[], e: PEdge): PEdge | null {
 }
 
 function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
-  const { modelArmor, ctxInfo, ctx, cart, mapFocus, clearMapFocus, settling } = useStudio();
+  const { modelArmor, ctxInfo, ctx, cart, mapFocus, clearMapFocus, settling, paths } = useStudio();
   const rf = useReactFlow();
   const [direction, setDirection] = useState<Direction>(DEFAULT_DIRECTION);
   const [tools, setTools] = useState<Tools>(DEFAULT_TOOLS);
@@ -220,15 +220,15 @@ function PolicyMap({ inv, gw }: { inv: Inventory; gw: GatewaysResp }) {
 
   // ---------- graph (today, and with the cart applied) ----------
   const base = useMemo(
-    () => buildPolicyGraph({ inventory: inv, gateways: gw.gateways, modelArmor: modelArmor.data, context: ctxInfo.data, ctx, direction, inherited: tools.inherited }),
-    [inv, gw, modelArmor.data, ctxInfo.data, ctx, direction, tools.inherited],
+    () => buildPolicyGraph({ inventory: inv, gateways: gw.gateways, modelArmor: modelArmor.data, context: ctxInfo.data, ctx, direction, inherited: tools.inherited, paths: paths.data }),
+    [inv, gw, modelArmor.data, ctxInfo.data, ctx, direction, tools.inherited, paths.data],
   );
   const graph: PolicyGraph = useMemo(() => {
     if (show === "today" || !cart.length) return base;
     const sim = simulate({ inventory: inv, gateways: gw.gateways, modelArmor: modelArmor.data }, cart);
-    const after = buildPolicyGraph({ inventory: sim.inventory, gateways: sim.gateways, modelArmor: sim.modelArmor, context: ctxInfo.data, ctx, direction, inherited: tools.inherited });
+    const after = buildPolicyGraph({ inventory: sim.inventory, gateways: sim.gateways, modelArmor: sim.modelArmor, context: ctxInfo.data, ctx, direction, inherited: tools.inherited, paths: paths.data });
     return mergeStaged(base, after, diffGraphs(base, after), cart, inv, sim.effects);
-  }, [base, show, cart, inv, gw, modelArmor.data, ctxInfo.data, ctx, direction, tools.inherited]);
+  }, [base, show, cart, inv, gw, modelArmor.data, ctxInfo.data, ctx, direction, tools.inherited, paths.data]);
   const staged = show !== "today" ? pendingCount(graph) + graph.nodes.filter((n) => n.pending).length : 0;
   const known = useMemo(() => new Set(base.nodes.map((n) => n.id)), [base]);
 

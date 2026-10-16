@@ -1,6 +1,6 @@
 // API client for /api/studio/* (studio/docs/API.md). With VITE_MOCK=1 every call is answered by the
 // in-browser mock (mockData.ts + mockRender.ts) instead of the backend.
-import type { ApplyConfirm, ApplyEvent, AuditResp, AuthInfo, ContextInfo, Ctx, Defaults, DiffResult, GatewayLogsResp, GatewaysResp, Health, Intent, Inventory, ModelArmorResp, PreflightResult, RenderResult } from "./types";
+import type { ApplyConfirm, ApplyEvent, AuditResp, AuthInfo, ContextInfo, Ctx, Defaults, DestinationPathsResp, DiffResult, GatewayLogsResp, GatewaysResp, Health, Intent, Inventory, ModelArmorResp, PreflightResult, RenderResult } from "./types";
 
 export const IS_MOCK = import.meta.env.VITE_MOCK === "1";
 const BASE = "/api/studio";
@@ -52,6 +52,9 @@ export const api = {
     IS_MOCK
       ? mock((m) => m.gatewayLogs(ctx, gateway, since), 350)
       : http(`/gateway-logs?${qs(ctx, refresh)}&${new URLSearchParams({ gateway, since, limit: "200" }).toString()}`),
+  /** Read-only: per destination, calls through the egress gateways to a private vs a public address (request logs). */
+  destinationPaths: (ctx: Ctx, window = "7d", refresh = false): Promise<DestinationPathsResp> =>
+    IS_MOCK ? mock((m) => m.destinationPaths(ctx, window), 700) : http(`/destination-paths?${qs(ctx, refresh)}&${new URLSearchParams({ window }).toString()}`),
   modelArmor: (ctx: Ctx, refresh = false): Promise<ModelArmorResp> => (IS_MOCK ? mock((m) => m.modelArmor(ctx)) : http(`/model-armor?${qs(ctx, refresh)}`)),
   inventory: (ctx: Ctx, refresh = false): Promise<Inventory> => (IS_MOCK ? mock((m) => m.inventory(ctx), 450) : http(`/inventory?${qs(ctx, refresh)}`)),
   audit: (ctx: Ctx, refresh = false): Promise<AuditResp> => (IS_MOCK ? mock((m) => m.audit(ctx), 500) : http(`/audit?${qs(ctx, refresh)}`)),

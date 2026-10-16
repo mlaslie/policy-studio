@@ -1812,6 +1812,12 @@ tr:last-child td {
 .tools-table td:first-child {
   white-space: nowrap;
 }
+.ep-path {
+  margin-top: 4px;
+}
+.ep-path:empty {
+  display: none;
+}
 .tools-table td:last-child,
 .ep-table td:last-child {
   white-space: nowrap;

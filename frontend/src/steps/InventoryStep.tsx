@@ -3,7 +3,7 @@
 import { Tip } from "../components/Tooltip";
 import { useMemo, useState } from "react";
 import { stepN, useLookup, useStudio } from "../store";
-import type { Binding, Engine, Intent, McpServer, McpTool, RegAgent, ResourceKind } from "../api/types";
+import type { Binding, DestinationPath, Engine, Intent, McpServer, McpTool, RegAgent, ResourceKind } from "../api/types";
 import { Badge, Callout, Disclosure, KindIcon, Load, StepHeader, Tabs, Term } from "../components/ui";
 import { CopyButton } from "../components/Glass";
 import { ArrowIcon, PlusIcon, SearchIcon, TrashIcon, WarnIcon } from "../components/Icons";
@@ -12,6 +12,8 @@ import { fmtDate, plural } from "../lib/util";
 import { ShowOnMap } from "../components/ShowOnMap";
 import { pscChips } from "../lib/networking";
 import { RegisterForm } from "../components/RegisterForm";
+import { PathBadge } from "../components/PathBadge";
+import { pathOf } from "../lib/paths";
 import { GRANTS_LOST, createIntent, deleteIntent } from "../lib/registry";
 
 type Tab = "agents" | "mcp" | "apis" | "engines";
@@ -130,7 +132,10 @@ export function DeleteEntry({ entry, access }: { entry: { name: string; display_
   );
 }
 
-function AgentCard({ a, access, engine }: { a: RegAgent; access?: Binding[]; engine?: Engine }) {
+/** Where a destination's calls went, seen in the gateway request logs (Sync reads them in the background). */
+type Traffic = { path: DestinationPath | null | undefined; window: string };
+
+function AgentCard({ a, access, engine, traffic }: { a: RegAgent; access?: Binding[]; engine?: Engine; traffic: Traffic }) {
   return (
     <article className="card asset">
       <header className="asset-head">
@@ -139,7 +144,7 @@ function AgentCard({ a, access, engine }: { a: RegAgent; access?: Binding[]; eng
           <h3>{a.display_name}</h3>
           <div className="muted tiny">
             {a.kind === "a2a" ? <Badge tone="purple">A2A agent</Badge> : <Badge tone="blue">Agent Runtime</Badge>} <span className="mono">{a.id}</span>
-            {a.url && <span className="mono"> · {a.url.replace(/^https:\/\//, "")}</span>}
+            {a.url && <span className="mono"> · {a.url.replace(/^https:\/\//, "")}</span>} <PathBadge path={traffic.path} window={traffic.window} />
           </div>
         </div>
         <BuildBtn dest={destOf("agent", a)} />
@@ -162,7 +167,7 @@ function AgentCard({ a, access, engine }: { a: RegAgent; access?: Binding[]; eng
   );
 }
 
-function McpCard({ m, access }: { m: McpServer; access?: Binding[] }) {
+function McpCard({ m, access, traffic }: { m: McpServer; access?: Binding[]; traffic: Traffic }) {
   const ro = m.tools.filter((t) => t.read_only).length;
   return (
     <article className="card asset">
@@ -171,7 +176,7 @@ function McpCard({ m, access }: { m: McpServer; access?: Binding[] }) {
         <div className="grow">
           <h3>{m.display_name}</h3>
           <div className="muted tiny">
-            <Badge tone="green">MCP server</Badge> <span className="mono">{m.id}</span> · {plural(m.tools.length, "tool")}, {ro} read-only
+            <Badge tone="green">MCP server</Badge> <span className="mono">{m.id}</span> · {plural(m.tools.length, "tool")}, {ro} read-only <PathBadge path={traffic.path} window={traffic.window} />
           </div>
         </div>
         <BuildBtn dest={destOf("mcp_server", m)} />
@@ -277,7 +282,7 @@ function EngineCard({ e }: { e: Engine }) {
 }
 
 export function InventoryStep() {
-  const { inventory, gateways, ctx, cart, addIntents } = useStudio();
+  const { inventory, gateways, ctx, cart, addIntents, paths } = useStudio();
   const [registering, setRegistering] = useState(false);
   const [tab, setTab] = useState<Tab>("agents");
   const [q, setQ] = useState("");
@@ -302,6 +307,7 @@ export function InventoryStep() {
           const eps = inv.endpoints.filter((e) => matches(q, e.display_name, e.id, e.url));
           const engs = inv.engines.filter((e) => matches(q, e.display_name, e.id, e.principal));
           const visibleEps = showAllEndpoints || q ? eps : eps.slice(0, 6);
+          const traffic = (name: string): Traffic => ({ path: pathOf(paths.data, name), window: paths.data?.window ?? "7d" });
           return (
             <>
               <div className="toolbar">
@@ -344,7 +350,7 @@ export function InventoryStep() {
               {tab === "agents" && (
                 <div className="asset-list">
                   {agents.map((a) => (
-                    <AgentCard key={a.name} a={a} access={inv.access[a.name]} engine={a.engine ? engineByName.get(a.engine) : undefined} />
+                    <AgentCard key={a.name} a={a} access={inv.access[a.name]} engine={a.engine ? engineByName.get(a.engine) : undefined} traffic={traffic(a.name)} />
                   ))}
                   {!agents.length && <p className="muted">No agents match.</p>}
                 </div>
@@ -352,7 +358,7 @@ export function InventoryStep() {
               {tab === "mcp" && (
                 <div className="asset-list">
                   {mcps.map((m) => (
-                    <McpCard key={m.name} m={m} access={inv.access[m.name]} />
+                    <McpCard key={m.name} m={m} access={inv.access[m.name]} traffic={traffic(m.name)} />
                   ))}
                   {!mcps.length && <p className="muted">No MCP servers match.</p>}
                 </div>
@@ -374,6 +380,10 @@ export function InventoryStep() {
                         <tr key={e.name}>
                           <td>
                             <b>{e.display_name}</b>
+                            {/* where its calls went (seen in traffic), under the name: the table has no room for a column */}
+                            <div className="ep-path">
+                              <PathBadge {...traffic(e.name)} />
+                            </div>
                           </td>
                           <td className="mono small">{e.url.replace(/^https:\/\//, "")}</td>
                           <td>
