@@ -33,6 +33,10 @@ MCP_RES = "mcpServers/agentregistry-mcp"
     ({"K_SERVICE": "s", "STUDIO_MODE": "apply", "STUDIO_ALLOW_APPLY_ON_CLOUD_RUN": "true"}, "generate"),
     ({"K_SERVICE": "s", "STUDIO_MODE": "apply", "STUDIO_ALLOW_APPLY_ON_CLOUD_RUN": "1"}, "apply"),
     ({"K_SERVICE": "s", "STUDIO_ALLOW_APPLY_ON_CLOUD_RUN": "1"}, "generate"),        # still needs STUDIO_MODE=apply
+    ({"STUDIO_CONTAINER": "1"}, "generate"),                                         # the Docker image (0.0.0.0)
+    ({"STUDIO_CONTAINER": "1", "STUDIO_MODE": "apply"}, "apply"),                    # explicit, off Cloud Run
+    ({"STUDIO_CONTAINER": "0"}, "apply"),
+    ({"STUDIO_CONTAINER": "1", "K_SERVICE": "s", "STUDIO_MODE": "apply"}, "generate"),
 ])
 def test_mode_matrix(env, mode):
     assert settings.resolve_mode(env)[0] == mode
@@ -42,6 +46,8 @@ def test_runtime_and_reason():
     assert settings.runtime({"K_SERVICE": "x"}) == "cloud_run" and settings.runtime({}) == "local"
     assert settings.generate_reason({"K_SERVICE": "x"}) == "Generate-only mode (Cloud Run service account)"
     assert "refused" in settings.resolve_mode({"K_SERVICE": "x", "STUDIO_MODE": "apply"})[1]
+    assert settings.runtime({"STUDIO_CONTAINER": "1"}) == "local"
+    assert "container image" in settings.generate_reason({"STUDIO_CONTAINER": "1"})
 
 
 # ====================================================================== fixtures

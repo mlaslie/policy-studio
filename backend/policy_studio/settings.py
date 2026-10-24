@@ -1,7 +1,8 @@
 """Run mode: `generate` (no write path at all) or `apply` (writes with Application Default Credentials).
 
   STUDIO_MODE=generate|apply     explicit choice
-  (unset)                        generate on Cloud Run (K_SERVICE is set), apply locally
+  (unset)                        generate on Cloud Run (K_SERVICE is set) and in the container image
+                                 (STUDIO_CONTAINER=1, set by the Dockerfile: it listens on 0.0.0.0), apply locally
   STUDIO_ALLOW_APPLY_ON_CLOUD_RUN=1   required for STUDIO_MODE=apply on Cloud Run (otherwise: logged, generate)
 
 Resolved from the environment on every call (cheap), so tests and embedding apps can change it.
@@ -32,7 +33,11 @@ def resolve_mode(env: Optional[Mapping[str, str]] = None) -> tuple[Mode, str]:
     if raw and raw not in MODES:
         return "generate", f"STUDIO_MODE={raw!r} is not one of generate|apply; using generate"
     if not raw:
-        return ("generate", "default on Cloud Run") if rt == "cloud_run" else ("apply", "default when run locally")
+        if rt == "cloud_run":
+            return "generate", "default on Cloud Run"
+        if env.get("STUDIO_CONTAINER") == "1":
+            return "generate", "default in the container image; set STUDIO_MODE=apply to allow writes"
+        return "apply", "default when run locally"
     if raw == "apply" and rt == "cloud_run" and env.get("STUDIO_ALLOW_APPLY_ON_CLOUD_RUN") != "1":
         return "generate", ("STUDIO_MODE=apply refused on Cloud Run (set STUDIO_ALLOW_APPLY_ON_CLOUD_RUN=1 to allow); "
                             "using generate")

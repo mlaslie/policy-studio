@@ -53,9 +53,11 @@ Embed the API in another FastAPI app: `app.include_router(policy_studio.api.rout
 
 | Mode | When | Apply |
 |---|---|---|
-| `generate` | Default on Cloud Run (`K_SERVICE` set), or `STUDIO_MODE=generate` | Off. The write client is never constructed; `POST /api/studio/apply` returns 403. |
-| `apply` | Default locally, or `STUDIO_MODE=apply` | On, with your Application Default Credentials, once the credential checks pass and you confirm. |
+| `generate` | Default on Cloud Run (`K_SERVICE` set) and in the container image (`STUDIO_CONTAINER=1`), or `STUDIO_MODE=generate` | Off. The write client is never constructed; `POST /api/studio/apply` returns 403. |
+| `apply` | Default when run locally (`./studio-app`, `uvicorn`), or `STUDIO_MODE=apply` | On, with your Application Default Credentials, once the credential checks pass and you confirm. |
 
+The Dockerfile sets `STUDIO_CONTAINER=1` because the image listens on `0.0.0.0`: a container started anywhere (not
+just on Cloud Run) is generate-only unless you pass `STUDIO_MODE=apply` yourself (allowed off Cloud Run).
 `STUDIO_MODE=apply` on Cloud Run is refused (logged, falls back to generate) unless
 `STUDIO_ALLOW_APPLY_ON_CLOUD_RUN=1` is also set. `deploy.sh` sets `STUDIO_MODE=generate` explicitly.
 

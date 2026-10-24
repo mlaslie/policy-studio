@@ -21,6 +21,7 @@ COPY backend/pyproject.toml ./backend/pyproject.toml
 COPY backend/policy_studio ./backend/policy_studio
 RUN pip install ./backend
 COPY --from=frontend /src/dist ./static
-ENV STUDIO_FRONTEND_DIST=/app/static
+# STUDIO_CONTAINER=1: generate mode by default (the image listens on 0.0.0.0); STUDIO_MODE=apply overrides off Cloud Run
+ENV STUDIO_FRONTEND_DIST=/app/static STUDIO_CONTAINER=1
 EXPOSE 8080
 CMD ["sh", "-c", "uvicorn policy_studio.app:app --host 0.0.0.0 --port ${PORT:-8080}"]
