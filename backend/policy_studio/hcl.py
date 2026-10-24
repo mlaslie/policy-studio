@@ -68,9 +68,14 @@ def align(items: list[tuple[str, str]], pad: str) -> list[str]:
 
 
 def heredoc(text: str, ind: int, marker: str = "EOT") -> str:
-    """Indented heredoc for an attribute at depth `ind`. `${` in the text is escaped."""
+    """Indented heredoc for an attribute at depth `ind`. `${` in the text is escaped. The marker gets a _<n> suffix
+    when a line of the text is the marker (with <<- an indented one ends the heredoc too)."""
     pad = "  " * (ind + 1)
     body = text.replace("${", "$${").replace("%{", "%%{")
+    taken, base, n = {ln.strip() for ln in body.split("\n")}, marker, 0
+    while marker in taken:
+        n += 1
+        marker = f"{base}_{n}"
     lines = "".join(f"{pad}{ln}\n" if ln else "\n" for ln in body.rstrip("\n").split("\n"))
     return f"<<-{marker}\n{lines}{'  ' * ind}{marker}"
 

@@ -128,7 +128,10 @@ def compare_access(old: Optional[Access], new: Optional[Access], read_only: Opti
     if a.mode == "all":
         return "narrower"
     if a.mode == "tools" and b.mode == "tools":
-        return "broader" if set(b.tools or []) - set(a.tools or []) else "narrower"
+        ta, tb = {t for t in a.tools or [] if t}, {t for t in b.tools or [] if t}
+        if ta == tb:                               # the same tools in another order (or repeated)
+            return "same"
+        return "broader" if tb - ta else "narrower"
     if a.mode == "read_only_hint" and b.mode == "tools" and read_only is not None:
         return "broader" if set(b.tools or []) - read_only else "narrower"
     if a.mode == "tools" and b.mode == "read_only_hint" and read_only is not None:

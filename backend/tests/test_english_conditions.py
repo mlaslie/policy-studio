@@ -129,3 +129,11 @@ def test_intent_english():
     assert intent_english(a2a) == "HR Assistant can call KB (full access)."
     ma = Intent(id="4", kind="model_armor_on", gateway=GatewayRef(name=F.EG))
     assert intent_english(ma) == "Screen traffic on Agent Gateway corp-out with Model Armor."
+
+
+def test_compare_access_same_tools_reordered_is_same():
+    from policy_studio.conditions import compare_access
+    a, b = Access(mode="tools", tools=["a", "b"]), Access(mode="tools", tools=["b", "a", "a"])
+    assert compare_access(a, b) == "same"
+    assert compare_access(a, Access(mode="tools", tools=["a"])) == "narrower"
+    assert compare_access(a, Access(mode="tools", tools=["a", "c"])) == "broader"

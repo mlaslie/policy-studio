@@ -162,12 +162,29 @@ def shq(s: str) -> str:
 UGLY = "'\"'\"'"
 
 
+def heredoc_marker(body: str) -> str:
+    """EOF, or EOF_<n> when a line of `body` is exactly EOF (it would end the heredoc early)."""
+    lines, m, n = set(body.splitlines()), "EOF", 0
+    while m in lines:
+        n += 1
+        m = f"EOF_{n}"
+    return m
+
+
+def cat_file(fname: str, body: str) -> str:
+    """`cat > fname` with a quoted heredoc (nothing in it is expanded)."""
+    body = body if body.endswith("\n") else body + "\n"
+    m = heredoc_marker(body)
+    return f"cat > {fname} <<'{m}'\n{body}{m}\n"
+
+
 def sh_assign(var: str, value: str) -> str:
     """VAR=value, with a quoted heredoc when plain quoting would be unreadable."""
     quoted = shq(value)
     if UGLY not in quoted and "\n" not in value:
         return f"{var}={quoted}"
-    return f"{var}=$(cat <<'EOF'\n{value}\nEOF\n)"
+    m = heredoc_marker(value)
+    return f"{var}=$(cat <<'{m}'\n{value}\n{m}\n)"
 
 
 def cont(lines: list[str], indent: str = "  ") -> str:
@@ -607,9 +624,8 @@ def gcloud_iam(sp: IamSpec, env: RenderEnv) -> str:
     pre = ""
     if sp.condition and not cf:
         fname = f"condition-{sp.rid or 'registry'}.json"
-        pre = (f"cat > {fname} <<'EOF'\n"
-               + json.dumps({"title": sp.condition.title, "expression": sp.condition.expression}, indent=2)
-               + "\nEOF\n")
+        pre = cat_file(fname, json.dumps({"title": sp.condition.title, "expression": sp.condition.expression},
+                                         indent=2))
         cf = [f"--condition-from-file={fname}"]
     if sp.pending:
         pre = gcloud_entry_lookup(sp.pending, env) + pre
@@ -1105,7 +1121,7 @@ def ma_yaml(sp: MaSpec) -> str:
 def gcloud_ma(sp: MaSpec, env: RenderEnv) -> str:
     if sp.op == "on":
         f = f"{sp.policy}.yaml"
-        return (f"cat > {f} <<'EOF'\n{ma_yaml(sp)}EOF\n"
+        return (cat_file(f, ma_yaml(sp))
                 + cont([f"gcloud network-security authz-policies import {sp.policy}", f"--source={f}",
                         f"--location={env.region}", f"--project={sp.project}"]))
     return cont([f"gcloud network-security authz-policies delete {sp.policy}", f"--location={env.region}",
@@ -1399,7 +1415,7 @@ def gcloud_ext(sp: ExtSpec) -> str:
         return cont([f"gcloud service-extensions authz-extensions delete {sp.ext_id}", f"--location={sp.region}",
                      f"--project={sp.project}", "--quiet"])
     f = f"{sp.ext_id}.yaml"
-    return (f"cat > {f} <<'EOF'\n{ext_yaml(sp)}EOF\n"
+    return (cat_file(f, ext_yaml(sp))
             + cont([f"gcloud service-extensions authz-extensions import {sp.ext_id}", f"--source={f}",
                     f"--location={sp.region}", f"--project={sp.project}"]))
 
@@ -1934,7 +1950,7 @@ def gcloud_enf(sp: EnfSpec) -> str:
     f = f"{sp.ext_id}.yaml"
     head = ("# gcloud imports the full spec (it replaces the extension), built from the extension as it is now"
             + ("" if sp.known else " (ASSUMED: it wasn't found; check it)") + ".\n")
-    return (head + f"cat > {f} <<'EOF'\n{ext_spec_yaml(sp.ext_id, sp.spec)}EOF\n"
+    return (head + cat_file(f, ext_spec_yaml(sp.ext_id, sp.spec))
             + cont([f"gcloud service-extensions authz-extensions import {sp.ext_id}", f"--source={f}",
                     f"--location={sp.region}", f"--project={sp.project}"]))
 
@@ -1949,7 +1965,7 @@ def gcloud_ded(sp: DedSpec) -> str:
         f = f"{sp.policy_id}.yaml"
         return (f"# 1. Point {sp.gateway_id}'s IAP policy back at {short(sp.source)} (import should update it in place;\n"
                 "# not verified live, the REST tab's PATCH is).\n"
-                + f"cat > {f} <<'EOF'\n{policy_yaml(sp, sp.source)}EOF\n"
+                + cat_file(f, policy_yaml(sp, sp.source))
                 + cont([f"gcloud network-security authz-policies import {sp.policy_id}", f"--source={f}",
                         f"--location={sp.region}", f"--project={sp.policy_project}"])
                 + f"\n# 2. Delete the gateway's own extension.\n"
@@ -1957,12 +1973,12 @@ def gcloud_ded(sp: DedSpec) -> str:
                         f"--project={sp.project}", "--quiet"]))
     f1, f2 = f"{sp.new_id}.yaml", f"{sp.policy_id}.yaml"
     return (f"# 1. Create {sp.new_id}, a copy of {short(sp.source)}.\n"
-            + f"cat > {f1} <<'EOF'\n{ext_spec_yaml(sp.new_id, sp.body)}EOF\n"
+            + cat_file(f1, ext_spec_yaml(sp.new_id, sp.body))
             + cont([f"gcloud service-extensions authz-extensions import {sp.new_id}", f"--source={f1}",
                     f"--location={sp.region}", f"--project={sp.project}"])
             + f"\n# 2. Point {sp.gateway_id}'s IAP policy at it. import should update the existing policy in place; that\n"
             "# hasn't been verified live (the REST tab's PATCH has). The YAML repeats its labels, target and profile.\n"
-            + f"cat > {f2} <<'EOF'\n{policy_yaml(sp, sp.new_ext)}EOF\n"
+            + cat_file(f2, policy_yaml(sp, sp.new_ext))
             + cont([f"gcloud network-security authz-policies import {sp.policy_id}", f"--source={f2}",
                     f"--location={sp.region}", f"--project={sp.policy_project}"]))
 

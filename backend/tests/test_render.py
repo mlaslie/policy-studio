@@ -356,3 +356,25 @@ def test_outputs_say_how_long_changes_take():
         r = subprocess.run([TERRAFORM, "fmt", "-check", "-"], input=bundle.terraform["main.tf"], capture_output=True,
                            text=True)
         assert r.returncode == 0, bundle.terraform["main.tf"]
+
+
+# ------------------------------------------------------------------ heredoc markers
+def test_sh_assign_marker_never_occurs_in_value():
+    from policy_studio.render import sh_assign
+    assert sh_assign("T", "it's\nfine") == "T=$(cat <<'EOF'\nit's\nfine\nEOF\n)"
+    out = sh_assign("T", "a\nEOF\nrm -rf x\nEOF_1")
+    assert out == "T=$(cat <<'EOF_2'\na\nEOF\nrm -rf x\nEOF_1\nEOF_2\n)"
+
+
+def test_cat_file_marker_never_occurs_in_body():
+    from policy_studio.render import cat_file
+    assert cat_file("a.yaml", "name: x\n") == "cat > a.yaml <<'EOF'\nname: x\nEOF\n"
+    assert cat_file("a.json", "{}") == "cat > a.json <<'EOF'\n{}\nEOF\n"
+    assert cat_file("a.yaml", "x: |\nEOF\n") == "cat > a.yaml <<'EOF_1'\nx: |\nEOF\nEOF_1\n"
+
+
+def test_hcl_heredoc_marker_never_occurs_in_text():
+    from policy_studio import hcl
+    assert hcl.heredoc("echo hi", 1) == "<<-EOT\n    echo hi\n  EOT"
+    out = hcl.heredoc("cat <<EOT\nx\n  EOT\n", 1)
+    assert out.startswith("<<-EOT_1\n") and out.endswith("\n  EOT_1")
