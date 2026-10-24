@@ -49,6 +49,17 @@ pip install pytest && pytest backend/tests -q
 
 Embed the API in another FastAPI app: `app.include_router(policy_studio.api.router)`.
 
+### Cloud Run
+
+`PROJECT=... REGION=... IAP_MEMBERS=user:me@example.com ./deploy.sh` builds the image and deploys it behind IAP
+(generate mode, read-only service account). On Cloud Run (`K_SERVICE` set) the app also checks IAP's signed header
+itself: every `/api/*` request except `/api/studio/health` must carry a valid `x-goog-iap-jwt-assertion` (signed by
+IAP, issuer `https://cloud.google.com/iap`), otherwise it gets 401. So a request that reaches the container without
+going through IAP, or with a forged `x-goog-authenticated-user-email`, gets nothing. The expected audience is IAP on
+Cloud Run's `/projects/<PROJECT_NUMBER>/locations/<REGION>/services/<SERVICE>`, built from the metadata server; set
+`STUDIO_IAP_AUDIENCE` to override it (for example `/projects/<PROJECT_NUMBER>/global/backendServices/<ID>` behind a
+load balancer with IAP).
+
 ## Modes: generate and apply
 
 | Mode | When | Apply |

@@ -192,9 +192,13 @@ def test_generate_mode_has_no_write_path(client, gcp, monkeypatch, adc):
 
 
 def test_cloud_run_default_is_generate(client, monkeypatch, adc):
+    from policy_studio import iap
     monkeypatch.setenv("K_SERVICE", "policy-studio")
     monkeypatch.setenv("STUDIO_MODE", "apply")                         # refused without the override
-    r = client.post("/api/studio/apply", json={"context": CTX, "intents": [], "confirm": {"project": F.P}})
+    monkeypatch.setenv("STUDIO_IAP_AUDIENCE", "/projects/1/locations/r/services/policy-studio")
+    monkeypatch.setattr(iap, "verify_token", lambda token, aud: {"iss": iap.ISSUER, "email": "a@example.com"})
+    r = client.post("/api/studio/apply", json={"context": CTX, "intents": [], "confirm": {"project": F.P}},
+                    headers={iap.HEADER: "signed"})
     assert r.status_code == 403 and "Cloud Run" in r.json()["detail"]
 
 

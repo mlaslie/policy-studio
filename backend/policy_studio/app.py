@@ -2,7 +2,8 @@
 
   uvicorn policy_studio.app:app --app-dir backend --port 8090
 Env: STUDIO_PROJECT / STUDIO_REGION (served by /api/studio/defaults), STUDIO_FRONTEND_DIST (UI build dir; default
-frontend/dist in the repo), STUDIO_CORS (extra origins, comma-separated).
+frontend/dist in the repo), STUDIO_CORS (extra origins, comma-separated), STUDIO_IAP_AUDIENCE (Cloud Run: iap.py).
+On Cloud Run (K_SERVICE set) every /api/* request except health must carry a valid IAP signed header (iap.py).
 """
 from __future__ import annotations
 
@@ -15,6 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from . import __version__
 from .api import router
+from .iap import IapMiddleware
 
 DEFAULT_STATIC = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 
@@ -28,6 +30,7 @@ def create_app() -> FastAPI:
     origins = ["http://localhost:5174", "http://127.0.0.1:5174"]
     origins += [o.strip() for o in os.environ.get("STUDIO_CORS", "").split(",") if o.strip()]
     app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=["*"], allow_headers=["*"])
+    app.add_middleware(IapMiddleware)          # outermost; a no-op unless K_SERVICE is set
     app.include_router(router)
 
     @app.get("/{path:path}", include_in_schema=False)
