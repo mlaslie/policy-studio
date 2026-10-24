@@ -62,8 +62,11 @@ remote = client.agent_engines.create(
         # gateway's private egress (a connectivity template) instead.
         "agent_gateway_config": {"agent_to_anywhere_config": {
             "agent_gateway": "projects/PROJECT_ID/locations/REGION/agentGateways/GATEWAY_ID"}},
-        "env_vars": {"GOOGLE_API_PREVENT_AGENT_TOKEN_SHARING_FOR_GCP_SERVICES": "false"},  # needed behind a gateway
-        "requirements": ["google-cloud-aiplatform[agent_engines,adk]"],
+        # Pin google-auth 2.60.0: a known google-auth bug (Google is fixing it) makes the agent's Google API calls
+        # fail with 401 behind Agent Gateway. The pin keeps Context-Aware Access token binding.
+        "requirements": ["google-cloud-aiplatform[agent_engines,adk]", "google-auth==2.60.0"],
+        # Fallback if you can't pin it (strongly discouraged by Google: opts out of token binding):
+        # "env_vars": {"GOOGLE_API_PREVENT_AGENT_TOKEN_SHARING_FOR_GCP_SERVICES": "false"},
         # ... the rest of your existing deployment config
     },
 )

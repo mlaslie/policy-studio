@@ -139,7 +139,7 @@ The first engine, created with the gateway binding and **without** the env var, 
 - session creation got `401 UNAUTHENTICATED Request had invalid authentication credentials`;
 - the gateway authorized each call (ALLOWED), and upstream Google APIs (`iamcredentials.mtls`, `us-west1-aiplatform.mtls`) returned 401.
 
-It was still failing 9 minutes later. An identical engine created with `GOOGLE_API_PREVENT_AGENT_TOKEN_SHARING_FOR_GCP_SERVICES=false` worked on the first call. The demo's engines (bound later by PATCH, through gateways without a template, in another region) don't need it. **Not isolated:** this could come from the create-time binding, the template gateway, or the region.
+It was still failing 9 minutes later. An identical engine created with `GOOGLE_API_PREVENT_AGENT_TOKEN_SHARING_FOR_GCP_SERVICES=false` worked on the first call. The demo's engines (bound later by PATCH, through gateways without a template, in another region) don't need it. **Cause (found later):** a known google-auth bug, which Google is fixing. The preferred fix is pinning `google-auth==2.60.0` in the agent's requirements, which keeps Context-Aware Access token binding; the env var also works but opts out of token binding, which Google strongly discourages.
 
 ---
 
@@ -327,7 +327,7 @@ None of this was tested. Because creating a policy or perimeter has org-wide bla
 | F37 | Live | Live | Still Model Armor only; the ingress gateway writes no request logs. The block message is the gateway's generic one, not the template's custom message. |
 | F40 | Doc | **Verified** | Second egress gateway in the same project+region → `400 "Another Agent Gateway is already active or being created for this project and direction."` An unbound engine can coexist with bound ones. |
 | F41 | Unverified | Partly | 4 egress gateways + 1 ingress in one project+region were allowed. One `/28` attachment served 2 gateways. |
-| **F44 (new)** | — | Live | Engines bound at create time to a template egress gateway needed `GOOGLE_API_PREVENT_AGENT_TOKEN_SHARING_FOR_GCP_SERVICES=false`; without it, every Google API call through the gateway got 401. Cause not isolated. |
+| **F44 (new)** | — | Live | Engines bound at create time to a template egress gateway needed `GOOGLE_API_PREVENT_AGENT_TOKEN_SHARING_FOR_GCP_SERVICES=false`; without it, every Google API call through the gateway got 401. Cause: a known google-auth bug (Google is fixing it); pinning `google-auth==2.60.0` is the preferred fix (keeps token binding). |
 | **F45 (new)** | — | Live | The PSC endpoint for Google APIs forwarding rule name can't contain `-` (1–20 lowercase letters/digits), so it can't carry a `<prefix>-` naming scheme. Use labels or the address name. |
 
 ### Plan changes recommended
@@ -347,7 +347,7 @@ None of this was tested. Because creating a policy or perimeter has org-wide bla
    - file product feedback;
    - default to the narrow zone; `REGION-aiplatform.googleapis.com` is the only working host.
 6. **Engine deploys bound to a gateway:**
-   - set `GOOGLE_API_PREVENT_AGENT_TOKEN_SHARING_FOR_GCP_SERVICES=false` (F44) in the demo bootstrap and in the Policy Studio redeploy guidance;
+   - pin `google-auth==2.60.0` in the agent's requirements (F44: a known google-auth bug) in the demo bootstrap and in the Policy Studio redeploy guidance; `GOOGLE_API_PREVENT_AGENT_TOKEN_SHARING_FOR_GCP_SERVICES=false` only as a fallback (it opts out of token binding);
    - add a preflight or audit hint when an engine's sessions return 401 through the gateway.
 7. **Evidence of the private path** for the demo UI: use `gateway_requests.httpRequest.serverIp` (private IP = VPC path). Cloud Run logs don't help.
 8. **Discovery:** map attachment consumers to gateways through the `gcp-sa-dep` tenant number in `agentGatewayCard.serviceExtensionsServiceAccount`.

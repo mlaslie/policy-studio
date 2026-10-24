@@ -778,7 +778,7 @@ Full results are in [P0_FINDINGS.md](P0_FINDINGS.md); its §8 lists the §2 fact
    - file product feedback;
    - default to the narrow `REGION-aiplatform.googleapis.com.` zone (the only hostname that works for `streamQuery`).
 5. **Egress to private Cloud Run** through the `run.app` zone and a PSC endpoint for Google APIs works with Cloud Run ingress `internal`, and needs no load balancer. Proof of the private path is the gateway log's upstream `serverIp`.
-6. **Engine deploys** behind a gateway may need `GOOGLE_API_PREVENT_AGENT_TOKEN_SHARING_FOR_GCP_SERVICES=false` (401s on Google APIs without it; cause not isolated). Add it to the demo bootstrap and to the redeploy guidance.
+6. **Engine deploys** behind a gateway can get 401s on Google APIs. Cause: a known google-auth bug (Google is fixing it). Pin `google-auth==2.60.0` in the agent's requirements (keeps Context-Aware Access token binding) in the demo bootstrap and the redeploy guidance; `GOOGLE_API_PREVENT_AGENT_TOKEN_SHARING_FOR_GCP_SERVICES=false` also works but opts out of token binding (strongly discouraged by Google).
 7. **VPC-SC:** the account has org-level Access Context Manager rights. Demo it in a dedicated project with a scoped access policy, dry run first. The API isn't enabled yet.
 8. **Demo cost:** without a load balancer, the standing cost is the VM, the PSC endpoint and the DNS zones.
 

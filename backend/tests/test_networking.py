@@ -188,3 +188,12 @@ def test_bind_of_psc_engine_is_blocked(net_client):
     assert item["reason"] == f"Lab Agent can't be bound to Agent Gateway. {REASON_PSC}"
     r = c.post("/api/studio/render", json={"context": Q, "intents": [bind]}).json()
     assert REASON_PSC in r["items"][0]["error"]
+
+
+def test_redeploy_pins_google_auth_and_keeps_token_binding():
+    from policy_studio.gcp.networking import REDEPLOY_NO_PSC
+    assert '"google-auth==2.60.0"' in REDEPLOY_NO_PSC
+    env_lines = [ln for ln in REDEPLOY_NO_PSC.splitlines() if "TOKEN_SHARING" in ln]
+    assert env_lines and all(ln.lstrip().startswith("#") for ln in env_lines)      # only a commented fallback
+    ts = (Path(__file__).resolve().parents[2] / "frontend" / "src" / "lib" / "networking.ts").read_text()
+    assert f"export const REDEPLOY_NO_PSC = `{REDEPLOY_NO_PSC}`;" in ts                # the UI shows the same sample
