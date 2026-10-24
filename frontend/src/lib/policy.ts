@@ -10,8 +10,12 @@ export const RO_ATTR = "iap.googleapis.com/mcp.tool.isReadOnly";
 
 export const READ_ONLY_EXPR = `api.getAttribute('${RO_ATTR}', false) == true || api.getAttribute('${TOOL_ATTR}', '') == ''`;
 
+/** A CEL single-quoted string literal (the backend's conditions.cel_string). The backend rejects tool names outside
+ *  letters, digits and _ . - : / (model.py TOOL_NAME_RE), so for names it accepts this is just the name in quotes. */
+export const celString = (s: string) => `'${s.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
+
 export function toolsExpr(tools: string[]): string {
-  const list = [...tools.map((t) => `'${t.replace(/'/g, "\\'")}'`), "''"].join(", ");
+  const list = [...tools.map(celString), "''"].join(", ");
   return `api.getAttribute('${TOOL_ATTR}', '') in [${list}]`;
 }
 

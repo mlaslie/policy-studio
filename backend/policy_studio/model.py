@@ -4,9 +4,10 @@ Models accept extra fields (`extra="allow"`) so the frontend and backend can evo
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class _M(BaseModel):
@@ -239,11 +240,30 @@ class Destination(_In):
     pending_service: Optional[str] = None
 
 
+# MCP tool names allowed in a `toolName in [...]` condition. Tool names come from MCP servers' tool lists, so a name
+# with a quote could end the CEL string literal and change the condition (e.g. make it always true) while the preview
+# still looks narrow. Real tool names fit this easily (the MCP spec suggests [A-Za-z0-9_.-], 1-128 characters).
+TOOL_NAME_RE = re.compile(r"[A-Za-z0-9_.:/-]{1,128}")
+
+
+def valid_tool_name(name: str) -> bool:
+    return bool(TOOL_NAME_RE.fullmatch(name or ""))
+
+
 class Access(_In):
     mode: Literal["all", "read_only_hint", "tools", "custom"] = "all"
     tools: Optional[list[str]] = None
     expression: Optional[str] = None
     title: Optional[str] = None        # optional: exact condition title (e.g. when revoking an existing binding)
+
+    @field_validator("tools")
+    @classmethod
+    def _tool_names(cls, v: Optional[list[str]]) -> Optional[list[str]]:
+        bad = [t for t in v or [] if t and not valid_tool_name(t)]
+        if bad:
+            raise ValueError(f"tool name {bad[0][:60]!r} is not allowed in a condition: tool names may contain only "
+                             "letters, digits and _ . - : / (at most 128 characters)")
+        return v
 
 
 class GatewayRef(_In):

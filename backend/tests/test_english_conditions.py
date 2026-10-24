@@ -19,6 +19,38 @@ def test_tools_expression_keeps_setup_traffic():
     assert tools_expression([]) == "api.getAttribute('iap.googleapis.com/mcp.toolName', '') in ['']"
 
 
+@pytest.mark.parametrize("name", [
+    "x', 'anything",                          # ends the literal: the list would gain a second name
+    "x'] || true || ['",                      # makes the condition always true
+    "a\\", "a b", "", "x" * 129, "tool\n", "\u00e9",
+])
+def test_hostile_tool_names_are_rejected(name):
+    if not name:
+        assert Access(mode="tools", tools=[name]).tools == [""]     # '' is ignored (setup traffic), not refused
+        return
+    with pytest.raises(ValueError, match="not allowed in a condition"):
+        Access(mode="tools", tools=["get_ticket", name])
+
+
+@pytest.mark.parametrize("name", ["get_ticket", "tickets.get", "github:create-issue", "ns/tool", "a" * 128])
+def test_valid_tool_names(name):
+    acc = Access(mode="tools", tools=[name])
+    assert condition_for(acc).expression == f"api.getAttribute('iap.googleapis.com/mcp.toolName', '') in ['{name}', '']"
+
+
+def test_tools_expression_escapes_as_defense_in_depth():
+    # Access refuses these; tools_expression still never lets a name end the CEL string literal
+    assert tools_expression(["x'] || true || ['"]) == \
+        "api.getAttribute('iap.googleapis.com/mcp.toolName', '') in ['x\\'] || true || [\\'', '']"
+    assert tools_expression(["a\\"]) == "api.getAttribute('iap.googleapis.com/mcp.toolName', '') in ['a\\\\', '']"
+    assert parse_tools(tools_expression(["x'] || true || ['"])) == ["x\\'] || true || [\\'"]     # one name
+
+
+def test_existing_condition_with_odd_tool_name_is_custom():
+    expr = "api.getAttribute('iap.googleapis.com/mcp.toolName', '') in ['a b', '']"
+    assert classify({"expression": expr, "title": "t"}).mode == "custom"
+
+
 @pytest.mark.parametrize("access,expr", [
     (Access(mode="all"), None),
     (None, None),

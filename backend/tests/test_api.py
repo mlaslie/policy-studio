@@ -202,3 +202,13 @@ def test_invalid_intent_fails_alone(client):
     assert "destination.kind" in items[0]["error"] and items[1]["error"] is None
     d = client.post("/api/studio/diff", json={"context": Q, "intents": [bad, good]}).json()["items"]
     assert d[0]["error"] and d[1]["status"] == "add"
+
+
+def test_hostile_tool_name_intent_is_invalid(client):
+    bad = {"id": "bad", "kind": "grant", "source": {"type": "custom", "principal": "user:x@example.com"},
+           "destination": {"kind": "mcp_server", "id": "agentregistry-mcp", "label": "Tickets MCP"},
+           "access": {"mode": "tools", "tools": ["get_ticket", "x'] || true || ['"]}}
+    items = client.post("/api/studio/render", json={"context": Q, "intents": [bad]}).json()["items"]
+    assert "not allowed in a condition" in items[0]["error"] and not items[0]["outputs"]["gcloud"]
+    p = client.post("/api/studio/preflight", json={"context": Q, "intents": [bad]}).json()["items"]
+    assert p[0]["status"] == "invalid"

@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from typing import Optional
 
-from .model import Access, Condition
+from .model import Access, Condition, valid_tool_name
 
 EGRESSOR = "roles/iap.egressor"
 
@@ -27,9 +27,15 @@ def _norm(expr: str) -> str:
     return re.sub(r"\s+", " ", (expr or "").strip())
 
 
+def cel_string(s: str) -> str:
+    """A CEL single-quoted string literal. Access rejects tool names that would need escaping; this is defense in
+    depth (frontend lib/policy.ts toolsExpr escapes the same way)."""
+    return "'" + s.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
 def tools_expression(tools: list[str]) -> str:
     names = [t for t in dict.fromkeys(tools) if t]
-    items = ", ".join(f"'{t}'" for t in [*names, ""])
+    items = ", ".join(cel_string(t) for t in [*names, ""])
     return f"api.getAttribute('iap.googleapis.com/mcp.toolName', '') in [{items}]"
 
 
@@ -76,7 +82,7 @@ def classify(cond: Optional[Condition | dict]) -> Access:
     if _norm(expr) == _norm(READ_ONLY_EXPRESSION):
         return Access(mode="read_only_hint", title=title or None)
     tools = parse_tools(expr)
-    if tools is not None:
+    if tools is not None and all(valid_tool_name(t) for t in tools):
         return Access(mode="tools", tools=tools, title=title or None)
     return Access(mode="custom", expression=expr, title=title or None)
 
