@@ -39,7 +39,10 @@ cd frontend && npm run dev                             # UI development on :5174
 uv run --project backend pytest backend/tests -q       # tests (GCP is faked; no network)
 ```
 
-With plain pip:
+Dependency versions are locked in `backend/uv.lock` (uv uses it; the Docker image installs exactly what it lists,
+with `uv sync --frozen`). After changing `backend/pyproject.toml`, run `uv lock --project backend` and commit the lock.
+
+With plain pip (resolves the open ranges in `pyproject.toml`, not the lock):
 
 ```bash
 pip install ./backend
