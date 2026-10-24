@@ -343,6 +343,11 @@ command to grant it. Reading needs roughly: `roles/browser`, `roles/serviceusage
 it). Private networking reads `networkservices.agentConnectivityTemplates.get` / `list` (`roles/networkservices.viewer`)
 and, optionally, `compute.networkAttachments.get` (`roles/compute.networkViewer`, for the VPC name).
 
+`deploy.sh` gives the Cloud Run service account exactly these read roles (plus a small custom role with the IAP
+`getIamPolicy` permissions, and `roles/serviceusage.serviceUsageConsumer`), not `roles/viewer`. This list replaced
+`roles/viewer` and still has to be checked against a live deployment (every Context step permission green, gateway logs
+and path labels readable).
+
 Apply additionally needs `roles/iap.admin` (grants / revokes, on the Agent Registry project), `roles/aiplatform.user`
 (gateway binds) and `roles/networksecurity.editor` (Model Armor on/off); Model Armor setup also needs
 `roles/modelarmor.admin` (templates), `roles/networkservices.admin` (authz extensions) and

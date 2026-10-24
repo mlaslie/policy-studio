@@ -40,7 +40,11 @@ else
     --description "Read IAP IAM policies (Agent Registry egress grants). Read-only." \
     --permissions "$IAP_READ_PERMS" --stage GA --quiet >/dev/null
 fi
-for ROLE in roles/viewer "projects/${PROJECT}/roles/${ROLE_ID}" roles/serviceusage.serviceUsageConsumer; do
+# Only the read roles README.md "Permissions" lists (not roles/viewer, which reads far more than Policy Studio needs).
+READ_ROLES=(roles/browser roles/serviceusage.serviceUsageViewer roles/networkservices.viewer
+  roles/networksecurity.viewer roles/aiplatform.viewer roles/agentregistry.viewer roles/modelarmor.viewer
+  roles/logging.viewer roles/compute.networkViewer)
+for ROLE in "${READ_ROLES[@]}" "projects/${PROJECT}/roles/${ROLE_ID}" roles/serviceusage.serviceUsageConsumer; do
   $GCLOUD projects add-iam-policy-binding "$PROJECT" --member "serviceAccount:$SA" --role "$ROLE" \
     --condition None --quiet >/dev/null
 done
