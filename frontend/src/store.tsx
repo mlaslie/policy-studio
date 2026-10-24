@@ -112,7 +112,7 @@ export const useStudio = () => {
   return s;
 };
 
-const DEFAULT_CTX: Ctx = { project: "", region: "", gateway_project: "", ge_app: "", ge_location: "global" };
+export const DEFAULT_CTX: Ctx = { project: "", region: "", gateway_project: "", ge_app: "", ge_location: "us" };
 
 async function into<T>(set: (f: (p: Loadable<T>) => Loadable<T>) => void, p: Promise<T>) {
   set((s) => ({ ...s, loading: true, error: null }));

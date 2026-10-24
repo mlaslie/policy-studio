@@ -15,3 +15,10 @@ describe("toolsExpr", () => {
     expect(accessFromCondition(toolsExpr(["x'] || true || ['"]))).toEqual({ mode: "tools", tools: ["x\\'] || true || [\\'"] });
   });
 });
+
+describe("default context", () => {
+  it("uses the backend's Gemini Enterprise location default (us)", async () => {
+    const { DEFAULT_CTX } = await import("../store");
+    expect(DEFAULT_CTX.ge_location).toBe("us");
+  });
+});

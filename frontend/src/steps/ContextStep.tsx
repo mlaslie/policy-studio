@@ -78,7 +78,7 @@ export function ContextStep() {
               <input id="geapp" value={f.ge_app ?? ""} onChange={(e) => setF({ ...f, ge_app: e.target.value })} placeholder="e.g. helpdesk-app_1712345678" autoComplete="off" spellCheck={false} />
             </Field>
             <Field id="geloc" label="App location" help="Where the app lives.">
-              <select id="geloc" value={f.ge_location ?? "global"} onChange={(e) => setF({ ...f, ge_location: e.target.value })}>
+              <select id="geloc" value={f.ge_location ?? "us"} onChange={(e) => setF({ ...f, ge_location: e.target.value })}>
                 <option value="global">global</option>
                 <option value="us">us</option>
                 <option value="eu">eu</option>

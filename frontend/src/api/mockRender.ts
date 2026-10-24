@@ -430,8 +430,8 @@ function bindOutputs(ctx: Ctx, w: World, i: Intent, unbind: boolean): { outputs:
     dir === "ingress" && !unbind
       ? [
           ``,
-          `# Then register the agent with your Gemini Enterprise app (${ctx.ge_location || "global"}):`,
-          `agents-cli publish gemini-enterprise --app=${ctx.ge_app || "GE_APP_ID"} --location=${ctx.ge_location || "global"} \\`,
+          `# Then register the agent with your Gemini Enterprise app (${ctx.ge_location || "us"}):`,
+          `agents-cli publish gemini-enterprise --app=${ctx.ge_app || "GE_APP_ID"} --location=${ctx.ge_location || "us"} \\`,
           `  --agent-engine=${engName}`,
         ]
       : [];
