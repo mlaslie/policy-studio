@@ -55,6 +55,14 @@ def rest_for(ctx: Context) -> Rest:
     return client(ctx.project or None)
 
 
+def reset_credentials() -> None:
+    """Forget the cached ADC clients and discovery results. gcp.rest.client() captures the credentials when it is
+    built, so after a new `gcloud auth application-default login` discovery (and Apply's writer) would keep using the
+    old account while /auth already reports the new one. Called on every credential re-check (auth refresh)."""
+    client.cache_clear()
+    cache.clear()
+
+
 def resolve(ctx: Context, r: Rest | None = None) -> Context:
     """Fill project_number / gateway_project_number (errors leave them empty)."""
     r = r or rest_for(ctx)
@@ -532,6 +540,8 @@ def auth_view(project: str, gateway_project: str = "", refresh: bool = False) ->
     from .gcp import auth as auth_mod
 
     ctx = Context(project=project, gateway_project=gateway_project)
+    if refresh:                    # "Re-check" after a re-login, and /apply: never keep a client on old credentials
+        reset_credentials()
 
     def build() -> dict[str, Any]:
         return auth_mod.report(project, mode=settings.current_mode(), runtime=settings.runtime(),

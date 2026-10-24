@@ -563,3 +563,23 @@ def test_verified_events_and_log_carry_effect_timing(client, gcp, adc, tmp_path)
     done = log[-1]
     # the largest typical and the largest max among the verified items
     assert done["type"] == "done" and (done["ready_after_s"], done["ready_max_s"]) == (120, 420)
+
+
+def test_auth_recheck_drops_clients_built_with_old_credentials(monkeypatch, adc):
+    """gcp.rest.client() captures ADC when built: a re-check after a new login must build new ones."""
+    import google.auth
+    from policy_studio.gcp import rest as rest_mod
+    accounts = iter(["old", "new", "newer"])
+    monkeypatch.setattr(google.auth, "default", lambda scopes=None: (f"creds-{next(accounts)}", F.P))
+    rest_mod.client.cache_clear()
+    try:
+        assert rest_mod.client(F.P).credentials == "creds-old"
+        assert rest_mod.client(F.P).credentials == "creds-old"            # cached
+        service.cache.get(("x",), lambda: "pre-login view")
+        service.auth_view(F.P)                                           # a plain read keeps them
+        assert rest_mod.client(F.P).credentials == "creds-old"
+        service.auth_view(F.P, refresh=True)                             # "Re-check" (and /apply)
+        assert rest_mod.client(F.P).credentials == "creds-new"
+        assert service.cache.peek(("x",)) is None
+    finally:
+        rest_mod.client.cache_clear()
