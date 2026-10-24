@@ -646,6 +646,41 @@ def test_gateway_logs_endpoint(read_client):
     assert c.get("/api/studio/gateway-logs", params={**Q, "gateway": "corp-out", "since": "soon"}).status_code == 400
 
 
+@pytest.mark.parametrize("params", [
+    {"gateway": 'corp-out" OR logName:*'},
+    {"gateway": "projects/p\"/locations/r/agentGateways/g"},
+    {"gateway": "projects/my-project/locations/us-east4/agentGateways/g/extra"},
+    {"gateway": "corp-out", "gateway_project": 'x" OR "y'},
+    {"gateway": "corp-out", "project": "bad project"},
+    {"gateway": "corp-out", "region": "us-east4\" OR \"x"},
+])
+def test_gateway_logs_rejects_filter_injection(read_client, params):
+    c, rest = read_client
+    r = c.get("/api/studio/gateway-logs", params={**Q, **params})
+    assert r.status_code == 400, r.json()
+    assert not rest.log_requests
+
+
+def test_gateway_logs_accepts_full_gateway_name(read_client):
+    c, rest = read_client
+    r = c.get("/api/studio/gateway-logs", params={**Q, "gateway": f"projects/{F.P}/locations/{F.R}/agentGateways/corp-out"})
+    assert r.status_code == 200 and rest.log_requests
+
+
+def test_log_filter_refuses_bad_ids():
+    from policy_studio.gcp.logs import log_filter
+    assert log_filter(["example.com:proj", "123"], "gw_1", "t").count("logName=") == 2
+    with pytest.raises(ValueError):
+        log_filter(['p" OR "x'], "gw", "t")
+    with pytest.raises(ValueError):
+        log_filter(["p"], 'gw"', "t")
+
+
+def test_destination_paths_rejects_bad_project(read_client):
+    c, _ = read_client
+    assert c.get("/api/studio/destination-paths", params={**Q, "gateway_project": 'x"'}).status_code == 400
+
+
 def test_gateway_logs_caller_by_client_cert(read_client, monkeypatch):
     """Two agents bound: each entry's caller comes from the client certificate seen on its own platform calls."""
     engines = [dict(e) for e in F.ENGINES]

@@ -14,7 +14,7 @@ from .diff import diff as diff_intents
 from .gcp import gateways as gw_mod
 from .gcp.discovery import defaults as discovery_defaults
 from .gcp.engines import tail
-from .gcp.logs import parse_since
+from .gcp.logs import LOCATION_RE, check_gateway, check_project, parse_since
 from .gcp.paths import parse_window
 from .gcp.rest import err_text
 from .model import (ENFORCEMENT_KINDS, SETUP_KINDS, ApplyRequest, Context, DiffItem, Intent, IntentsRequest,
@@ -116,6 +116,14 @@ def audit(project: str = "", region: str = "", gateway_project: str = "", ge_app
     return _guard(service.audit_view, ctx, bool(refresh))
 
 
+def _check_log_ids(ctx: Context) -> None:
+    """The ids that go into a Cloud Logging filter (ValueError -> 400)."""
+    check_project(ctx.project)
+    check_project(ctx.gw_project, "gateway_project")
+    if not LOCATION_RE.fullmatch(ctx.region):
+        raise ValueError(f"region must be a location id, not {ctx.region[:80]!r}")
+
+
 @router.get("/gateway-logs")
 def gateway_logs(gateway: str, project: str = "", region: str = "", gateway_project: str = "", since: str = "24h",
                  limit: int = 200, ge_app: str = "", ge_location: str = "us", refresh: int = 0) -> dict[str, Any]:
@@ -125,6 +133,8 @@ def gateway_logs(gateway: str, project: str = "", region: str = "", gateway_proj
     if not gateway.strip():
         raise HTTPException(400, "gateway is required")
     try:
+        _check_log_ids(ctx)
+        check_gateway(gateway.strip())
         parse_since(since or "24h")
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
@@ -138,6 +148,7 @@ def destination_paths(project: str = "", region: str = "", gateway_project: str 
     versus a public one over the window (gateway request logs, httpRequest.serverIp). Windows over 30d are capped."""
     ctx = _ctx(project, region, gateway_project, ge_app, ge_location)
     try:
+        _check_log_ids(ctx)
         parse_window(window or "7d")
     except ValueError as e:
         raise HTTPException(400, str(e)) from e

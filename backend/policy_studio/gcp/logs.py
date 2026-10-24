@@ -68,7 +68,34 @@ def parse_since(since: str, now: Optional[datetime] = None) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# Ids that go into a Cloud Logging filter unquoted-safe: no quotes, spaces or operators. Project: an id (also the
+# domain-scoped `example.com:proj` form) or a number. Gateway / location: letters, digits, - and _ (at most 63).
+PROJECT_RE = re.compile(r"[a-z][a-z0-9.:-]{0,61}[a-z0-9]|\d{1,20}")
+LOCATION_RE = re.compile(r"[a-z0-9-]{1,63}")
+GATEWAY_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,63}")
+
+
+def check_gateway(gateway: str) -> None:
+    """ValueError unless `gateway` is a gateway id or projects/P/locations/L/agentGateways/G."""
+    parts = (gateway or "").strip().split("/")
+    if len(parts) == 1 and GATEWAY_ID_RE.fullmatch(parts[0]):
+        return
+    if len(parts) == 6 and parts[0] == "projects" and parts[2] == "locations" and parts[4] == "agentGateways" \
+            and PROJECT_RE.fullmatch(parts[1]) and LOCATION_RE.fullmatch(parts[3]) and GATEWAY_ID_RE.fullmatch(parts[5]):
+        return
+    raise ValueError(f"gateway must be a gateway id or projects/P/locations/L/agentGateways/G, not {gateway[:80]!r}")
+
+
+def check_project(project: str, what: str = "project") -> None:
+    if not PROJECT_RE.fullmatch(project or ""):
+        raise ValueError(f"{what} must be a project id or number, not {project[:80]!r}")
+
+
 def log_filter(projects: list[str], gateway: str, since_ts: str) -> str:
+    for p in projects:
+        check_project(p)
+    if not GATEWAY_ID_RE.fullmatch(gateway or ""):
+        raise ValueError(f"gateway id {gateway[:80]!r} is not valid")
     names = [f'logName="projects/{p}/logs/{LOG_ID}"' for p in dict.fromkeys(projects)]
     lg = names[0] if len(names) == 1 else "(" + " OR ".join(names) + ")"
     return f'{lg} AND resource.labels.gateway_name="{gateway}" AND timestamp>="{since_ts}"'
