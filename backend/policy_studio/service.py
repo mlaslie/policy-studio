@@ -287,13 +287,17 @@ def _service_agents(r: Rest, raw: dict[str, Any], errors: list[str]) -> list[dic
 
 # ------------------------------------------------------------------ inventory
 def _project_agents_principal(r: Rest, ctx: Context, engines: list[Engine], number: str) -> str | None:
-    org = next((o for o in (eng_mod.org_from_principal(e.principal) for e in engines) if o), None)
-    if not org:
+    """The trust domain of an engine's principal when there is one (org- or proj- form), else from the project's
+    organization (agents.global.proj-<number> when it has none). None when the ancestry can't be read."""
+    if not number:
+        return None
+    domain = next((d for d in (eng_mod.trust_domain_of(e.principal) for e in engines) if d), None)
+    if not domain:
         try:
-            org = discovery.organization_id(r, ctx.project)
-        except Exception:  # noqa: BLE001
-            org = None
-    return eng_mod.project_agents_principal(org, number) if org and number else None
+            domain = eng_mod.trust_domain(discovery.organization_id(r, ctx.project), number)
+        except Exception:  # noqa: BLE001  (unknown: no org, or no permission to read the ancestry)
+            return None
+    return eng_mod.project_agents_principal(domain, number)
 
 
 def registry_state(inv: Inventory) -> dict[str, Any]:

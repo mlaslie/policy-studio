@@ -3,6 +3,7 @@
 GET https://R-aiplatform.googleapis.com/v1/projects/P/locations/R/reasoningEngines
   spec.effectiveIdentity  agents.global.org-ORG.system.id.goog/resources/aiplatform/projects/N/locations/R/
                           reasoningEngines/ID  (Agent Identity)  |  a service account email (service agent)
+                          A project without an organization has the trust domain agents.global.proj-N.system.id.goog.
   spec.deploymentSpec.agentGatewayConfig  {agentToAnywhereConfig: {agentGateway}, clientToAgentConfig: {agentGateway}}
   spec.deploymentSpec.pscInterfaceConfig  {networkAttachment, dnsPeeringConfigs[]}  (networking.py)
 Engines created before 2026-04-29, or with a PSC interface, can't be bound to a gateway.
@@ -99,15 +100,29 @@ def list_engines(r: Rest, project: str, region: str) -> list[Engine]:
     return [parse_engine(e) for e in raw]
 
 
+TRUST_DOMAIN_RE = re.compile(r"^principal(?:Set)?://(agents\.global\.(?:org|proj)-\d+\.system\.id\.goog)/")
+
+
+def trust_domain_of(principal: str) -> str | None:
+    """agents.global.org-<ORG>.system.id.goog (or .proj-<NUMBER>. for a project without an organization) of an Agent
+    Identity principal, else None."""
+    m = TRUST_DOMAIN_RE.match(principal or "")
+    return m.group(1) if m else None
+
+
 def org_from_principal(principal: str) -> str | None:
     m = re.match(r"^principal://agents\.global\.org-(\d+)\.system\.id\.goog/", principal or "")
     return m.group(1) if m else None
 
 
-def project_agents_principal(org_id: str, project_number: str) -> str:
-    """Every Agent Runtime agent (Agent Identity) in the project."""
-    return (f"principalSet://agents.global.org-{org_id}.system.id.goog/attribute.platformContainer/"
-            f"aiplatform/projects/{project_number}")
+def trust_domain(org_id: str | None, project_number: str) -> str:
+    """Agent Identity's trust domain: per organization, or per project when the project has no organization."""
+    return f"agents.global.org-{org_id}.system.id.goog" if org_id else f"agents.global.proj-{project_number}.system.id.goog"
+
+
+def project_agents_principal(domain: str, project_number: str) -> str:
+    """Every Agent Runtime agent (Agent Identity) in the project. `domain`: trust_domain() / trust_domain_of()."""
+    return f"principalSet://{domain}/attribute.platformContainer/aiplatform/projects/{project_number}"
 
 
 def tail(resource: str) -> str:
