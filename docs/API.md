@@ -1,9 +1,11 @@
-# Policy Studio: API contract (P1 + P2)
+# Policy Studio: API contract
 
 Policy Studio is a standalone app: Python package `policy_studio` (FastAPI) in `backend/`, and a Vite + React app in `frontend/`.
 - The backend imports only the standard library and its declared dependencies (a test enforces it).
-- In P1 and P2 every endpoint is **read-only** against GCP.
+- Every endpoint is **read-only** against GCP except `POST /api/studio/apply`, which writes only in `apply` mode (see
+  [Run modes and credentials](#run-modes-and-credentials)) and only through `gcp/writer.py`'s allowlist.
 - The backend calls Google APIs with Application Default Credentials (your gcloud login when run locally).
+- On Cloud Run every `/api/*` request except `/api/studio/health` needs IAP's signed header (see [IAP on Cloud Run](#iap-on-cloud-run)).
 
 Run it locally with `./studio-app` (backend :8090, serving the built UI). For UI development: `cd frontend && npm run dev` (Vite :5174, which proxies `/api` to :8090), or `npm run dev:mock` (no backend).
 
@@ -31,7 +33,8 @@ Every request carries the context as query params (GET) or a `context` object (P
 |---|---|---|
 | GET | `/api/studio/health` | `{ok, version}` |
 | GET | `/api/studio/defaults` | `{project, region}` from env `STUDIO_PROJECT` / `STUDIO_REGION`, or the gcloud config |
-| GET | `/api/studio/context` | `{project, project_number, region, gateway_project, gateway_project_number, ge_app, ge_location, principal, principal_set, apis: {"networkservices.googleapis.com": true, …}, permissions: [PermissionCheck], can_apply: false, errors: [str]}` |
+| GET | `/api/studio/context` | `{project, project_number, region, gateway_project, gateway_project_number, ge_app, ge_location, principal, principal_set, apis: {"networkservices.googleapis.com": true, …}, permissions: [PermissionCheck], mode, can_apply, can_apply_reason, errors: [str]}` |
+| GET | `/api/studio/auth?project=&gateway_project=` | `AuthInfo`: run mode, ADC, gcloud and write-permission checks (read-only; see below). `?refresh=1` is the **Re-check** button: it also drops the cached ADC clients, so a new `gcloud auth application-default login` is picked up |
 | GET | `/api/studio/gateways` | `{gateways: [Gateway], notes: [str], errors: [str], synced_at}` |
 | GET | `/api/studio/model-armor` | `{gateways: [{gateway, type, enabled, policy, extension, template: Template \| null, available_extensions?: [str], error?}], templates: [Template], extensions: [{name, templates}], setup: MaSetup, notes, errors}` |
 | GET | `/api/studio/inventory` | `Inventory` |
@@ -41,8 +44,13 @@ Every request carries the context as query params (GET) or a `context` object (P
 | POST | `/api/studio/preflight` | `{context, intents: [Intent]}` → `{items: [PreflightItem]}` (read-only; the checks `/apply` enforces) |
 | GET | `/api/studio/gateway-logs?gateway=&since=24h&limit=200` | `GatewayLogs` (read-only Cloud Logging `entries:list`; see below) |
 | GET | `/api/studio/destination-paths?window=7d` | `DestinationPaths` ("seen in traffic" path labels; read-only Cloud Logging `entries:list`; see below) |
+| POST | `/api/studio/apply` | `{context, intents: [Intent], confirm}` → NDJSON stream of per-intent events (apply mode only; 403 otherwise; see below). Covers every intent kind, including Agent Registry entry create / delete (`registry_service`) |
 
 GET responses are cached for 30 s per context. `?refresh=1` bypasses the cache; the **Sync** button uses it. Partial failures appear per item as `error: "…"` and never fail the whole request. A failure of the whole request (no credentials, network) is HTTP 502 `{detail}`.
+
+`gateway-logs` and `destination-paths` return 400 when `gateway` isn't a gateway id or
+`projects/P/locations/L/agentGateways/G`, or `project` / `gateway_project` / `region` isn't an id: these go into a Cloud
+Logging filter.
 
 - `principal_set`: every Agent Runtime agent (Agent Identity) in the project, the verified format `principalSet://agents.global.org-<ORG_ID>.system.id.goog/attribute.platformContainer/aiplatform/projects/<PROJECT_NUMBER>` (`null` if the project's ancestry can't be read). A project without an organization uses the per-project trust domain `agents.global.proj-<PROJECT_NUMBER>.system.id.goog`; the trust domain of an engine's principal is used when there is one. Use it as `source.principal` for `type: "project_agents"`.
 - Engine names use one format everywhere: `projects/<NUMBER>/locations/<R>/reasoningEngines/<ID>` (`Inventory.engines[].name`, `agents[].engine`, `Gateway.bound_engines[].engine`, `Intent.engine`). An engine's `principal` is exactly the IAM member string that appears in `Binding.member` (`principal://…` for Agent Identity, `serviceAccount:…` otherwise).
@@ -403,16 +411,27 @@ DestinationPath = { private, public, unknown /* call counts by upstream address 
 
 The `''` keeps MCP setup traffic (initialize, tools/list) allowed. Both forms are verified live against Agent Gateway.
 
-## Run modes and credentials (P3)
+Tool names in `access.tools` may contain only letters, digits and `_ . - : /` (at most 128 characters); an intent with
+any other name is invalid (it fails alone, like any invalid intent). Tool names come from MCP servers, and a quote in
+one could otherwise change the condition. Existing conditions with other names are shown as `custom`.
+
+## Run modes and credentials
 
 Policy Studio runs in one of two modes:
 
 | Mode | When | Apply |
 |---|---|---|
-| `generate` | Default on Cloud Run (`K_SERVICE` is set), or `STUDIO_MODE=generate` | **Disabled.** Discovery, audit, builder and command/Terraform generation only. The backend has no write path at all in this mode (the write client is never constructed). |
-| `apply` | Default when run locally (no `K_SERVICE`), or `STUDIO_MODE=apply` | **Enabled**, using Application Default Credentials (ADC). Only after the credential checks pass and the user confirms. |
+| `generate` | Default on Cloud Run (`K_SERVICE` is set) and in the container image (`STUDIO_CONTAINER=1`, set by the Dockerfile), or `STUDIO_MODE=generate` | **Disabled.** Discovery, audit, builder and command/Terraform generation only. The backend has no write path at all in this mode (the write client is never constructed). |
+| `apply` | Default when run locally (no `K_SERVICE`, no `STUDIO_CONTAINER`), or `STUDIO_MODE=apply` | **Enabled**, using Application Default Credentials (ADC). Only after the credential checks pass and the user confirms. |
 
-`STUDIO_MODE=apply` on Cloud Run is refused at startup unless `STUDIO_ALLOW_APPLY_ON_CLOUD_RUN=1` is set, which is intentionally awkward.
+`STUDIO_MODE=apply` on Cloud Run is refused (logged, falls back to generate) unless `STUDIO_ALLOW_APPLY_ON_CLOUD_RUN=1` is set, which is intentionally awkward.
+
+### IAP on Cloud Run
+
+With `K_SERVICE` set, every `/api/*` request except `/api/studio/health` must carry a valid `x-goog-iap-jwt-assertion`
+(verified against `https://www.gstatic.com/iap/verify/public_key`, issuer `https://cloud.google.com/iap`, audience
+`STUDIO_IAP_AUDIENCE` or `/projects/<PROJECT_NUMBER>/locations/<REGION>/services/<K_SERVICE>` from the metadata
+server). Otherwise: 401 `{detail}`. The static UI isn't checked by the app (IAP fronts it). See `backend/policy_studio/iap.py`.
 
 ### `GET /api/studio/auth?project=`
 
@@ -449,7 +468,7 @@ Available only when `can_apply`; otherwise it returns 403 with the reason.
 
 `confirm.project` must equal `context.project`. Revokes, unbinds, `model_armor_off`, setup and registry entry deletes (`params.delete`), `set_enforcement` to `DRY_RUN` and `dedicate_extension` with `revert` need `acknowledge_destructive: true`.
 
-The response streams NDJSON or SSE events per intent: `{intent_id, state: "running"|"done"|"verified"|"failed"|"skipped", detail, operation?, undo?: Intent, raw_error?, blocked?, fix?, effect?, effect_after_s?, effect_max_s?, effect_measured?}`, then `{type: "done", summary}` (`summary.blocked` counts preflight refusals).
+The response streams NDJSON (`application/x-ndjson`) events per intent: `{intent_id, state: "running"|"done"|"verified"|"failed"|"skipped", detail, operation?, undo?: Intent, raw_error?, blocked?, fix?, effect?, effect_after_s?, effect_max_s?, effect_measured?}`, then `{type: "done", summary}` (`summary.blocked` counts preflight refusals).
 
 Verified means stored, not in effect. A `verified` event also says how long the gateway takes to enforce the change (`backend/policy_studio/timing.py`, the same table as `frontend/src/lib/timing.ts`): `effect` ("Stored. Takes effect in a few minutes (up to about 7)."), `effect_after_s` and `effect_max_s` (typical and max seconds after the event) and `effect_measured`. Grants, revokes, modify and service agent roles: 120 / 420 (Google's documented IAM range). Bind / unbind: 60 / 120 after the redeploy (about 5 minutes, which Apply waits for). `set_enforcement`: 120 / 180 (measured: 2m40s, 2m08s, 2m19s after Apply). `dedicate_extension`: 150 / 180. Model Armor on / off and setup: 180 / 300 (not measured). `registry_service`: 120 / 300 (not measured; the create or delete itself takes seconds). The apply log records the same fields per item, and the done entry adds `ready_after_s` / `ready_max_s`: the largest typical and the largest max among the verified items. Generated bundles and items end with a comment saying how long their changes take.
 

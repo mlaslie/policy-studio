@@ -109,7 +109,8 @@ Apply is available when the mode is `apply` and no check is an error.
   `metadata,failOpen` (enforcement mode) and the authz policy `PATCH` of `customProvider.authzExtension.resources`
   (dedicated extension), and for Model Armor setup create/delete of
   Model Armor templates and authz extensions plus project `setIamPolicy`, which is checked so that it can only add or
-  remove members of the three Model Armor roles (anything else in the policy must be unchanged).
+  remove members of the three Model Armor roles (anything else in the policy must be unchanged), and create/delete of
+  Agent Registry services (registry entries: the create body is checked, never an A2A agent spec; no PATCH).
 - Before any call, Apply skips duplicate items and refuses items that would certainly fail (a bind of an engine
   without Agent Identity, Model Armor on with no extension in the region and none staged, a kind you can't write);
   the Apply step runs the same preflight (`POST /api/studio/preflight`) and shows them as **Blocked** with a fix.
