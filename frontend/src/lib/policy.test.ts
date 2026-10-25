@@ -22,3 +22,19 @@ describe("default context", () => {
     expect(DEFAULT_CTX.ge_location).toBe("us");
   });
 });
+
+describe("an always-true custom condition", () => {
+  it("reads as full access, like the backend's english, and the lint says so (without blocking staging)", async () => {
+    const { accessShort, accessWords, alwaysTrue, intentEnglish, lintExpression } = await import("./policy");
+    const { blocking } = await import("../components/AccessChooser");
+    for (const e of ["true", " (true) ", "true == true", "1==1", "!false"]) expect(alwaysTrue(e)).toBe(true);
+    for (const e of ["false", "true && x", "(a) || (true)", "", "request.time < timestamp('2030-01-01T00:00:00Z')"]) expect(alwaysTrue(e)).toBe(false);
+    expect(accessWords({ mode: "custom", expression: "true" })).toBe("full access (always-true condition)");
+    expect(accessShort({ mode: "custom", expression: "true" })).toBe("full access");
+    const g = { id: "g", kind: "grant" as const, source: { type: "custom" as const, principal: "user:a@example.com", label: "Alice" }, destination: { kind: "mcp_server" as const, id: "t", name: "t", label: "Tickets MCP" }, access: { mode: "custom" as const, expression: "true" } };
+    expect(intentEnglish(g)).toBe("Alice can call Tickets MCP (full access: its custom condition is always true).");
+    const lint = lintExpression("true");
+    expect(lint[0]).toMatch(/^Always true/);
+    expect(blocking(lint)).toBe(false);
+  });
+});

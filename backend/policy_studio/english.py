@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 from typing import Mapping, Optional
 
-from .conditions import EGRESSOR, classify
+from .conditions import EGRESSOR, always_true, classify
 from .model import Access, Binding, Condition, Intent
 
 PROJECT_AGENTS_RE = re.compile(r"^principalSet://[^/]+/attribute\.platformContainer/aiplatform/projects/(\d+)$")
@@ -49,6 +49,8 @@ def condition_english(cond: Optional[Condition | dict]) -> str:
         return "only read-only tools (by MCP hint)"
     if acc.mode == "tools":
         return "only tools: " + ", ".join(acc.tools or []) if acc.tools else "no tools (MCP setup calls only)"
+    if always_true(acc.expression):
+        return "all tools (the condition is always true)"
     return "custom condition"
 
 
@@ -72,6 +74,8 @@ def access_words(acc: Optional[Access]) -> str:
     if mode == "tools":
         tools = [t for t in (acc.tools or []) if t] if acc else []
         return f"only tools {', '.join(tools)}" if tools else "MCP setup calls only (no tools)"
+    if acc and always_true(acc.expression):
+        return "full access (always-true condition)"
     return "a custom condition"
 
 
@@ -87,6 +91,8 @@ def access_short(acc: Optional[Access]) -> str:
     if mode == "tools":
         tools = [t for t in (acc.tools or []) if t] if acc else []
         return ", ".join(tools) if tools else "no tools"
+    if acc and always_true(acc.expression):
+        return "full access"
     return "a custom condition"
 
 
@@ -164,6 +170,10 @@ def intent_english(intent: Intent) -> str:
             tools = [t for t in (acc.tools or []) if t]
             what = (f"call only these tools of {dest}: {', '.join(tools)}" if tools
                     else f"reach {dest} for MCP setup calls only (no tools)")
+        elif acc and always_true(acc.expression):
+            # reads like a restriction, but holds for every call
+            what = (f"call all tools of {dest} (its custom condition is always true)" if kind == "mcp_server"
+                    else f"call {dest} (full access: its custom condition is always true)")
         else:
             what = f"call {dest} when a custom condition holds"
         if k == "grant":

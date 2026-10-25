@@ -58,7 +58,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Optional
 
 from . import hcl, timing
-from .conditions import EGRESSOR, compare_access_many, condition_for
+from .conditions import ALWAYS_TRUE_WARNING, EGRESSOR, always_true_access, compare_access_many, condition_for
 from .english import PROJECT_AGENTS_RE, engine_principal_parts, intent_english, member_label, modify_change
 from .gcp import model_armor as ma_mod
 from .gcp import registry as reg_mod
@@ -315,6 +315,8 @@ def iam_spec(intent: Intent, env: RenderEnv, warnings: list[str]) -> IamSpec:
         warnings.append("No tools selected: only MCP setup calls (initialize, tools/list) will be allowed.")
     if acc and acc.mode == "custom" and not (acc.expression or "").strip():
         warnings.append("The custom condition is empty.")
+    if intent.kind in ("grant", "modify") and always_true_access(tos if modify else [intent.access]):
+        warnings.append(ALWAYS_TRUE_WARNING)
     if acc and acc.mode == "tools" and d and env.mcp_tools.get(rid):
         known = {t["name"] for t in env.mcp_tools[rid]}
         unknown = [t for t in acc.tools or [] if t and t not in known]

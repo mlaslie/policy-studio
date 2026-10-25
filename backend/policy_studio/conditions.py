@@ -27,6 +27,28 @@ def _norm(expr: str) -> str:
     return re.sub(r"\s+", " ", (expr or "").strip())
 
 
+_TRIVIAL_TRUE = {"true", "true==true", "1==1", "!false"}
+
+
+def always_true(expr: Optional[str]) -> bool:
+    """A custom condition that holds for every request (`true`, `(true)`, `true == true`, `1 == 1`, `!false`): the
+    grant is full access, however it reads. Only these trivial forms are recognized."""
+    e = re.sub(r"\s+", "", expr or "")
+    while e.startswith("(") and e.endswith(")") and e.count("(") == 1:
+        e = e[1:-1]
+    return e in _TRIVIAL_TRUE
+
+
+ALWAYS_TRUE_WARNING = ("The custom condition is always true, so this is full access: every call is allowed. If that's "
+                       "meant, choose full access (it reads as what it is); otherwise write the condition that limits "
+                       "it.")
+
+
+def always_true_access(accs: list[Optional[Access]]) -> bool:
+    """Is one of these a custom condition that is always true (full access that reads like a restriction)?"""
+    return any(a is not None and a.mode == "custom" and always_true(a.expression) for a in accs)
+
+
 def cel_string(s: str) -> str:
     """A CEL single-quoted string literal. Access rejects tool names that would need escaping; this is defense in
     depth (frontend lib/policy.ts toolsExpr escapes the same way)."""

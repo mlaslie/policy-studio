@@ -9,7 +9,8 @@ import json
 import re
 from typing import Any, Optional
 
-from .conditions import EGRESSOR, compare_access_many, condition_for, same_condition
+from .conditions import (ALWAYS_TRUE_WARNING, EGRESSOR, always_true_access, compare_access_many, condition_for,
+                         same_condition)
 from .diff import resource_key
 from .english import modify_change
 from .gcp import registry as reg_mod
@@ -276,14 +277,23 @@ def advisories(intents: list[Intent], env: RenderEnv) -> dict[str, str]:
             if w:
                 out[it.id] = " ".join(w)
             continue
+        if it.kind == "grant":
+            if always_true_access([it.access]):
+                out[it.id] = ALWAYS_TRUE_WARNING
+            continue
         if it.kind == "modify":
             d = it.destination
             rid = (d.id or short(d.name)) if d else ""
             ro = {t["name"] for t in env.mcp_tools[rid] if t.get("read_only")} if env.mcp_tools.get(rid) else None
+            msgs = []
             if it.removes_all:
-                out[it.id] = f"This removes all access: {modify_change(it)}."
+                msgs.append(f"This removes all access: {modify_change(it)}.")
             elif compare_access_many(it.froms, it.tos, ro) == "broader":
-                out[it.id] = f"This widens access: {modify_change(it)}."
+                msgs.append(f"This widens access: {modify_change(it)}.")
+            if always_true_access(it.tos):
+                msgs.append(ALWAYS_TRUE_WARNING)
+            if msgs:
+                out[it.id] = " ".join(msgs)
             continue
         if it.kind != "set_enforcement" or env.iap is None:
             continue

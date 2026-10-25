@@ -137,3 +137,46 @@ def test_compare_access_same_tools_reordered_is_same():
     assert compare_access(a, b) == "same"
     assert compare_access(a, Access(mode="tools", tools=["a"])) == "narrower"
     assert compare_access(a, Access(mode="tools", tools=["a", "c"])) == "broader"
+
+
+# ------------------------------------------------------------------ an always-true custom condition
+@pytest.mark.parametrize("expr,yes", [("true", True), ("  true ", True), ("(true)", True), ("true == true", True),
+                                      ("1==1", True), ("!false", True), ("false", False), ("true && x", False),
+                                      ("(a) || (true)", False), ("", False),
+                                      ("request.time < timestamp('2030-01-01T00:00:00Z')", False)])
+def test_always_true(expr, yes):
+    from policy_studio.conditions import always_true
+    assert always_true(expr) is yes
+
+
+def test_always_true_custom_condition_reads_as_full_access():
+    from policy_studio.conditions import ALWAYS_TRUE_WARNING
+    from policy_studio.english import access_short, access_words
+    from policy_studio.preflight import advisories
+    from policy_studio.render import RenderEnv, render
+    from policy_studio.model import Context
+    src = Source(type="engine", principal=F.principal("111"), label="HR Assistant", engine=F.E1)
+    dest = Destination(kind="mcp_server", id="agentregistry-mcp", name=F.MCP, label="Tickets MCP")
+    g = Intent(id="g", kind="grant", source=src, destination=dest, access=Access(mode="custom", expression=" true "))
+    assert intent_english(g) == "HR Assistant can call all tools of Tickets MCP (its custom condition is always true)."
+    assert "when a custom condition holds" not in intent_english(g)
+    ep = g.model_copy(update={"destination": Destination(kind="endpoint", id="e", name="e", label="Weather API")})
+    assert intent_english(ep) == ("HR Assistant can call Weather API (full access: its custom condition is "
+                                  "always true).")
+    assert condition_english({"expression": "1 == 1"}) == "all tools (the condition is always true)"
+    assert access_words(Access(mode="custom", expression="true")) == "full access (always-true condition)"
+    assert access_short(Access(mode="custom", expression="true")) == "full access"
+    # a real custom condition still reads as one
+    real = g.model_copy(update={"id": "r", "access": Access(
+        mode="custom", expression="request.time < timestamp('2030-01-01T00:00:00Z')")})
+    assert intent_english(real).endswith("when a custom condition holds.")
+    env = RenderEnv(ctx=Context(project=F.P, region=F.R, project_number=F.N, gateway_project_number=F.N))
+    m = Intent(id="m", kind="modify", source=src, destination=dest, access_from=Access(mode="read_only_hint"),
+               access=Access(mode="custom", expression="true"))
+    items = render([g, m, real], env).items
+    assert ALWAYS_TRUE_WARNING in items[0].warnings and ALWAYS_TRUE_WARNING in items[1].warnings
+    assert ALWAYS_TRUE_WARNING not in items[2].warnings
+    adv = advisories([g, m, real], env)
+    assert adv["g"] == ALWAYS_TRUE_WARNING and ALWAYS_TRUE_WARNING in adv["m"] and "r" not in adv
+    rv = Intent(id="r", kind="revoke", source=src, destination=dest, access=Access(mode="custom", expression="true"))
+    assert ALWAYS_TRUE_WARNING not in render([rv], env).items[0].warnings      # revoking one: no warning

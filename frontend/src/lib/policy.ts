@@ -42,6 +42,14 @@ export function accessFromCondition(expr: string | undefined): Access {
   return { mode: "custom", expression: expr };
 }
 
+/** A custom condition that holds for every request (true, (true), true == true, 1 == 1, !false), as the backend's
+ *  conditions.always_true: full access that reads like a restriction. */
+export function alwaysTrue(expr: string | undefined): boolean {
+  let e = (expr ?? "").replace(/\s+/g, "");
+  while (e.startsWith("(") && e.endsWith(")") && (e.match(/\(/g) ?? []).length === 1) e = e.slice(1, -1);
+  return ["true", "true==true", "1==1", "!false"].includes(e);
+}
+
 /** Short phrase for an access, as the backend's english.access_words: an exact (custom) expression is described as
  *  what it is. For modify sentences ("full access → only read-only tools"). */
 export function accessWords(a: Access | undefined): string {
@@ -52,6 +60,7 @@ export function accessWords(a: Access | undefined): string {
     const t = (acc.tools ?? []).filter(Boolean);
     return t.length ? `only tools ${t.join(", ")}` : "MCP setup calls only (no tools)";
   }
+  if (alwaysTrue(acc.expression)) return "full access (always-true condition)";
   return "a custom condition";
 }
 
@@ -70,6 +79,7 @@ export function accessShort(a: Access | undefined): string {
   if (!acc || acc.mode === "all") return "full access";
   if (acc.mode === "read_only_hint") return "read-only";
   if (acc.mode === "tools") return (acc.tools ?? []).filter(Boolean).join(", ") || "no tools";
+  if (alwaysTrue(acc.expression)) return "full access";
   return "a custom condition";
 }
 
@@ -108,6 +118,7 @@ export function intentEnglish(i: Intent): string {
         if (t.length === 1) return `${who} can call only ${t[0]} on ${dest}.`;
         return `${who} can call only these ${t.length} tools on ${dest}: ${t.join(", ")}.`;
       }
+      if (alwaysTrue(a.expression)) return `${who} can call ${dest} (full access: its custom condition is always true).`;
       return a.title ? `${who} can call ${dest} under the condition “${a.title}”.` : `${who} can call ${dest} when a custom condition is true.`;
     }
     case "revoke": {
@@ -256,6 +267,7 @@ export function lintExpression(expr: string): string[] {
   const out: string[] = [];
   const e = expr.trim();
   if (!e) return ["The condition is empty."];
+  if (alwaysTrue(e)) return ["Always true: every call is allowed, so this is full access. Choose Full access if that's meant, or write the condition that limits it."];
   let depth = 0;
   for (const ch of e) {
     if (ch === "(" || ch === "[") depth++;
