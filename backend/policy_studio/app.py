@@ -27,7 +27,8 @@ def static_dir() -> Path:
 
 def create_app() -> FastAPI:
     app = FastAPI(title="Policy Studio", version=__version__)
-    origins = ["http://localhost:5174", "http://127.0.0.1:5174"]
+    # local UIs: the Vite dev server (5174), vite preview (4173), the app itself (8090)
+    origins = [f"http://{h}:{p}" for p in (5174, 4173, 8090) for h in ("localhost", "127.0.0.1")]
     origins += [o.strip() for o in os.environ.get("STUDIO_CORS", "").split(",") if o.strip()]
     app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=["*"], allow_headers=["*"])
     app.add_middleware(IapMiddleware)          # outermost; a no-op unless K_SERVICE is set

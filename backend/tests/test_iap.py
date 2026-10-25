@@ -171,3 +171,4 @@ def test_apply_on_cloud_run_needs_apply_members(seen, monkeypatch):
     from policy_studio import settings
     assert settings.apply_member_problem("", {"K_SERVICE": "s", "STUDIO_APPLY_MEMBERS": "a@example.com"})
     assert settings.apply_member_problem(None, {}) is None                               # local: not checked
+

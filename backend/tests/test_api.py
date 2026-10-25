@@ -212,3 +212,14 @@ def test_hostile_tool_name_intent_is_invalid(client):
     assert "not allowed in a condition" in items[0]["error"] and not items[0]["outputs"]["gcloud"]
     p = client.post("/api/studio/preflight", json={"context": Q, "intents": [bad]}).json()["items"]
     assert p[0]["status"] == "invalid"
+
+
+@pytest.mark.parametrize("origin,ok", [("http://localhost:5174", True), ("http://127.0.0.1:5174", True),
+                                       ("http://localhost:4173", True), ("http://127.0.0.1:4173", True),
+                                       ("http://localhost:8090", True), ("http://127.0.0.1:8090", True),
+                                       ("http://localhost:9999", False), ("https://evil.example.com", False)])
+def test_local_cors_origins(origin, ok, monkeypatch):
+    monkeypatch.delenv("STUDIO_CORS", raising=False)
+    r = TestClient(create_app()).options("/api/studio/health", headers={"Origin": origin,
+                                                                        "Access-Control-Request-Method": "GET"})
+    assert (r.headers.get("access-control-allow-origin") == origin) is ok
