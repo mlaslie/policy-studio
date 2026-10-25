@@ -63,6 +63,9 @@ $GCLOUD run services add-iam-policy-binding "$SERVICE" --region "$REGION" --proj
 echo "== IAP access"
 IFS=',' read -ra MEMBERS <<< "$IAP_MEMBERS"
 for M in "${MEMBERS[@]}"; do
+  M="${M#"${M%%[![:space:]]*}"}"   # trim spaces ("user:a@example.com, group:b@example.com")
+  M="${M%"${M##*[![:space:]]}"}"
+  [ -n "$M" ] || continue
   $GCLOUD beta iap web add-iam-policy-binding --resource-type=cloud-run --service="$SERVICE" --region="$REGION" \
     --project="$PROJECT" --member="$M" --role=roles/iap.httpsResourceAccessor --condition=None --quiet >/dev/null
   echo "   $M"
