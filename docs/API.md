@@ -428,6 +428,8 @@ Policy Studio runs in one of two modes:
 | `apply` | Default when run locally (no `K_SERVICE`, no `STUDIO_CONTAINER`), or `STUDIO_MODE=apply` | **Enabled**, using Application Default Credentials (ADC). Only after the credential checks pass and the user confirms. |
 
 `STUDIO_MODE=apply` on Cloud Run is refused (logged, falls back to generate) unless `STUDIO_ALLOW_APPLY_ON_CLOUD_RUN=1` is set, which is intentionally awkward.
+Even then, `POST /apply` on Cloud Run is 403 unless the IAP-verified email is in `STUDIO_APPLY_MEMBERS` (comma-separated,
+`user:` optional; unset = nobody), and `/context` reports `can_apply: false` with that reason.
 
 ### IAP on Cloud Run
 
@@ -435,6 +437,10 @@ With `K_SERVICE` set, every `/api/*` request except `/api/studio/health` must ca
 (verified against `https://www.gstatic.com/iap/verify/public_key`, issuer `https://cloud.google.com/iap`, audience
 `STUDIO_IAP_AUDIENCE` or `/projects/<PROJECT_NUMBER>/locations/<REGION>/services/<K_SERVICE>` from the metadata
 server). Otherwise: 401 `{detail}`. The static UI isn't checked by the app (IAP fronts it). See `backend/policy_studio/iap.py`.
+
+Projects: on Cloud Run a `project` / `gateway_project` (query or request `context`), or the project of a full
+`gateway` name on `/gateway-logs`, that isn't `STUDIO_PROJECT`, `STUDIO_GATEWAY_PROJECT` or in `STUDIO_ALLOWED_PROJECTS`
+(comma-separated) gets 403 `{detail}` naming the allowed ones. No limit when none is set, or off Cloud Run.
 
 ### `GET /api/studio/auth?project=`
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
 
@@ -12,7 +12,7 @@ from .apply import Applier, check_confirm
 from . import preflight as pf
 from .diff import diff as diff_intents
 from .gcp import gateways as gw_mod
-from .gcp.discovery import defaults as discovery_defaults
+from .gcp.discovery import _numbers as discovery_numbers, defaults as discovery_defaults
 from .gcp.engines import tail
 from .gcp.logs import LOCATION_RE, check_gateway, check_project, parse_since
 from .gcp.paths import parse_window
@@ -32,8 +32,21 @@ def make_context(project: str = "", region: str = "", gateway_project: str = "",
         region = region or d["region"]
     if not project:
         raise HTTPException(400, "project is required (no STUDIO_PROJECT and no gcloud default project)")
+    check_projects(project, gateway_project)
     return Context(project=project.strip(), region=region.strip(), gateway_project=gateway_project.strip(),
                    ge_app=ge_app.strip(), ge_location=(ge_location or "us").strip())
+
+
+def check_projects(*projects: str) -> None:
+    """On Cloud Run, 403 for a project the deployment isn't configured for (settings.project_problem)."""
+    problem = settings.project_problem(list(projects), numbers=dict(discovery_numbers))
+    if problem:
+        raise HTTPException(403, problem)
+
+
+def iap_email(request: Optional[Request]) -> str:
+    """The IAP-verified email (iap.py puts it in the request state on Cloud Run), or ""."""
+    return str(getattr(request.state, "iap_email", "") or "") if request is not None else ""
 
 
 def _ctx(project: str, region: str, gateway_project: str, ge_app: str, ge_location: str) -> Context:
@@ -60,19 +73,23 @@ def defaults() -> dict[str, str]:
 
 
 @router.get("/context")
-def context(project: str = "", region: str = "", gateway_project: str = "", ge_app: str = "",
+def context(request: Request, project: str = "", region: str = "", gateway_project: str = "", ge_app: str = "",
             ge_location: str = "us", refresh: int = 0) -> dict[str, Any]:
     ctx = _ctx(project, region, gateway_project, ge_app, ge_location)
     out = dict(_guard(service.context_view, ctx, bool(refresh)))
-    out.update(ge_app=ctx.ge_app, ge_location=ctx.ge_location, **apply_state(ctx, bool(refresh)))
+    out.update(ge_app=ctx.ge_app, ge_location=ctx.ge_location,
+               **apply_state(ctx, bool(refresh), iap_email(request)))
     return out
 
 
-def apply_state(ctx: Context, refresh: bool = False) -> dict[str, Any]:
+def apply_state(ctx: Context, refresh: bool = False, email: str = "") -> dict[str, Any]:
     """{mode, can_apply, can_apply_reason} for /context (never fails it)."""
     mode = settings.current_mode()
     if mode != "apply":
         return {"mode": mode, "can_apply": False, "can_apply_reason": settings.generate_reason()}
+    member = settings.apply_member_problem(email)
+    if member:
+        return {"mode": mode, "can_apply": False, "can_apply_reason": member}
     try:
         a = service.auth_view(ctx.project, ctx.gateway_project, refresh)
         return {"mode": mode, "can_apply": a["can_apply"], "can_apply_reason": a["can_apply_reason"]}
@@ -85,6 +102,7 @@ def auth(project: str = "", gateway_project: str = "", refresh: int = 0) -> dict
     project = (project or discovery_defaults()["project"]).strip()
     if not project:
         raise HTTPException(400, "project is required (no STUDIO_PROJECT and no gcloud default project)")
+    check_projects(project, gateway_project)
     return _guard(service.auth_view, project, gateway_project.strip(), bool(refresh))
 
 
@@ -138,6 +156,8 @@ def gateway_logs(gateway: str, project: str = "", region: str = "", gateway_proj
         parse_since(since or "24h")
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
+    if gateway.strip().startswith("projects/"):            # a full name: its project is where the logs are read
+        check_projects(gateway.strip().split("/")[1])
     return _guard(service.gateway_logs_view, ctx, gateway.strip(), since or "24h", limit, bool(refresh))
 
 
@@ -274,10 +294,13 @@ def diff(req: IntentsRequest) -> dict[str, list[DiffItem]]:
 
 # ------------------------------------------------------------------ apply (P3, apply mode only)
 @router.post("/apply")
-def apply(req: ApplyRequest) -> StreamingResponse:
+def apply(req: ApplyRequest, request: Request) -> StreamingResponse:
     mode = settings.current_mode()
     if mode != "apply":                                   # no write client is ever constructed in generate mode
         raise HTTPException(403, settings.generate_reason())
+    member = settings.apply_member_problem(iap_email(request))   # Cloud Run: only STUDIO_APPLY_MEMBERS
+    if member:
+        raise HTTPException(403, member)
     ctx = _request_context(req.context)
     a = _guard(service.auth_view, ctx.project, ctx.gateway_project, True)
     if not a["can_apply"]:

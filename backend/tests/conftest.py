@@ -29,6 +29,7 @@ def _hermetic_credentials(monkeypatch, tmp_path):
     monkeypatch.setattr(auth, "load_adc", no_adc)
     monkeypatch.setattr(auth, "gcloud_info", lambda: {"available": False, "account": "", "project": ""})
     monkeypatch.setattr(auth, "tokeninfo_email", lambda creds: "")
-    for var in ("K_SERVICE", "STUDIO_CONTAINER", "STUDIO_MODE", "STUDIO_ALLOW_APPLY_ON_CLOUD_RUN", "GOOGLE_APPLICATION_CREDENTIALS"):
+    for var in ("K_SERVICE", "STUDIO_CONTAINER", "STUDIO_MODE", "STUDIO_ALLOW_APPLY_ON_CLOUD_RUN", "GOOGLE_APPLICATION_CREDENTIALS",
+                "STUDIO_ALLOWED_PROJECTS", "STUDIO_GATEWAY_PROJECT", "STUDIO_APPLY_MEMBERS"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("STUDIO_APPLY_LOG", str(tmp_path / "apply-log.jsonl"))

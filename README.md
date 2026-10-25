@@ -63,6 +63,14 @@ Cloud Run's `/projects/<PROJECT_NUMBER>/locations/<REGION>/services/<SERVICE>`, 
 `STUDIO_IAP_AUDIENCE` to override it (for example `/projects/<PROJECT_NUMBER>/global/backendServices/<ID>` behind a
 load balancer with IAP).
 
+The service account reads whatever project a request names, so on Cloud Run requests may only name the projects the
+deployment is configured for: `STUDIO_PROJECT` (which `deploy.sh` sets to `PROJECT`), `STUDIO_GATEWAY_PROJECT` and
+`STUDIO_ALLOWED_PROJECTS` (comma-separated), whichever are set. Any other `project` or `gateway_project` (or a gateway
+name in another project) gets 403, which names the allowed projects. If the gateway or Agent Registry is in another
+project, add it, for example `gcloud run services update policy-studio --update-env-vars STUDIO_GATEWAY_PROJECT=...`
+(and give the service account the read roles there). With none of them set there's no limit. Run locally there's no
+limit either: you read with your own credentials.
+
 ## Modes: generate and apply
 
 | Mode | When | Apply |
@@ -73,7 +81,10 @@ load balancer with IAP).
 The Dockerfile sets `STUDIO_CONTAINER=1` because the image listens on `0.0.0.0`: a container started anywhere (not
 just on Cloud Run) is generate-only unless you pass `STUDIO_MODE=apply` yourself (allowed off Cloud Run).
 `STUDIO_MODE=apply` on Cloud Run is refused (logged, falls back to generate) unless
-`STUDIO_ALLOW_APPLY_ON_CLOUD_RUN=1` is also set. `deploy.sh` sets `STUDIO_MODE=generate` explicitly.
+`STUDIO_ALLOW_APPLY_ON_CLOUD_RUN=1` is also set. `deploy.sh` sets `STUDIO_MODE=generate` explicitly. With apply on
+Cloud Run, only the people in `STUDIO_APPLY_MEMBERS` can apply: a comma-separated list of emails, matched against the
+email in IAP's verified signed header (`user:` is optional, case doesn't matter). If it's unset or empty, nobody can
+apply on Cloud Run (`POST /api/studio/apply` returns 403 and the Context step says why); anyone else gets 403 too.
 
 ### Credentials (ADC)
 
