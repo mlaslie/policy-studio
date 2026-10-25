@@ -435,7 +435,6 @@ function bindOutputs(ctx: Ctx, w: World, i: Intent, unbind: boolean): { outputs:
   const label = engine?.display_name ?? i.engine_label ?? shortName(engName);
   const warnings: string[] = [];
   if (engine && !engine.bindable) warnings.push(`${label} can't be bound to a gateway. ${engine.bindable_reason ?? "It was created before 2026-04-29; redeploy it to get a bindable engine."}`);
-  if (dir === "ingress" && !ctx.ge_app) warnings.push("Gemini Enterprise app ID is not set; registering the agent with your app uses GE_APP_ID.");
   const notes = ["The PATCH replaces the whole agentGatewayConfig, so the other direction is re-sent unchanged.", "The engine redeploys: it takes a few minutes before traffic uses the new path."];
   const curl = [
     `curl -sS --fail-with-body -X PATCH \\`,
@@ -444,15 +443,6 @@ function bindOutputs(ctx: Ctx, w: World, i: Intent, unbind: boolean): { outputs:
     `  -H "Content-Type: application/json" \\`,
     `  -d ${sq(body)}`,
   ];
-  const ge =
-    dir === "ingress" && !unbind
-      ? [
-          ``,
-          `# Then register the agent with your Gemini Enterprise app (${ctx.ge_location || "us"}):`,
-          `agents-cli publish gemini-enterprise --app=${ctx.ge_app || "GE_APP_ID"} --location=${ctx.ge_location || "us"} \\`,
-          `  --agent-engine=${engName}`,
-        ]
-      : [];
   const terraform = [
     `# ${intentEnglish(i)}`,
     `# No Terraform resource binds an existing Agent Runtime engine to a gateway, so this runs the PATCH.`,
@@ -471,8 +461,8 @@ function bindOutputs(ctx: Ctx, w: World, i: Intent, unbind: boolean): { outputs:
     `  }`,
     `}`,
   ].join("\n");
-  const gcloud = [`# ${intentEnglish(i)}`, `# There is no gcloud command for this yet; the REST PATCH below is the supported way.`, ...curl, ...ge].join("\n");
-  const rest = [`# ${intentEnglish(i)}`, ...curl, ...ge].join("\n");
+  const gcloud = [`# ${intentEnglish(i)}`, `# There is no gcloud command for this yet; the REST PATCH below is the supported way.`, ...curl].join("\n");
+  const rest = [`# ${intentEnglish(i)}`, ...curl].join("\n");
   const python = [
     `# ${intentEnglish(i)}`,
     `# The client library has no method for agentGatewayConfig yet, so this PATCHes with an AuthorizedSession.`,

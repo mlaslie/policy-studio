@@ -38,3 +38,12 @@ describe("an always-true custom condition", () => {
     expect(blocking(lint)).toBe(false);
   });
 });
+
+describe("missingContext", () => {
+  it("doesn't ask for the Gemini Enterprise app: no generated code uses it", async () => {
+    const { missingContext } = await import("./policy");
+    const bind = { id: "b", kind: "bind_gateway" as const, engine: "e", gateway: { name: "g", direction: "ingress" as const } };
+    expect(missingContext({ project: "p", region: "r" }, [bind])).toEqual([]);
+    expect(missingContext({ project: "", region: "r" }, [bind])).toEqual(["Project ID is empty: commands use a placeholder."]);
+  });
+});

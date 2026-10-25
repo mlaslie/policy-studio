@@ -292,12 +292,12 @@ export function newId(prefix = "i"): string {
   return `${prefix}-${Math.random().toString(36).slice(2, 8)}${Date.now().toString(36).slice(-3)}`;
 }
 
-/** Fields of the context that some outputs need, mapped to a short reason. */
-export function missingContext(ctx: Ctx, intents: Intent[]): string[] {
+/** Fields of the context that some outputs need, mapped to a short reason. The Gemini Enterprise app isn't one: the
+ *  generated code doesn't register agents with an app (the Terraform bundle only records it, as an informational
+ *  variable). */
+export function missingContext(ctx: Ctx, _intents: Intent[]): string[] {
   const out: string[] = [];
   if (!ctx.project) out.push("Project ID is empty: commands use a placeholder.");
   if (!ctx.region) out.push("Region is empty: commands use a placeholder.");
-  if (intents.some((i) => i.kind === "bind_gateway" && i.gateway?.direction === "ingress") && !ctx.ge_app)
-    out.push("Gemini Enterprise app ID is not set: the ingress steps that register the agent with your Gemini Enterprise app use a GE_APP_ID placeholder.");
   return out;
 }

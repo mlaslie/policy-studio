@@ -74,7 +74,7 @@ export function ContextStep() {
             <input id="gwp" value={f.gateway_project ?? ""} onChange={(e) => setF({ ...f, gateway_project: e.target.value })} placeholder={f.project || "same as project"} autoComplete="off" spellCheck={false} />
           </Field>
           <div className="field-pair">
-            <Field id="geapp" label="Gemini Enterprise app (optional)" help="Used in generated commands that connect an agent to your Gemini Enterprise app.">
+            <Field id="geapp" label="Gemini Enterprise app (optional)" help="Shown on the policy map as the Gemini Enterprise client of ingress gateways; the generated code doesn't use it.">
               <input id="geapp" value={f.ge_app ?? ""} onChange={(e) => setF({ ...f, ge_app: e.target.value })} placeholder="e.g. helpdesk-app_1712345678" autoComplete="off" spellCheck={false} />
             </Field>
             <Field id="geloc" label="App location" help="Where the app lives.">

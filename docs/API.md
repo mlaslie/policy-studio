@@ -21,7 +21,8 @@ Every request carries the context as query params (GET) or a `context` object (P
 ```json
 {"project": "my-project", "region": "us-east4",
  "gateway_project": "",            // optional: project of the egress gateway / Agent Registry (defaults to project)
- "ge_app": "", "ge_location": "us" // optional: Gemini Enterprise app id + location (used in generated commands)
+ "ge_app": "", "ge_location": "us" // optional: Gemini Enterprise app id + location (informational: the policy map's
+                                   // Gemini Enterprise client, and Terraform variables; no command uses them)
 }
 ```
 
