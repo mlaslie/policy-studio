@@ -338,7 +338,7 @@ later check can compare.
 ## Permissions
 
 Read access: the Context step lists what your credentials can read (`testIamPermissions`) with the role and the
-command to grant it. Reading needs roughly: `roles/browser`, `roles/serviceusage.serviceUsageViewer`, `roles/networkservices.viewer`,
+command to grant it. Reading needs: `roles/browser`, `roles/serviceusage.serviceUsageViewer`, `roles/networkservices.viewer`,
 `roles/networksecurity.viewer`, `roles/aiplatform.viewer`, `roles/agentregistry.viewer`, `roles/modelarmor.viewer`,
 `roles/logging.viewer` (gateway request logs and the path labels) and an IAP role that can read IAM policies (`roles/iap.admin` includes
 it). Private networking reads `networkservices.agentConnectivityTemplates.get` / `list` (`roles/networkservices.viewer`)
@@ -346,8 +346,10 @@ and, optionally, `compute.networkAttachments.get` (`roles/compute.networkViewer`
 
 `deploy.sh` gives the Cloud Run service account exactly these read roles (plus a small custom role with the IAP
 `getIamPolicy` permissions, and `roles/serviceusage.serviceUsageConsumer`), not `roles/viewer`. This list replaced
-`roles/viewer` and still has to be checked against a live deployment (every Context step permission green, gateway logs
-and path labels readable).
+`roles/viewer` and was checked against a live deployment (2026-10-25): with only these roles, context, gateways,
+inventory (including every entry's access list), audit, Model Armor and gateway logs all load without errors. If an
+older deployment's service account still holds `roles/viewer` or write roles (`roles/iap.admin`, `roles/aiplatform.user`,
+`roles/networksecurity.editor`), remove them: the Cloud Run deployment is generate-only and never writes.
 
 Apply additionally needs `roles/iap.admin` (grants / revokes, on the Agent Registry project), `roles/aiplatform.user`
 (gateway binds) and `roles/networksecurity.editor` (Model Armor on/off); Model Armor setup also needs
