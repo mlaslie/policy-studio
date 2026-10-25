@@ -526,7 +526,8 @@ def with_staged(env: RenderEnv, intents: list[Intent]) -> RenderEnv:
     for it in intents:
         if it.kind == "registry_service" and it.params and not it.params.delete and it.params.service_id:
             services[it.params.service_id.strip()] = {"kind": it.params.kind or "endpoint",
-                                                      "tools": bool(it.params.tool_spec)}
+                                                      "tools": bool(it.params.tool_spec),
+                                                      "project": setup_project(it.params, env)}
     for it in intents:
         if it.is_delete or not it.params:
             continue
@@ -611,11 +612,16 @@ def _cond_flag(c: Optional[Condition]) -> list[str]:
     return []     # caller falls back to --condition-from-file
 
 
+def _gcloud_rid(sp: IamSpec) -> str:
+    """The entry id in gcloud flags: the looked-up shell variable for an entry created in this cart."""
+    return f'"${entry_var(sp.pending)}"' if sp.pending else sp.rid
+
+
 def gcloud_iam(sp: IamSpec, env: RenderEnv) -> str:
     if sp.op == "modify":
         return gcloud_modify(sp, env)
     verb = "add-iam-policy-binding" if sp.op == "add" else "remove-iam-policy-binding"
-    rid = f'"${entry_var(sp.pending)}"' if sp.pending else sp.rid
+    rid = _gcloud_rid(sp)
     flags = [f"gcloud iap web {verb}", f"--project={env.gw_project}", "--resource-type=agent-registry",
              f"--region={env.region}", *([f"{GCLOUD_FLAG[sp.kind]}={rid}"] if sp.kind in GCLOUD_FLAG else []),
              f"--member={shq(sp.member)}",
@@ -623,7 +629,7 @@ def gcloud_iam(sp: IamSpec, env: RenderEnv) -> str:
     cf = _cond_flag(sp.condition)
     pre = ""
     if sp.condition and not cf:
-        fname = f"condition-{sp.rid or 'registry'}.json"
+        fname = f"condition-{sp.pending or sp.rid or 'registry'}.json"
         pre = cat_file(fname, json.dumps({"title": sp.condition.title, "expression": sp.condition.expression},
                                          indent=2))
         cf = [f"--condition-from-file={fname}"]
@@ -717,13 +723,15 @@ JQ_ARGS = '--arg role "$ROLE" --arg member "$MEMBER" --arg title "$TITLE" --arg 
 
 def gcloud_modify(sp: IamSpec, env: RenderEnv) -> str:
     where = ["--resource-type=agent-registry", f"--region={env.region}",
-             *([f"{GCLOUD_FLAG[sp.kind]}={sp.rid}"] if sp.kind in GCLOUD_FLAG else []), f"--project={env.gw_project}"]
-    f = f"policy-{sp.rid or 'registry'}"
+             *([f"{GCLOUD_FLAG[sp.kind]}={_gcloud_rid(sp)}"] if sp.kind in GCLOUD_FLAG else []),
+             f"--project={env.gw_project}"]
+    f = f"policy-{sp.pending or sp.rid or 'registry'}"
+    pre = gcloud_entry_lookup(sp.pending, env) if sp.pending else ""
     if sp.multi:
         what = ("remove every old binding" if not sp.new_conditions else
                 "swap the old bindings for the new one" if len(sp.new_conditions) == 1 else
                 "swap the binding(s) for the old set")
-        return "\n".join([
+        return pre + "\n".join([
             *_many_vars(sp),
             "",
             f"# One read-modify-write: read the policy (with its etag), {what} with jq, write it back.",
@@ -731,7 +739,7 @@ def gcloud_modify(sp: IamSpec, env: RenderEnv) -> str:
             cont(["gcloud iap web get-iam-policy", *where, "--format=json"]) + f" > {f}.json",
             f"jq {JQ_MANY_ARGS} '" + JQ_MODIFY_MANY + f"' {f}.json > {f}-new.json",
             cont([f"gcloud iap web set-iam-policy {f}-new.json", *where])])
-    return "\n".join([
+    return pre + "\n".join([
         *_iam_vars(sp),
         "",
         "# One read-modify-write: read the policy (with its etag), swap the old binding for the new one with jq, write",
@@ -899,7 +907,8 @@ def python_iam_call(sp: IamSpec, env: Optional["RenderEnv"] = None) -> str:
     args = [py_str(sp.resource), py_str(sp.member)]
     if sp.pending and env is not None:
         prefix = sp.resource.rsplit("/", 1)[0] + "/"
-        args[0] = (f"{py_str(prefix)} + registry_entry_id({py_str(env.gw_project)}, {py_str(env.region)}, "
+        args[0] = (f"{py_str(prefix)} + registry_entry_id({py_str(pending_project(env, sp.pending))}, "
+                   f"{py_str(env.region)}, "
                    f"{py_str(sp.pending)})")
     if sp.op == "modify" and sp.multi:
         olds = "[" + ", ".join(py_str(o.expression) if o else "None" for o in sp.old_conditions) + "]"
@@ -2326,8 +2335,14 @@ def _lookup_loop(var: str, cmd: str) -> str:
             f'[ -n "${var}" ] || {{ echo "no registryResource yet: run this again" >&2; exit 1; }}\n')
 
 
+def pending_project(env: RenderEnv, service_id: str) -> str:
+    """The project of a Service a registry_service in this cart creates (its params.project; default: the gateway
+    project), where its entry id is looked up."""
+    return (env.staged_services.get(service_id) or {}).get("project") or env.gw_project
+
+
 def gcloud_entry_lookup(service_id: str, env: RenderEnv) -> str:
-    cmd = (f"gcloud agent-registry services describe {service_id} --project={env.gw_project} "
+    cmd = (f"gcloud agent-registry services describe {service_id} --project={pending_project(env, service_id)} "
            f"--location={env.region} --format='value(registryResource.basename())'")
     return (f"# The entry's id is assigned by Agent Registry when {service_id} is created: look it up (it can take a\n"
             "# few seconds after the create).\n" + _lookup_loop(entry_var(service_id), cmd))
@@ -2335,7 +2350,8 @@ def gcloud_entry_lookup(service_id: str, env: RenderEnv) -> str:
 
 def rest_entry_lookup(service_id: str, resource: str, env: RenderEnv) -> str:
     var = entry_var(service_id)
-    svc = f"{AGENTREGISTRY_V1}/projects/{env.gw_project}/locations/{env.region}/services/{service_id}"
+    svc = (f"{AGENTREGISTRY_V1}/projects/{pending_project(env, service_id)}/locations/{env.region}/services/"
+           f"{service_id}")
     prefix = "https://iap.googleapis.com/v1/" + resource.rsplit("/", 1)[0]
     cmd = (f'curl -sS --fail-with-body {shq(svc)} -H "Authorization: Bearer $TOKEN" '
            "| jq -r '(.registryResource // \"\") | split(\"/\") | last // \"\"'")
@@ -2453,7 +2469,9 @@ class _Rendered:
     rest_body: str
     gcloud_body: str
     tf_name: str
-    py_extra: str = ""             # helpers that build on py_helpers (modify), included once after them
+    # helpers that build on py_helpers (modify) or that a call needs besides them (registry_entry_id), each included
+    # once after them
+    py_extra: tuple[str, ...] = ()
 
 
 def _tf_name(intent: Intent, spec: Any) -> str:
@@ -2514,11 +2532,10 @@ def render_one(intent: Intent, env: RenderEnv, tf_name: Optional[str] = None) ->
     if k in ("grant", "revoke", "modify"):
         sp: Any = iam_spec(intent, env, warnings)
         name = tf_name or _tf_name(intent, sp)
-        extra = (PY_MODIFY_MANY_HELPER if intent.multi else PY_MODIFY_HELPER) if k == "modify" else ""
-        if sp.pending:
-            extra = PY_REGISTRY_HELPERS            # registry_entry_id()
+        extra = ((PY_REGISTRY_HELPERS,) if sp.pending else ()) + (     # registry_entry_id()
+            ((PY_MODIFY_MANY_HELPER if intent.multi else PY_MODIFY_HELPER),) if k == "modify" else ())
         r = _assemble(intent.id, k, intent_english(intent), iam_anatomy(sp), sp, gcloud_iam(sp, env),
-                      rest_iam(sp, env), PY_IAP_HELPERS + ("\n\n" + extra if extra else ""), python_iam_call(sp, env),
+                      rest_iam(sp, env), "\n\n".join((PY_IAP_HELPERS, *extra)), python_iam_call(sp, env),
                       tf_iam(sp, env, name, bundle=False), name, warnings)
         return replace(r, py_helpers=PY_IAP_HELPERS, py_extra=extra)
     if k in ("bind_gateway", "unbind_gateway"):
@@ -2702,7 +2719,7 @@ def bundle(env: RenderEnv, rendered: list[_Rendered]) -> Bundle:
         rest_parts.append(_section(i, n, r.item.english) + r.rest_body + "\n")
     helpers: list[str] = []
     for r in ordered:
-        for h in (r.py_helpers, r.py_extra):
+        for h in (r.py_helpers, *r.py_extra):
             if h and h not in helpers:
                 helpers.append(h)
     py = ('"""Generated by Policy Studio for project ' + env.project + ", region " + env.region

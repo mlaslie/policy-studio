@@ -131,6 +131,21 @@ describe("a modify of several bindings through the mock (?case=merge)", () => {
   });
 });
 
+describe("a modify on an entry registered in the same cart", () => {
+  const ctx = { project: "my-demo-project", region: "us-east4" };
+  it("looks the entry id up and uses the variable, like the backend's render", () => {
+    const base = { ...intentOf({ access_from: { mode: "all" }, access: { mode: "read_only_hint" } }), destination: { kind: "mcp_server" as const, id: "", name: "", label: "Notes MCP", pending_service: "notes-mcp" } };
+    const many = { ...base, id: "m2", access_from: undefined, access: undefined, access_from_list: [{ mode: "all" as const }, { mode: "read_only_hint" as const }], access_list: [{ mode: "read_only_hint" as const }] };
+    for (const m of [base, many]) {
+      const o = mockRender(ctx, world(ctx), [m]).items[0].outputs;
+      expect(o.gcloud).toContain('--mcp-server="$ENTRY_NOTES_MCP"');
+      expect(o.gcloud).toContain("services describe notes-mcp");
+      expect(o.rest).toContain("services describe notes-mcp");
+      expect(o.terraform).toContain("basename(google_agent_registry_service.registry_notes_mcp.registry_resource)");
+    }
+  });
+});
+
 describe("Context step permissions (the duplicate-key fix)", () => {
   it("the mock lists each permission once (the read-back purpose joins the existing read permission)", () => {
     Object.defineProperty(globalThis, "window", { value: { location: { search: "" } }, configurable: true });

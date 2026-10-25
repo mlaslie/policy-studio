@@ -211,6 +211,58 @@ def test_render_a2a_is_out_of_scope():
     assert item.error and "agent card" in item.error
 
 
+def modify_new(sid="notes-mcp", froms=({"mode": "all"},), tos=({"mode": "read_only_hint"},), iid="m"):
+    """Change access on an entry registered in the same cart (one binding -> one binding, or several)."""
+    g = grant_new(sid=sid, iid=iid)
+    g.pop("access")
+    if len(froms) == 1 and len(tos) == 1:
+        return {**g, "kind": "modify", "access_from": froms[0], "access": tos[0]}
+    return {**g, "kind": "modify", "access_from_list": list(froms), "access_list": list(tos)}
+
+
+@pytest.mark.parametrize("multi", [False, True])
+def test_render_modify_on_a_new_entry(multi):
+    """modify on a pending entry: every format looks the entry id up (no ENTRY_ID placeholder), and the Python
+    defines both registry_entry_id() and modify()/modify_many(), alone and in the bundle."""
+    env = RenderEnv(ctx=Context(project=F.P, region=F.R, project_number=F.N, gateway_project_number=F.N))
+    m = modify_new(froms=({"mode": "all"}, {"mode": "read_only_hint"}), tos=({"mode": "tools", "tools": ["a"]},)) \
+        if multi else modify_new()
+    res = render([Intent.model_validate(create()), Intent.model_validate(m)], env)
+    item = res.items[1]
+    assert not item.error, item.error
+    o = item.outputs
+    fn = "modify_many" if multi else "modify"
+    var = "ENTRY_NOTES_MCP"
+    assert "ENTRY_ID" not in o.gcloud and f'--mcp-server="${var}"' in o.gcloud
+    assert o.gcloud.index("services describe notes-mcp") < o.gcloud.index("get-iam-policy")
+    assert f'RESOURCE="https://iap.googleapis.com/v1/projects/{F.N}/locations/{F.R}/iap_web/agentRegistry/' \
+           f'mcpServers/${{{var}}}"' in o.rest
+    assert "registry_resource" in o.terraform and "ENTRY_ID" not in o.terraform
+    for py in (o.python, res.bundle.python):
+        code = compile(py, "<python>", "exec")
+        names = set(code.co_names)
+        assert {fn, "registry_entry_id"} <= names
+        assert f"def {fn}(" in py and "def registry_entry_id(" in py and "def _get_policy(" in py
+        assert py.count("def registry_entry_id(") == 1 and py.count(f"def {fn}(") == 1
+    assert "registry_entry_id(" in o.python.split(f"{fn}(\n")[-1]
+    check_syntax(o.model_dump())
+    for text in (res.bundle.gcloud, res.bundle.rest):
+        assert "ENTRY_ID" not in text.replace("ENTRY_NOTES_MCP", "")
+        assert subprocess.run(["bash", "-n"], input=text, text=True).returncode == 0
+
+
+def test_render_pending_lookup_uses_the_service_project():
+    """A registry_service created in its own project (params.project): the entry id is looked up there."""
+    env = RenderEnv(ctx=Context(project=F.P, region=F.R, project_number=F.N, gateway_project_number=F.N))
+    res = render([Intent.model_validate(create(project="other-proj")), Intent.model_validate(grant_new()),
+                  Intent.model_validate(modify_new(iid="m"))], env)
+    for item in res.items[1:]:
+        o = item.outputs
+        assert "services describe notes-mcp --project=other-proj" in o.gcloud
+        assert "/projects/other-proj/locations/" in o.rest
+        assert 'registry_entry_id("other-proj"' in o.python
+
+
 # ====================================================================== preflight
 @pytest.mark.parametrize("intent,why", [
     (create(urls=["https://tickets.example.com/mcp/"]), "Duplicate: https://tickets.example.com/mcp/ is already "

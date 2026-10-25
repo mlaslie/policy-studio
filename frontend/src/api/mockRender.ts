@@ -36,6 +36,24 @@ const lookupLines = (ctx: Ctx, sid: string) => [
   `${entryVar(sid)}="$(gcloud agent-registry services describe ${sid} --project=${ctx.gateway_project || ctx.project} --location=${ctx.region} --format='value(registryResource.basename())')"`,
 ];
 
+/** The entry id in gcloud flags and Terraform: the looked-up variable / the registry_service block's entry for an entry
+ *  created in this cart (as the backend's render). */
+const gcloudId = (d: NonNullable<Intent["destination"]>) => (d.pending_service ? '"$' + entryVar(d.pending_service) + '"' : d.id);
+const tfId = (d: NonNullable<Intent["destination"]>) =>
+  d.pending_service ? `basename(google_agent_registry_service.${ident(`registry_${d.pending_service}`)}.registry_resource)` : hcl(d.id);
+
+/** Puts the entry lookup after the header line of the gcloud and REST outputs (an entry created in this cart). */
+function withLookup(ctx: Ctx, i: Intent, o: Outputs): Outputs {
+  const sid = i.destination?.pending_service;
+  if (!sid) return o;
+  const look = lookupLines(ctx, sid).join("\n") + "\n";
+  const put = (t: string) => {
+    const n = t.indexOf("\n");
+    return t.slice(0, n + 1) + look + t.slice(n + 1);
+  };
+  return { ...o, gcloud: put(o.gcloud), rest: put(o.rest) };
+}
+
 function grantOutputs(ctx: Ctx, i: Intent, revoke: boolean): { outputs: Outputs; warnings: string[]; notes: string[] } {
   const d = i.destination!;
   const member = i.source!.principal;
@@ -257,7 +275,7 @@ function modifyOutputs(ctx: Ctx, i: Intent): { outputs: Outputs; warnings: strin
   const name = ident(`${i.source!.label}_${d.label}`);
   const res = iapResource(ctx, i);
   const head = `# ${intentEnglish(i)}`;
-  const where = [`  --resource-type=agent-registry \\`, ...(gFlag ? [`  --${gFlag}=${d.id} \\`] : []), `  --region=${ctx.region} \\`, `  --project=${ctx.project}`];
+  const where = [`  --resource-type=agent-registry \\`, ...(gFlag ? [`  --${gFlag}=${gcloudId(d)} \\`] : []), `  --region=${ctx.region} \\`, `  --project=${ctx.project}`];
   const jq = [
     `jq --arg role ${ROLE} --arg member ${sq(member)} --arg from ${sq(from?.expression ?? "")} --arg expr ${sq(cond?.expression ?? "")} --arg title ${sq(cond?.title ?? "")} '`,
     `  .version = 3 | .bindings = ([(.bindings // [])[] | if .role == $role and ((.condition.expression // "") == $from) then .members -= [$member] else . end | select(.members | length > 0)]`,
@@ -267,7 +285,7 @@ function modifyOutputs(ctx: Ctx, i: Intent): { outputs: Outputs; warnings: strin
   const block = (c: typeof cond, lifecycle: boolean) =>
     [
       `resource "${tfType}" "${name}" {`,
-      ...([["project", "var.project_id"], ["location", "var.region"], ...(tfKey ? [[tfKey, hcl(d.id)]] : []), ["role", `"${ROLE}"`], ["member", hcl(member)]] as const).map(([k, v]) => `  ${k.padEnd(pad)} = ${v}`),
+      ...([["project", "var.project_id"], ["location", "var.region"], ...(tfKey ? [[tfKey, tfId(d)]] : []), ["role", `"${ROLE}"`], ["member", hcl(member)]] as const).map(([k, v]) => `  ${k.padEnd(pad)} = ${v}`),
       ...(c ? [`  condition {`, `    title      = ${hcl(c.title)}`, `    expression = ${hcl(c.expression)}`, `  }`] : []),
       ...(lifecycle ? [`  lifecycle {`, `    create_before_destroy = true`, `  }`] : []),
       `}`,
@@ -307,7 +325,7 @@ function modifyOutputs(ctx: Ctx, i: Intent): { outputs: Outputs; warnings: strin
   ].join("\n");
   const notes = [`change: replaces the binding whose condition is ${from?.expression ?? "none (unconditional)"}, in the same setIamPolicy as the new one.`];
   const warn = modifyWarning(i);
-  return { outputs: { terraform, gcloud, rest, python }, warnings: warn ? [warn] : [], notes };
+  return { outputs: withLookup(ctx, i, { terraform, gcloud, rest, python }), warnings: warn ? [warn] : [], notes };
 }
 
 /** A modify of several bindings, like the backend's render: one jq filter with $froms / $tos (--argjson), every old
@@ -321,7 +339,7 @@ function modifyManyOutputs(ctx: Ctx, i: Intent): { outputs: Outputs; warnings: s
   const name = ident(`${i.source!.label}_${d.label}`);
   const res = iapResource(ctx, i);
   const head = `# ${intentEnglish(i)}`;
-  const where = [`  --resource-type=agent-registry \\`, ...(gFlag ? [`  --${gFlag}=${d.id} \\`] : []), `  --region=${ctx.region} \\`, `  --project=${ctx.project}`];
+  const where = [`  --resource-type=agent-registry \\`, ...(gFlag ? [`  --${gFlag}=${gcloudId(d)} \\`] : []), `  --region=${ctx.region} \\`, `  --project=${ctx.project}`];
   const fromsJson = JSON.stringify(froms.map((c) => c?.expression ?? ""));
   const tosJson = JSON.stringify(tos.map((c) => ({ title: c?.title ?? "", expression: c?.expression ?? "" })));
   const jq = [
@@ -333,7 +351,7 @@ function modifyManyOutputs(ctx: Ctx, i: Intent): { outputs: Outputs; warnings: s
   const block = (c: (typeof froms)[number], n: string, lifecycle: boolean) =>
     [
       `resource "${tfType}" "${n}" {`,
-      ...([["project", "var.project_id"], ["location", "var.region"], ...(tfKey ? [[tfKey, hcl(d.id)]] : []), ["role", `"${ROLE}"`], ["member", hcl(member)]] as const).map(([k, v]) => `  ${k.padEnd(pad)} = ${v}`),
+      ...([["project", "var.project_id"], ["location", "var.region"], ...(tfKey ? [[tfKey, tfId(d)]] : []), ["role", `"${ROLE}"`], ["member", hcl(member)]] as const).map(([k, v]) => `  ${k.padEnd(pad)} = ${v}`),
       ...(c ? [`  condition {`, `    title      = ${hcl(c.title)}`, `    expression = ${hcl(c.expression)}`, `  }`] : []),
       ...(lifecycle ? [`  lifecycle {`, `    create_before_destroy = true`, `  }`] : []),
       `}`,
@@ -374,7 +392,7 @@ function modifyManyOutputs(ctx: Ctx, i: Intent): { outputs: Outputs; warnings: s
   const was = froms.map((c) => c?.expression ?? "none (unconditional)").join("; ");
   const notes = [tos.length ? `change: replaces ${froms.length} bindings (${was}) with one in the same setIamPolicy.` : `remove all: removes the member from all ${froms.length} of these bindings (${was}) in one setIamPolicy.`];
   const warn = modifyWarning(i);
-  return { outputs: { terraform, gcloud, rest, python }, warnings: warn ? [warn] : [], notes };
+  return { outputs: withLookup(ctx, i, { terraform, gcloud, rest, python }), warnings: warn ? [warn] : [], notes };
 }
 
 /** A modify on one resource's bindings, like the backend's apply.modify_binding: the member's binding with exactly
