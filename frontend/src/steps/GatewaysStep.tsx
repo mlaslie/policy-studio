@@ -340,8 +340,8 @@ function WouldDeny({ gw }: { gw: Gateway }) {
         )}
       </div>
       <p className="tiny muted wd-caveat">
-        Google logs these calls as allowed: in dry run the request log doesn't say what IAP would have denied. Policy Studio computes it from each caller's <b>current</b> roles/iap.egressor grants on the destination (not
-        project-level ones), and the caller is inferred, since the log doesn't name it.
+        Google logs these calls as allowed: in dry run the request log doesn't say what IAP would have denied. Policy Studio computes it from each caller's <b>current</b> roles/iap.egressor grants on the destination and the
+        whole Agent Registry, and the caller is inferred, since the log doesn't name it. Grants on the project, folder or organization aren't read, so a call with no grant here is listed under "couldn't be checked" (one of those could allow it), not as a denial.
       </p>
       {err ? (
         <p className="small field-error">

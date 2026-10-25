@@ -262,7 +262,12 @@ grants before enforcing them. A dry-run gateway shows an amber banner, and the a
 in dry run the request log shows those calls exactly like allowed ones (status 200, IAP result `ALLOWED`). Policy
 Studio computes them from each caller's current `roles/iap.egressor` grants on the destination (registry-wide and
 "all agents in project" grants count; `toolName in [...]` and read-only-hint conditions are evaluated; anything it
-can't evaluate is shown as "couldn't be checked", never as a denial; project-level grants aren't read). The log
+can't evaluate is shown as "couldn't be checked", never as a denial). Grants on the project, folder or organization
+aren't read, and IAP counts them too. So a call is listed as **would have been denied** only when the caller has a
+grant on the destination or the whole Agent Registry whose condition doesn't cover the call (someone limited its
+access there; only a broader grant higher up could still let it through, and the reason says so). A call with no grant
+on the destination or the registry at all is listed under "couldn't be checked", since a higher-level grant could
+allow it. The log
 doesn't name the caller either: it's matched by the agent's mTLS client certificate (seen on its own Agent Runtime
 calls through the gateway), or is the only agent bound to the gateway. The agent runtime's own platform calls
 (`aiplatform*.googleapis.com`, IP-literal hosts such as `240.0.0.2:443`) are counted as "platform calls", not as

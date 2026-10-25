@@ -356,7 +356,10 @@ GatewayLogs = { gateway, since /* RFC 3339 */, filter, console_url, notes: [str]
   //            toolName in [...] and the read-only-hint form are evaluated (the tool from mcpInfo.parameter on
   //            tools/call, '' otherwise); other conditions, tools missing from the inventory, group / domain members,
   //            unreadable IAP policies and destinations outside the inventory give "unknown", never would_deny.
-  //            Project-level (and higher) grants aren't read.
+  //            Project-level (and higher) grants aren't read, so: no grant on the destination or registry-wide ->
+  //            "unknown" (a higher grant could allow it); a grant there whose condition doesn't cover the call ->
+  //            would_deny (definite for the grants read; the reason says a grant above the registry could still
+  //            allow it).
   // Platform traffic (seen live): much of an egress gateway's log is the agent runtime's own calls, e.g. to
   //   <region>-aiplatform.mtls.googleapis.com (registered in Agent Registry as an endpoint, so it has an
   //   agentRegistryResource) and to 240.0.0.2:443 (an internal platform address, none). platform: true when the

@@ -574,21 +574,24 @@ def test_would_deny_grants_and_conditions(inv):
     # unconditional grant on the MCP server
     d, why = check(entry(tool="delete_ticket"), hr, inv)
     assert d == "allowed" and why == "HR Assistant holds roles/iap.egressor on Tickets MCP."
-    # no grant at all
+    # no grant at all (on the entry or the registry): unknown, since grants above the registry aren't read
     d, why = check(entry(resource="agents/agentregistry-rt1", method=None), hr, inv)
-    assert d == "would_deny" and "holds no roles/iap.egressor grant on HR Assistant" in why
+    assert d == "unknown" and why == ("HR Assistant holds no roles/iap.egressor grant on HR Assistant or the whole "
+                                      "Agent Registry; grants above the registry (project, folder, organization) "
+                                      "aren't read, so this may still be allowed.")
     # allUsers on the KB agent
     assert check(entry(resource="agents/agentregistry-aaa", method=None), caller("555"), inv)[0] == "allowed"
     # "all agents in project": same project number allowed, another project's agent not
     d, why = check(entry(tool="lookup", resource="mcpServers/agentregistry-ro"), caller("222"), inv)
     assert d == "allowed" and "through All agents in project" in why
     assert check(entry(tool="lookup", resource="mcpServers/agentregistry-ro"), caller("222", number="9999"),
-                 inv)[0] == "would_deny"
+                 inv)[0] == "unknown"
     # read-only-hint condition (principal 999): read-only tool yes, destructive no, unknown tool unknown, setup yes
     ro = caller("999")
     assert check(entry(tool="list_tickets"), ro, inv)[0] == "allowed"
     d, why = check(entry(tool="delete_ticket"), ro, inv)
     assert d == "would_deny" and "is limited (ro)" in why and "doesn't cover delete_ticket" in why
+    assert "unless a grant above the Agent Registry allows it" in why       # limited: definite for the grants read
     d, why = check(entry(tool="brand_new_tool"), ro, inv)
     assert d == "unknown" and "can't be evaluated" in why
     assert check(entry(method="tools/list"), ro, inv)[0] == "allowed"
@@ -629,11 +632,12 @@ def test_gateway_logs_endpoint(read_client):
     rest.log_entries = [entry(tool="delete_ticket"), entry(resource="agents/agentregistry-rt1", method=None),
                         entry(403, "DENIED", "close_ticket"), entry(resource=None, method=None)]
     r = c.get("/api/studio/gateway-logs", params={**Q, "gateway": "corp-out", "since": "24h", "limit": 50}).json()
-    assert r["counts"] == {"allowed": 1, "denied": 1, "would_deny": 1, "unknown": 1, "platform": 0}, r["entries"]
-    assert [e["decision"] for e in r["entries"]] == ["allowed", "would_deny", "denied", "unknown"]
+    assert r["counts"] == {"allowed": 1, "denied": 1, "would_deny": 0, "unknown": 2, "platform": 0}, r["entries"]
+    assert [e["decision"] for e in r["entries"]] == ["allowed", "unknown", "denied", "unknown"]
     assert [e["computed"] for e in r["entries"]] == [True, True, False, True]
     wd = r["entries"][1]
     assert wd["reason"].startswith("HR Assistant holds no roles/iap.egressor grant")
+    assert "grants above the registry" in wd["reason"]
     assert wd["agent"] == "HR Assistant" and wd["agent_inferred"] is True
     assert wd["caller"] == {"engine": F.E1, "display_name": "HR Assistant", "how": "only_bound_agent"}
     assert r["entries"][2]["reason"] is None and r["dry_run"] is True
@@ -693,7 +697,7 @@ def test_gateway_logs_caller_by_client_cert(read_client, monkeypatch):
     r = c.get("/api/studio/gateway-logs", params={**Q, "gateway": "corp-out"}).json()
     hr, pricing, stranger = r["entries"]
     assert hr["decision"] == "allowed" and hr["caller"]["how"] == "mtls" and hr["agent"] == "HR Assistant"
-    assert pricing["decision"] == "would_deny" and pricing["agent"] == "Pricing Analyst"
+    assert pricing["decision"] == "unknown" and pricing["agent"] == "Pricing Analyst"
     assert "Pricing Analyst holds no roles/iap.egressor grant on Tickets MCP" in pricing["reason"]
     assert stranger["decision"] == "unknown" and stranger["agent"] is None and stranger["caller"] is None
     main, callers = rest.log_requests
@@ -749,7 +753,7 @@ def test_would_deny_platform(inv):
 
 def test_gateway_logs_platform_and_window_coverage(read_client):
     """Dry run, limit 3: the newest entries are platform calls, so a second query without the platform hosts adds
-    the older would-deny entry; platform calls aren't unknown."""
+    the older entry (no grant: unknown); platform calls aren't unknown."""
     c, rest = read_client
     plat = [entry(resource=None, method=None, host="240.0.0.2:443", ts=f"2026-10-09T14:5{i}:00Z", iid=f"ip{i}")
             for i in range(3)]
@@ -759,8 +763,8 @@ def test_gateway_logs_platform_and_window_coverage(read_client):
     rest.log_entries = plat[::-1] + aip[::-1] + [old]
     r = c.get("/api/studio/gateway-logs", params={**Q, "gateway": "corp-out", "limit": 3}).json()
     assert [e["insert_id"] for e in r["entries"]] == ["ip2", "ip1", "ip0", "old"]
-    assert [e["decision"] for e in r["entries"]] == ["platform"] * 3 + ["would_deny"]
-    assert r["counts"] == {"allowed": 0, "denied": 0, "would_deny": 1, "unknown": 0, "platform": 3}
+    assert [e["decision"] for e in r["entries"]] == ["platform"] * 3 + ["unknown"]
+    assert r["counts"] == {"allowed": 0, "denied": 0, "would_deny": 0, "unknown": 1, "platform": 3}
     assert r["truncated"] is True and r["checked_truncated"] is False
     assert any("every non-platform entry of the window was checked" in n for n in r["notes"])
     main, second = rest.log_requests
@@ -777,7 +781,7 @@ def test_gateway_logs_platform_and_window_coverage(read_client):
         r = c.get("/api/studio/gateway-logs", params={**Q, "gateway": "corp-out", "limit": 3, "refresh": 1}).json()
     finally:
         logs_mod.CHECK_CAP = orig
-    assert r["truncated"] is True and r["checked_truncated"] is True and r["counts"]["would_deny"] == 5
+    assert r["truncated"] is True and r["checked_truncated"] is True and r["counts"]["unknown"] == 5
     assert any("may be missing" in n for n in r["notes"])
 
 

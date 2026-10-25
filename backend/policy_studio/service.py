@@ -447,8 +447,9 @@ def gateway_logs_view(ctx: Context, gateway: str, since: str = "24h", limit: int
         if dry:
             notes.append("In dry run Google logs every call as allowed (status 200, IAP result ALLOWED), including "
                          "the ones IAP would deny. Would-be-denied is computed by Policy Studio from the caller's "
-                         "current roles/iap.egressor grants on the destination, not reported by Google. Grants on "
-                         "the project or above aren't counted; a condition it can't evaluate gives unknown.")
+                         "current roles/iap.egressor grants on the destination and the whole Agent Registry, not "
+                         "reported by Google. Grants on the project or above aren't read, so a call with no grant "
+                         "here gives unknown (one of those could allow it), as does a condition it can't evaluate.")
         n_platform = sum(1 for e in out["entries"] if e["platform"])
         if n_platform:
             notes.append(f"{n_platform} of the entries are platform traffic (the agent runtime's own calls: "

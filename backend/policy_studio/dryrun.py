@@ -19,7 +19,13 @@ each allowed entry Policy Studio works out the answer itself:
                literal such as 240.0.0.2:443, *.google.internal, *.googleapis.com) is "platform": the agent runtime's
                own calls, which no roles/iap.egressor grant names, so they're neither checked nor "unknown". Platform
                hosts that are registered (an aiplatform endpoint) are checked like any destination.
-Grants above the Agent Registry (project, folder, organization) aren't read.
+Grants above the Agent Registry (project, folder, organization) aren't read, and IAP adds them to the ones read here
+(IAM policies are inherited down the resource hierarchy). So:
+  would_deny   the caller holds a grant on the destination or on the whole Agent Registry, but its condition doesn't
+               cover this call ("limited"). Definite for the grants read: someone scoped this caller's access here,
+               so only a grant above the registry could still allow it (one that would undo that scoping).
+  unknown      the caller holds no grant on the destination or on the whole Agent Registry. A grant above the registry
+               could allow the call, and isn't read, so it isn't shown as a denial (it's listed with a reason).
 """
 from __future__ import annotations
 
@@ -143,5 +149,8 @@ def check(entry: dict[str, Any], caller: Optional[Caller], inv: Optional[Invento
     what = f"{entry.get('mcp_tool')}" if entry.get("mcp_method") == "tools/call" and entry.get("mcp_tool") else ""
     if limited:
         return "would_deny", (f"{who}'s roles/iap.egressor grant on {dest} is limited ({'; '.join(x for x in limited if x)})"
-                              + (f" and doesn't cover {what}." if what else " and doesn't cover this call."))
-    return "would_deny", f"{who} holds no roles/iap.egressor grant on {dest} (or on the whole Agent Registry)."
+                              + (f" and doesn't cover {what}" if what else " and doesn't cover this call")
+                              + " (unless a grant above the Agent Registry allows it: those aren't read).")
+    # Not would_deny: a grant above the registry (project, folder, organization) could allow it, and isn't read.
+    return "unknown", (f"{who} holds no roles/iap.egressor grant on {dest} or the whole Agent Registry; grants above "
+                       "the registry (project, folder, organization) aren't read, so this may still be allowed.")

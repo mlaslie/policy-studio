@@ -227,8 +227,10 @@ function isPlatformHost(host: string, registered: boolean): boolean {
 }
 
 /** Like dryrun.check in the backend: would the caller's current roles/iap.egressor grants on the destination allow
- *  this call? [decision, reason]. Conditions other than tools-by-name and read-only-by-hint give "unknown". */
-function mockCheck(w: World, caller: { display_name: string; principal: string } | null, destName: string, tool: string | null): ["allowed" | "would_deny" | "unknown", string] {
+ *  this call? [decision, reason]. Conditions other than tools-by-name and read-only-by-hint give "unknown"; "no_grant"
+ *  (no grant on the destination at all) is "unknown" in dry run, since grants above the registry aren't read, and a
+ *  403 on an enforcing gateway. */
+function mockCheck(w: World, caller: { display_name: string; principal: string } | null, destName: string, tool: string | null): ["allowed" | "would_deny" | "unknown" | "no_grant", string] {
   const inv = w.inventory;
   const item = [...inv.agents, ...inv.mcp_servers, ...inv.endpoints].find((x) => x.name === destName);
   const dest = item?.display_name ?? short(destName);
@@ -251,8 +253,8 @@ function mockCheck(w: World, caller: { display_name: string; principal: string }
     if (ok === null) return ["unknown", `The condition on ${caller.display_name}'s grant on ${dest} can't be evaluated here${cond}.`];
     limited.push(b.condition?.title ?? "");
   }
-  if (limited.length) return ["would_deny", `${caller.display_name}'s roles/iap.egressor grant on ${dest} is limited (${limited.join("; ")}) and doesn't cover ${tool ?? "this call"}.`];
-  return ["would_deny", `${caller.display_name} holds no roles/iap.egressor grant on ${dest} (or on the whole Agent Registry).`];
+  if (limited.length) return ["would_deny", `${caller.display_name}'s roles/iap.egressor grant on ${dest} is limited (${limited.join("; ")}) and doesn't cover ${tool ?? "this call"} (unless a grant above the Agent Registry allows it: those aren't read).`];
+  return ["no_grant", `${caller.display_name} holds no roles/iap.egressor grant on ${dest} or the whole Agent Registry; grants above the registry (project, folder, organization) aren't read, so this may still be allowed.`];
 }
 
 /** Mirrors GET /destination-paths (mockPaths.ts: a week of fake request log entries, aggregated like the backend). */
@@ -298,9 +300,9 @@ export function gatewayLogs(ctx: Ctx, gateway: string, since: string): GatewayLo
           const eng = who >= 0 ? engines[who] : engines.length === 1 ? engines[0] : null;
           const how = who >= 0 && engines.length > 1 ? ("mtls" as const) : ("only_bound_agent" as const);
           const platform = isPlatformHost(host, !!destName);
-          const [verdict, reason]: [GatewayLogEntry["decision"], string] =
+          const [verdict, reason]: [GatewayLogEntry["decision"] | "no_grant", string] =
             !destName && platform ? ["platform", `Platform traffic (${host}): the agent runtime's own call, with no Agent Registry resource, so no roles/iap.egressor grant applies. Not checked.`] : mockCheck(w, eng ?? null, destName, tool);
-          const decision: GatewayLogEntry["decision"] = dry ? verdict : verdict === "would_deny" ? "denied" : "allowed";
+          const decision: GatewayLogEntry["decision"] = dry ? (verdict === "no_grant" ? "unknown" : verdict) : verdict === "would_deny" || verdict === "no_grant" ? "denied" : "allowed";
           const ts = new Date(now - min * 60_000).toISOString();
           const insert = `mock${min}${decision}`;
           const logged = decision === "denied" ? "DENIED" : "ALLOWED";

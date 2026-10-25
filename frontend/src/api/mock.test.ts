@@ -10,7 +10,7 @@ import { changeIntent } from "../lib/existing";
 import { isDestructive } from "../lib/apply";
 import { ROLE, conditionFor } from "../lib/policy";
 import { grantToModify } from "../lib/grants";
-import { applyStream, audit, context, diff, inventory, preflight } from "./mock";
+import { applyStream, audit, context, diff, gatewayLogs, inventory, preflight } from "./mock";
 import { groupPerms } from "../steps/ContextStep";
 
 const RES = "projects/my-demo-project/locations/us-east4/mcpServers/tickets";
@@ -143,6 +143,19 @@ describe("a modify on an entry registered in the same cart", () => {
       expect(o.rest).toContain("services describe notes-mcp");
       expect(o.terraform).toContain("basename(google_agent_registry_service.registry_notes_mcp.registry_resource)");
     }
+  });
+});
+
+describe("dry-run would-deny, like the backend's dryrun.check", () => {
+  const ctx = { project: "my-demo-project", region: "us-east4" };
+  it("no grant on the destination or the registry is unknown (grants above it aren't read); a limited grant is would_deny", () => {
+    const r = gatewayLogs(ctx, "projects/my-demo-project/locations/us-east4/agentGateways/corp-egress", "24h");
+    const none = r.entries.find((e) => e.reason?.includes("holds no roles/iap.egressor grant"))!;
+    expect(none.decision).toBe("unknown");
+    expect(none.reason).toContain("grants above the registry (project, folder, organization) aren't read");
+    const limited = r.entries.filter((e) => e.decision === "would_deny");
+    expect(limited.length).toBeGreaterThan(0);
+    expect(limited.every((e) => e.reason?.includes("is limited"))).toBe(true);
   });
 });
 
